@@ -1,0 +1,13 @@
+[example]
+title = "ZDT2: a non-convex front"
+summary = "ZDT's second problem: front f2 = 1 - f1^2."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/zdt.py; Zitzler, Deb & Thiele (2000)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "zdt2_nsga2.toml" },
+]

@@ -1,0 +1,15 @@
+[example]
+title = "DTLZ2: three objectives"
+summary = "A spherical front (the unit sphere's octant) in three objectives; the figure is a parallel-coordinates plot."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/many/dtlz.py; Deb, Thiele, Laumanns & Zitzler (2002)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "dtlz2_nsga2.toml", title = "NSGA-II" },
+    { workflow = "optimization", config = "dtlz2_nsga3.toml", title = "NSGA-III" },
+    { workflow = "optimization", config = "dtlz2_moead.toml", title = "MOEA/D" },
+]

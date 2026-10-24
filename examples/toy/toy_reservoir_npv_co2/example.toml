@@ -1,0 +1,11 @@
+[example]
+title = "Toy reservoir: NPV against CO2 (eCalc)"
+summary = "NSGA-II trades NPV for the CO2 that Equinor's eCalc computes from the injection pumps' fuel: one simulation per member gives both objectives."
+source = "APEX's analytic toy reservoir (simulation/analytic.py) with an eCalc model (libecalc, the ecalc extra)"
+tags = ["toy", "multi-objective", "emissions"]
+cost = "seconds"
+requires = ["ecalc"]
+
+[[example.entries]]
+workflow = "optimization"
+config = "npv_co2_nsga2.toml"

@@ -1,0 +1,13 @@
+[example]
+title = "SCH: the simplest two-objective problem"
+summary = "One variable, a convex front for x in [0, 2]: the trade-off between x^2 and (x - 2)^2."
+source = "Schaffer (1985), in the form of Deb's 2001 book; not in pymoo 0.6.2, written from the paper"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "sch_nsga2.toml" },
+]

@@ -1,0 +1,49 @@
+{
+  "driver": "iterative",
+  "iteration": 2,
+  "damping": 0.25,
+  "misfit": 54.877862743732976,
+  "converged": false,
+  "checkpoint": "iter_2",
+  "current": "current_2",
+  "data_fingerprint": "9467321cc42dcbbd420f083eb2e3880259982b200ad16e6511b1ad1e5507bb1d",
+  "history_length": 3,
+  "random_streams": {
+    "prior": {
+      "bit_generator": "PCG64",
+      "state": {
+        "state": 46946005211326601157267116728447182902,
+        "inc": 173498997918796951896455970635602719927
+      },
+      "has_uint32": 0,
+      "uinteger": 0
+    },
+    "perturbations": {
+      "bit_generator": "PCG64",
+      "state": {
+        "state": 22578569609319878633841660044741145544,
+        "inc": 227311965345499304746812155136106620627
+      },
+      "has_uint32": 0,
+      "uinteger": 0
+    },
+    "analysis": {
+      "bit_generator": "PCG64",
+      "state": {
+        "state": 255314055344188420845615154614549184980,
+        "inc": 167062867126885364318413335322780014225
+      },
+      "has_uint32": 0,
+      "uinteger": 0
+    },
+    "localization": {
+      "bit_generator": "PCG64",
+      "state": {
+        "state": 162048763449062732850526294144841802549,
+        "inc": 234620211406248391447859494416112269297
+      },
+      "has_uint32": 0,
+      "uinteger": 1558585001
+    }
+  }
+}

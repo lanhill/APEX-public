@@ -1,0 +1,18 @@
+*.swp
+__pycache__/
+.venv/
+site/
+site-public/
+.benchmarks/
+.venv-pymoo/
+runs/
+# ...except the old drivers' run directories, which are test fixtures
+!tests/data/legacy_runs/*/runs/
+
+# Jupyter autosaves
+.ipynb_checkpoints/
+
+# mkdocs-jupyter build cache
+.cache/
+.venv-pet/
+.venv-pet-fork/

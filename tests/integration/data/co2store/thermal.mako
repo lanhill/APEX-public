@@ -1,0 +1,87 @@
+-- gas_water.mako as a thermal run, for APEX's tests: THERMAL, a rock heat
+-- capacity and conductivity, TEMPVD at 40 C, and CO2 injected at 20 C (WTEMP).
+RUNSPEC
+TITLE
+ APEX CO2STORE GAS-WATER
+DIMENS
+ 10 1 10 /
+EQLDIMS
+/
+TABDIMS
+/
+WATER
+GAS
+CO2STORE
+DISGASW
+METRIC
+THERMAL
+START
+ 1 'JAN' 2020 /
+WELLDIMS
+ 1 10 1 1 /
+UNIFOUT
+GRID
+INIT
+DX
+ 100*20 /
+DY
+ 100*20 /
+DZ
+ 100*5 /
+TOPS
+ 10*1000 /
+PORO
+ 100*0.3 /
+PERMX
+ 100*500 /
+PERMY
+ 100*500 /
+PERMZ
+ 100*100 /
+THCONR
+ 100*200 /
+PROPS
+ROCK
+ 100 1e-5 /
+SGFN
+ 0    0    0
+ 0.1  0    0
+ 1    1    0 /
+SWFN
+ 0    0    20
+ 0.2  0    10
+ 1    1    0 /
+SALINITY
+ 0.6 /
+SPECROCK
+ 0 2000
+ 500 2000 /
+SOLUTION
+EQUIL
+ 1000 100 900 0 900 0 /
+TEMPVD
+ 0    40
+ 2000 40 /
+RPTRST
+ BASIC=2 DEN /
+SUMMARY
+FPR
+FGIR
+SCHEDULE
+RPTRST
+ BASIC=2 DEN /
+WELSPECS
+ 'INJ' 'G' 1 1 1* 'GAS' /
+/
+COMPDAT
+ 'INJ' 1 1 8 10 'OPEN' 1* 1* 0.2 /
+/
+WCONINJE
+ 'INJ' 'GAS' 'OPEN' 'RATE' 20000 1* 300 /
+/
+WTEMP
+ 'INJ' 20 /
+/
+TSTEP
+ 4*90 /
+END

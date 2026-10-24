@@ -1,0 +1,14 @@
+[example]
+title = "TNK: a constrained, disconnected front"
+summary = "Tanaka's problem: the front lies on a wavy constraint boundary."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/tnk.py; Tanaka et al. (1995)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+    "constrained",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "tnk_nsga2.toml" },
+]

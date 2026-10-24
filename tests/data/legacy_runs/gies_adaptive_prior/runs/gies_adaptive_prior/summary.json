@@ -1,0 +1,31 @@
+{
+  "name": "gies_adaptive_prior",
+  "method": "gies",
+  "converged": false,
+  "complete": false,
+  "iterations": 2,
+  "prior_misfit_mean": 147.54717517040612,
+  "final_misfit_mean": 54.877862743732976,
+  "misfit_reduction": 0.6280656496449146,
+  "prior_metrics": {
+    "data_mismatch": {
+      "all": 17.558019988409935,
+      "y": 17.558019988409935
+    },
+    "rmse": {
+      "x": 1.007929426450884,
+      "all": 1.007929426450884
+    }
+  },
+  "final_metrics": {
+    "data_mismatch": {
+      "all": 6.5997863347891075,
+      "y": 6.5997863347891075
+    },
+    "rmse": {
+      "x": 0.5053091620935648,
+      "all": 0.5053091620935648
+    }
+  },
+  "final_members": 24
+}

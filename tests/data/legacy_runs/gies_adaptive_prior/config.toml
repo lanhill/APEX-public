@@ -1,0 +1,39 @@
+
+[run]
+name = "gies_adaptive_prior"
+seed = 2026
+
+[[state.variables]]
+name = "x"
+size = 3
+
+[prior]
+ensemble_size = 24
+generator = { name = "gaussian", options = { mean = 0.0, std = 1.0 } }
+
+[observations]
+file = "observations.csv"
+
+[case]
+truth_file = "truth.npz"
+
+[simulator]
+name = "linear"
+
+[simulator.options]
+forward_file = "forward.npz"
+variables = ["x"]
+outputs = [["t0", "y"], ["t1", "y"], ["t2", "y"], ["t3", "y"], ["t4", "y"], ["t5", "y"], ["t6", "y"], ["t7", "y"]]
+nonlinearity = "tanh"
+
+[execution]
+name = "serial"
+
+[method]
+name = "gies"
+strategy = { name = "rlmmac", options = { energy = 1.0 } }
+schedule = { misfit_tolerance = 1e-9 }
+max_iterations = 12
+localization = { name = "adaptive_prior", options = { taper = "soft" } }
+
+

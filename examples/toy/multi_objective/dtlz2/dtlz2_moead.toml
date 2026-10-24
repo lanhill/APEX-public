@@ -1,0 +1,35 @@
+# DTLZ2 (3 objectives) by MOEA/D: 28 weights, PBI decomposition.
+# Run: apex optimize dtlz2_moead.toml, then apex report runs/dtlz2_moead --plots
+
+[optimization]
+name = "dtlz2_moead"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+]
+lower = 0.0
+upper = 1.0
+
+[objective]
+name = "dtlz2"
+
+[optimizer]
+name = "moead"
+
+[optimizer.options]
+maxiter = 150
+transform = true

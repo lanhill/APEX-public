@@ -1,0 +1,35 @@
+# NPV against CO2 on the toy reservoir: one simulation per member gives both
+# objectives. eCalc computes the CO2 of the gas-fired injection pumps (ecalc/model.yaml) from
+# the simulated step rates; more injection sweeps more oil and emits more.
+# Needs the ecalc extra. Run: apex optimize npv_co2_nsga2.toml, then
+# apex report runs/npv_co2_nsga2 --plots
+
+[optimization]
+name = "npv_co2_nsga2"
+seed = 5
+
+[[controls.variables]]
+name = "inj"
+initial = [100.0, 100.0]
+lower = 1.0
+upper = 400.0
+
+[[objectives]]
+name = "npv"
+label = "npv"
+options = { start = "2000-01-01", times = ["2001-01-01", "2002-01-01", "2003-01-01"], wop = 1.0, wwi = 0.02, disc = 0.08, obj_scaling = -1000.0 }
+
+[[objectives]]
+name = "ecalc_emissions"
+label = "co2_tonnes"
+options = { start = "2000-01-01", times = ["2001-01-01", "2002-01-01", "2003-01-01"], ecalc_model_file = "ecalc/model.yaml" }
+
+[optimizer]
+name = "nsga2"
+options = { pop_size = 20, maxiter = 30, transform = true }
+
+[simulator]
+name = "toy_reservoir"
+
+[execution]
+name = "serial"

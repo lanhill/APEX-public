@@ -1,0 +1,17 @@
+# Trust region with the exact subproblem on the 4-control Rosenbrock function.
+#   uv run apex optimize examples/optimization/rosenbrock_trust_region.toml
+
+[optimization]
+name = "rosenbrock_trust_region"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [-1.2, 1.0, -0.5, 0.8]
+
+[objective]
+name = "rosenbrock"
+
+[optimizer]
+name = "trust_region"
+options = { maxiter = 100 }

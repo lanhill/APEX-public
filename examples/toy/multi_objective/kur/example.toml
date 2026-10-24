@@ -1,0 +1,13 @@
+[example]
+title = "KUR: a disconnected front"
+summary = "Kursawe's problem: three pieces of front, a test of keeping diversity across gaps."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/kursawe.py; Kursawe (1991)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "kur_nsga2.toml" },
+]

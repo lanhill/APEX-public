@@ -1,0 +1,139 @@
+# The public documentation: the pages marked `audience: public` only, selected by
+# tools/docs/public_only.py. Build: uv run mkdocs build --strict (with -f and this file's
+# name when it is not mkdocs.yml).
+site_name: APEX
+site_description: Agentic Platform for Ensemble eXploration
+site_dir: site-public
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+plugins:
+  - search
+  # Notebooks are shown with the outputs they were executed with; the docs
+  # build never runs them (the notebook test does).
+  - mkdocs-jupyter:
+      execute: false
+      include: ["*.ipynb"]
+      include_source: true
+hooks:
+  - tools/docs/public_only.py
+nav:
+  - Home: index.md
+  - Getting started:
+      - getting_started/web_ui.md
+      - getting_started/agents_cli.md
+      - getting_started/writing_a_plugin.md
+  - User guide:
+      - guide/index.md
+      - guide/cli/commands.md
+      - guide/assistant-tools.md
+      - guide/web-ui.md
+      - guide/notebooks/history_matching.ipynb
+      - guide/notebooks/optimization.ipynb
+      - guide/plugins/executors.md
+      - guide/plugins/methods.md
+      - guide/plugins/localizations.md
+      - guide/plugins/metrics.md
+      - guide/plugins/parameterizations.md
+      - guide/plugins/step_rules.md
+      - guide/plugins/stopping_rules.md
+      - guide/plugins/priors.md
+      - guide/plugins/update_strategies.md
+      - guide/plugins/damping_schemes.md
+      - guide/plugins/data_transforms.md
+      - guide/plugins/forecast_scores.md
+      - guide/plugins/gmac_constraint_metrics.md
+      - guide/plugins/gmac_norms.md
+      - guide/plugins/gmac_transforms.md
+      - guide/plugins/gmac_constraints.md
+      - guide/plugins/objectives.md
+      - guide/plugins/optimizers.md
+      - guide/plugins/response_objectives.md
+      - guide/cli/agent.md
+      - guide/plugins/simulators.md
+      - guide/cli/ert.md
+      - guide/cli/runs.md
+      - guide/cli/grant.md
+      - guide/agents.md
+      - guide/cli/service.md
+      - guide/cli/study.md
+      - guide/cli/tools.md
+      - guide/plugins/figure_presets.md
+      - guide/plugins/figures.md
+      - guide/plugins/model_error_models.md
+      - guide/plugins/avo_attributes.md
+      - guide/plugins/displacement_kernels.md
+      - guide/plugins/petro_elastic_models.md
+      - guide/plugins/reflectivity.md
+      - guide/cli/code.md
+      - guide/cli/jobs.md
+  - Reference:
+      - reference/agents.md
+      - reference/assistant-tools.md
+      - reference/cli/agent.md
+      - reference/cli/commands.md
+      - reference/cli/ert.md
+      - reference/cli/grant.md
+      - reference/cli/runs.md
+      - reference/cli/service.md
+      - reference/cli/study.md
+      - reference/cli/tools.md
+      - reference/configuration/history_match.md
+      - reference/configuration/optimization.md
+      - reference/configuration/optimization_study.md
+      - reference/configuration/prediction.md
+      - reference/configuration/service.md
+      - reference/configuration/study.md
+      - reference/plugins/damping_schemes.md
+      - reference/plugins/data_transforms.md
+      - reference/plugins/executors.md
+      - reference/plugins/forecast_scores.md
+      - reference/plugins/gmac_constraint_metrics.md
+      - reference/plugins/gmac_constraints.md
+      - reference/plugins/gmac_norms.md
+      - reference/plugins/gmac_transforms.md
+      - reference/plugins/localizations.md
+      - reference/plugins/methods.md
+      - reference/plugins/metrics.md
+      - reference/plugins/objectives.md
+      - reference/plugins/optimizers.md
+      - reference/plugins/parameterizations.md
+      - reference/plugins/priors.md
+      - reference/plugins/response_objectives.md
+      - reference/plugins/simulators.md
+      - reference/plugins/step_rules.md
+      - reference/plugins/stopping_rules.md
+      - reference/plugins/update_strategies.md
+      - reference/rest-api.md
+      - reference/cli/code.md
+      - reference/cli/jobs.md
+      - reference/plugins/avo_attributes.md
+      - reference/plugins/displacement_kernels.md
+      - reference/plugins/figure_presets.md
+      - reference/plugins/figures.md
+      - reference/plugins/model_error_models.md
+      - reference/plugins/petro_elastic_models.md
+      - reference/plugins/reflectivity.md
+  - PET migration: migration/pet_parity.md
+  - GMAC and the MATLAB scripts: migration/gmac.md
+  - pymoo ports (GA, PSO, NSGA): migration/pymoo.md
+  - Job service: service.md
+  - Tools for LLMs: tools.md
+  - REST API: api.md
+  - Web UI: ui.md
+  - Runtime agents: agents.md
+  - ERT: ert.md
+  - GMAC and C-GIES: gmac.md
+  - CHOP, hyper-parameters estimated as the run goes: chop.md
+  - MEC, model error characterization: mec.md
+  - Optimization: optimization.md
+  - Examples and toy problems: examples.md
+  - Run summaries: summaries.md
+  - Figures and the plotter: figures.md
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.arithmatex:
+      generic: true

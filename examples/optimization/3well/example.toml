@@ -1,0 +1,16 @@
+[example]
+title = "3well: NPV on OPM Flow"
+summary = "PET's three-well tutorial: EnOpt maximising NPV over injector and producer pressures."
+source = "PET's popt tutorial (3well)"
+tags = [
+    "reservoir",
+    "simulated",
+]
+cost = "minutes"
+requires = [
+    "reservoir",
+    "opm_flow",
+]
+entries = [
+    { workflow = "optimization", config = "enopt.toml" },
+]

@@ -1,0 +1,41 @@
+# DTLZ2 with 5 objectives by NSGA-II with the same population (20), for comparison: crowding loses its pressure with many objectives.
+# Run: apex optimize dtlz2_5_nsga2.toml, then apex report runs/dtlz2_5_nsga2 --plots
+
+[optimization]
+name = "dtlz2_5_nsga2"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+]
+lower = 0.0
+upper = 1.0
+
+[objective]
+name = "dtlz2"
+
+[objective.options]
+n_obj = 5
+
+[optimizer]
+name = "nsga2"
+
+[optimizer.options]
+pop_size = 20
+maxiter = 150
+transform = true

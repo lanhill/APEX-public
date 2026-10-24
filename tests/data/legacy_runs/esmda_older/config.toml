@@ -1,0 +1,37 @@
+
+[run]
+name = "esmda_older"
+seed = 2026
+
+[[state.variables]]
+name = "x"
+size = 3
+
+[prior]
+ensemble_size = 24
+generator = { name = "gaussian", options = { mean = 0.0, std = 1.0 } }
+
+[observations]
+file = "observations.csv"
+
+[case]
+truth_file = "truth.npz"
+
+[simulator]
+name = "linear"
+
+[simulator.options]
+forward_file = "forward.npz"
+variables = ["x"]
+outputs = [["t0", "y"], ["t1", "y"], ["t2", "y"], ["t3", "y"], ["t4", "y"], ["t5", "y"], ["t6", "y"], ["t7", "y"]]
+
+
+[execution]
+name = "serial"
+
+[method]
+name = "esmda"
+options = { inflation = [4, 4, 4, 4] }
+strategy = { name = "approx", options = { energy = 1.0 } }
+
+

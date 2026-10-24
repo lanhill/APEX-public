@@ -1,0 +1,14 @@
+[example]
+title = "Linear-Gaussian: an exact posterior"
+summary = "A linear model with Gaussian prior and data: ES-MDA's posterior can be checked against the Kalman solution."
+source = "APEX's linear simulator (simulation/analytic.py)"
+tags = [
+    "toy",
+    "analytic",
+]
+cost = "seconds"
+requires = []
+entries = [
+    { workflow = "history_matching", config = "config_esmda.toml", title = "ES-MDA" },
+    { workflow = "history_matching", config = "config_gies.toml", title = "GIES" },
+]

@@ -1,0 +1,14 @@
+[example]
+title = "ZDT1: a convex front"
+summary = "Zitzler, Deb and Thiele's first problem with 10 variables: front f2 = 1 - sqrt(f1)."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/zdt.py; Zitzler, Deb & Thiele (2000)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "zdt1_nsga2.toml", title = "NSGA-II" },
+    { workflow = "optimization", config = "zdt1_moead.toml", title = "MOEA/D" },
+]

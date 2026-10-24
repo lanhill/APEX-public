@@ -1,0 +1,33 @@
+[example]
+title = "3dBox AVO: production and seismic data on OPM Flow"
+summary = "The 3dBox AVO case: ES-MDA and GIES on the wells' rates and RMS maps of two angle stacks at two vintages, with the log-permeability and porosity uncertain."
+source = "The APEX authors' 3dBox AVO case, set up for PET's AVO simulator (GPL-3.0-or-later)"
+tags = [
+    "reservoir",
+    "geophysics",
+]
+cost = "hours"
+requires = [
+    "reservoir",
+    "opm_flow",
+]
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_esmda.toml"
+title = "ES-MDA with AVO maps"
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_gies.toml"
+title = "GIES with AVO maps"
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_esmda_noloc.toml"
+title = "ES-MDA without localization"
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_gies_noloc.toml"
+title = "GIES without localization"

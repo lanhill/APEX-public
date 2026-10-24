@@ -1,0 +1,68 @@
+# The 3dBox case, written by prepare.py: ES-MDA (4 steps) on the wells' rates, on OPM Flow; the
+# log-permeability and the porosity are uncertain.
+[run]
+name = "3dbox_production_esmda"
+seed = 2026
+
+[[state.variables]]
+name = "permx"   # ln PERMX (mD); the deck caps it at permx_cap
+size = 18000
+grid = [60, 60, 5]
+lower = -3.0     # bounds just outside the truth's -2.2 ... 6.9: members are clipped to them
+upper = 10.0
+
+[[state.variables]]
+name = "poro"
+size = 18000
+grid = [60, 60, 5]
+lower = 0.01
+upper = 0.4
+
+[prior]   # 100 members drawn by prepare.py: ln PERMX and a porosity correlated with it (0.7)
+generator = { name = "file", options = { ensemble_file = "prior_ensemble.npz" } }
+
+[observations]
+file = "observations.csv"
+
+[case]
+kind = "synthetic"
+truth_file = "truth.npz"
+
+[[metrics]]
+name = "normalized_data_mismatch"
+
+[[metrics]]
+name = "rmse"
+
+# 2-D SSIM per layer against the truth, with a fixed value range per variable (about the
+# truth's), so that the score is comparable across iterations and runs.
+[[metrics]]
+name = "ssim"
+label = "ssim_permx"
+options = { per_layer = true, win_size = 7, variables = ["permx"], data_range = 10.0 }
+
+[[metrics]]
+name = "ssim"
+label = "ssim_poro"
+options = { per_layer = true, win_size = 7, variables = ["poro"], data_range = 0.4 }
+
+[simulator]
+name = "opm_flow"
+
+[simulator.options]
+deck_template_file = "deck.mako"
+timeout_s = 600
+keep_files = false
+template_values = { permx_cap = 8.0 }   # ln PERMX cap in the deck (PET's is 6)
+
+[execution]
+name = "process"
+options = { workers = 10 }
+
+[method]
+name = "esmda"
+options = { inflation = [4, 4, 4, 4] }
+strategy = { name = "approx", options = { energy = 0.98 } }
+# Adaptive localization with the fixed threshold 3/sqrt(N) (0.3 at 100 members): without
+# it the ensemble collapses; the universal threshold keeps almost nothing here.
+localization = { name = "adaptive_prior", options = { threshold = "fixed" } }

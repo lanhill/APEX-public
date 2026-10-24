@@ -1,0 +1,23 @@
+# CO2 at 13 states from the NIST Chemistry WebBook (Thermophysical Properties of Fluid Systems,
+# https://webbook.nist.gov/chemistry/fluid/, CAS 124-38-9, which implements Span & Wagner 1996),
+# retrieved 2026-10-14 with the isotherm query (Digits=8): temperature K, pressure MPa, density kg/m3,
+# speed of sound m/s, NIST's phase label; the saturated rows are from its saturation table
+# (Type=SatT), the liquid's and the vapour's at one temperature.
+temperature_k,pressure_mpa,density,sound_speed,phase
+293.15000,5.0000000,140.64801,213.28749,vapor
+293.15000,10.000000,856.30985,478.83746,liquid
+298.15000,5.0000000,131.27477,220.79480,vapor
+298.15000,7.0000000,743.03069,320.36025,liquid
+298.15000,15.000000,876.47293,530.04136,liquid
+304.65000,7.5000000,561.43411,177.39840,supercritical
+304.65000,8.0000000,666.83771,262.92050,supercritical
+305.15000,7.6000000,557.50430,182.63207,supercritical
+310.15000,10.000000,683.40257,305.28229,supercritical
+310.15000,20.000000,855.49956,529.20790,supercritical
+333.15000,15.000000,604.09216,309.20150,supercritical
+373.15000,5.0000000,80.651404,280.43210,vapor
+373.15000,40.000000,756.67212,525.88349,supercritical
+298.18791,6.4398555,709.92471,273.71388,saturated liquid
+298.18791,6.4398555,243.20040,189.04954,saturated vapor
+303.10222,7.2058162,595.46301,178.83933,saturated liquid
+303.10222,7.2058162,343.09317,171.74647,saturated vapor

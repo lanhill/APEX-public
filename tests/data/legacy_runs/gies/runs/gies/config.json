@@ -1,0 +1,110 @@
+{
+  "run": {
+    "name": "gies",
+    "seed": 2026,
+    "output_dir": "@CASE@/runs/gies"
+  },
+  "state": {
+    "variables": [
+      {
+        "name": "x",
+        "size": 3,
+        "lower": null,
+        "upper": null,
+        "grid": null
+      }
+    ]
+  },
+  "prior": {
+    "ensemble_size": 24,
+    "generator": {
+      "name": "gaussian",
+      "options": {
+        "mean": 0.0,
+        "std": 1.0
+      }
+    },
+    "variables": {}
+  },
+  "observations": {
+    "file": "@CASE@/observations.csv",
+    "fields": []
+  },
+  "simulator": {
+    "name": "linear",
+    "options": {
+      "forward_file": "@CASE@/forward.npz",
+      "variables": [
+        "x"
+      ],
+      "outputs": [
+        [
+          "t0",
+          "y"
+        ],
+        [
+          "t1",
+          "y"
+        ],
+        [
+          "t2",
+          "y"
+        ],
+        [
+          "t3",
+          "y"
+        ],
+        [
+          "t4",
+          "y"
+        ],
+        [
+          "t5",
+          "y"
+        ],
+        [
+          "t6",
+          "y"
+        ],
+        [
+          "t7",
+          "y"
+        ]
+      ],
+      "nonlinearity": "tanh",
+      "fail_above": 2.0
+    }
+  },
+  "execution": {
+    "name": "serial",
+    "options": {}
+  },
+  "method": {
+    "name": "gies",
+    "options": {},
+    "strategy": {
+      "name": "rlmmac",
+      "options": {
+        "energy": 1.0
+      }
+    },
+    "localization": null,
+    "schedule": {
+      "misfit_tolerance": 1e-9
+    },
+    "max_iterations": 12
+  },
+  "failures": {
+    "min_success_fraction": 0.9
+  },
+  "data_transforms": [],
+  "output": {
+    "save_rejected_trials": false,
+    "save_raw_forecasts": false
+  },
+  "case": {
+    "kind": "synthetic",
+    "truth_file": "@CASE@/truth.npz"
+  },
+  "metrics": null
+}

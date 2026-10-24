@@ -1,0 +1,14 @@
+[example]
+title = "BNH: a constrained convex front"
+summary = "Binh and Korn's problem with two constraints: every front member must be feasible."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/bnh.py; Binh & Korn (1997)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+    "constrained",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "bnh_nsga2.toml" },
+]

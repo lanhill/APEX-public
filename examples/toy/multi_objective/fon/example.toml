@@ -1,0 +1,13 @@
+[example]
+title = "FON: a non-convex front"
+summary = "Three variables; the front is non-convex, so a weighted sum of the objectives cannot find its middle, NSGA-II can."
+source = "Fonseca & Fleming (1995), in the form of Deb's 2001 book; not in pymoo 0.6.2, written from the paper"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "fon_nsga2.toml" },
+]

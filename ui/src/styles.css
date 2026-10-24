@@ -1,0 +1,747 @@
+/* The palette of src/apex/reporting/plots.py; dark mode has its own steps. */
+:root {
+  --surface: #fcfcfb;
+  --panel: #f3f2ee;
+  --ink: #0b0b0b;
+  --secondary: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --accent: #2a78d6;
+  --prior: #eb6834;
+  --good: #1f7a3d;
+  --warning: #9a6700;
+  --critical: #b3261e;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #161614;
+    --panel: #22221f;
+    --ink: #f2f1ec;
+    --secondary: #c3c2b7;
+    --muted: #9c9a92;
+    --grid: #33332f;
+    --baseline: #55544e;
+    --accent: #5c9ce6;
+    --good: #5fbf7f;
+    --warning: #d9a53a;
+    --critical: #ef6b62;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+a {
+  color: var(--accent);
+}
+code,
+pre {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.92em;
+}
+h1 {
+  font-size: 1.4rem;
+  margin: 0;
+}
+h2 {
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.5rem;
+}
+h3 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+main {
+  padding: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+button {
+  font: inherit;
+  padding: 4px 12px;
+  border: 1px solid var(--baseline);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.danger {
+  border-color: var(--critical);
+  color: var(--critical);
+}
+.confirm {
+  border-left: 3px solid var(--critical);
+}
+h3.collapsible {
+  margin: 0;
+}
+h3.collapsible + table {
+  margin-top: 8px;
+}
+button.toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+button.toggle .chevron {
+  display: inline-block;
+  width: 1em;
+  color: var(--secondary);
+}
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 0;
+}
+input,
+select {
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--baseline);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  max-width: 100%;
+}
+
+nav.top {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--grid);
+  background: var(--panel);
+  flex-wrap: wrap;
+}
+nav.top a {
+  text-decoration: none;
+  color: var(--secondary);
+}
+nav.top a.current {
+  color: var(--ink);
+  font-weight: 600;
+}
+nav.top .brand {
+  font-weight: 700;
+  color: var(--ink);
+}
+.grow {
+  flex: 1;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.muted {
+  color: var(--muted);
+}
+.note {
+  color: var(--secondary);
+  border-left: 3px solid var(--baseline);
+  padding-left: 8px;
+}
+.error {
+  color: var(--critical);
+  border-left: 3px solid var(--critical);
+  padding: 4px 8px;
+  margin: 8px 0;
+}
+.error-text,
+.error-list {
+  color: var(--critical);
+}
+.card {
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 12px 0;
+}
+.scroll {
+  overflow-x: auto;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--grid);
+  vertical-align: top;
+}
+th {
+  color: var(--secondary);
+  font-weight: 600;
+}
+td.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+tr.selected td {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.badge {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--baseline);
+  font-size: 0.85em;
+  color: var(--secondary);
+}
+.state-running {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.state-complete {
+  color: var(--good);
+  border-color: var(--good);
+}
+.state-failed {
+  color: var(--critical);
+  border-color: var(--critical);
+}
+.state-stopped,
+.state-cancelled {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.tag {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--secondary);
+  font-size: 0.9em;
+}
+/* A run's annotations: one per line, so "a=1" and "b=2" never read as "a=1b=2". */
+ul.annotations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  color: var(--secondary);
+}
+ul.annotations li {
+  overflow-wrap: anywhere;
+}
+.id {
+  color: var(--secondary);
+}
+.live {
+  color: var(--accent);
+  font-size: 0.8em;
+  font-weight: normal;
+}
+dl.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 16px;
+  margin: 8px 0;
+}
+dl.facts dt {
+  color: var(--secondary);
+}
+dl.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.contents {
+  display: contents;
+}
+ul.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  list-style: none;
+  padding: 0;
+}
+ul.list {
+  padding-left: 1.2em;
+}
+ol.events {
+  list-style: none;
+  padding: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--grid);
+  border-radius: 4px;
+}
+ol.events li {
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--grid);
+  overflow-wrap: anywhere;
+}
+.level-warning {
+  color: var(--warning);
+}
+.level-error,
+.level-critical {
+  color: var(--critical);
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  gap: 16px;
+}
+figure.chart {
+  margin: 0;
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 8px;
+}
+figure.chart figcaption {
+  font-weight: 600;
+}
+figure.chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.tick {
+  font-size: 11px;
+  fill: var(--muted);
+}
+.axis-label {
+  font-size: 11px;
+  fill: var(--secondary);
+}
+.chart-readout {
+  font-size: 0.9em;
+  min-height: 1.5em;
+}
+.figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+}
+.figures figure {
+  margin: 0;
+}
+.figures img {
+  width: 100%;
+  background: #fff;
+  border-radius: 4px;
+}
+.figures figcaption {
+  font-size: 0.85em;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+.placeholder {
+  aspect-ratio: 4 / 3;
+  background: var(--grid);
+  border-radius: 4px;
+}
+pre.schema {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--surface);
+  padding: 8px;
+}
+
+.editor-page {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) 1fr;
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .editor-page {
+    grid-template-columns: 1fr;
+  }
+}
+.editor-main {
+  min-width: 0;
+}
+
+/* An optimization's objective chart: not wider than the run pages' charts in their grid. */
+.chart-card {
+  max-width: 760px;
+}
+/* Two-column tables (a control and its value): not stretched across a wide window. */
+.narrow-card {
+  max-width: 520px;
+}
+
+/* The Agents page: a card per agent. */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+  gap: 12px;
+}
+.agent-card {
+  margin: 0;
+}
+.agent-card h2 {
+  margin: 0 0 4px;
+  font-size: 1.15em;
+}
+.agent-card code {
+  overflow-wrap: anywhere;
+}
+
+/* The Plugins page: a tab per workflow, then a tab per plugin beside its details. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--grid);
+  margin-bottom: 16px;
+}
+.tabs .tab {
+  padding: 6px 12px;
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-radius: 6px 6px 0 0;
+  color: var(--secondary);
+  text-decoration: none;
+}
+.tabs .tab:hover {
+  color: var(--ink);
+}
+.tabs .tab.current {
+  color: var(--ink);
+  font-weight: 600;
+  background: var(--surface);
+  border-color: var(--grid) var(--grid) var(--surface);
+}
+.tabs .count {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.85em;
+}
+.plugin-browser {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 760px) {
+  /* One column: the chosen plugin first, so a tap on the list shows its details at once. */
+  .plugin-browser {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .plugin-details {
+    order: -1;
+  }
+}
+.plugin-list input[type="search"] {
+  width: 100%;
+  margin-bottom: 8px;
+}
+.plugin-list .registry {
+  margin-bottom: 8px;
+}
+.plugin-list h3.collapsible {
+  font-size: 0.95em;
+  padding: 4px 0;
+}
+.plugin-tab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 22px;
+  border-left: 3px solid transparent;
+  border-radius: 0 4px 4px 0;
+  color: var(--ink);
+  text-decoration: none;
+}
+.plugin-tab:hover {
+  background: var(--panel);
+}
+.plugin-tab.current {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-weight: 600;
+}
+.plugin-details {
+  margin-top: 0;
+  min-width: 0;
+}
+.plugin-details h2 {
+  margin: 0;
+}
+.tree h2 {
+  margin-top: 0;
+}
+.tree-list {
+  list-style: none;
+  padding-left: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.tree > .tree-list {
+  padding-left: 0;
+}
+.tree a.current {
+  font-weight: 600;
+  color: var(--ink);
+}
+.folder {
+  color: var(--ink) !important;
+  text-align: left;
+}
+h1.path {
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+.code {
+  border: 1px solid var(--baseline);
+  border-radius: 4px;
+  min-height: 300px;
+}
+.code .cm-editor {
+  max-height: 70vh;
+}
+.code .cm-scroller {
+  overflow: auto;
+}
+.approval pre {
+  background: var(--surface);
+  padding: 8px;
+  user-select: all;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.signin {
+  max-width: 440px;
+  margin: 10vh auto;
+}
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 12px 0;
+}
+.signin-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--secondary);
+  font-size: 0.95em;
+}
+.signin-form input:not([type="checkbox"]) {
+  width: 100%;
+  box-sizing: border-box;
+}
+.signin-form label.check {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--ink);
+}
+.signin-form label.check input {
+  margin-top: 0.25em;
+}
+.signin-form button {
+  align-self: flex-start;
+}
+.signin-form button.forget {
+  font-size: 0.9em;
+}
+.small {
+  font-size: 0.85em;
+}
+
+/* The assistant: a panel on the right, 45% of the window (480 to 860 px). Up to
+   1100 px it lies over the page instead of squeezing it, and takes the whole width on a phone. */
+:root {
+  --chat-width: clamp(480px, 45vw, 860px);
+}
+/* The top bar gives way too, so Sign out stays in sight while the panel is open. */
+main.with-chat,
+nav.top.with-chat {
+  margin-right: var(--chat-width);
+}
+@media (max-width: 1100px) {
+  main.with-chat,
+  nav.top.with-chat {
+    margin-right: 0;
+  }
+}
+aside.chat {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(var(--chat-width), 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--grid);
+  z-index: 10;
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--grid);
+  background: var(--panel);
+}
+.chat-head select {
+  max-width: 180px;
+}
+.chat-model {
+  font-size: 0.85em;
+}
+.chat-note {
+  margin: 0;
+  padding: 4px 12px;
+  font-size: 0.85em;
+  border-bottom: 1px solid var(--grid);
+}
+.chat-switch {
+  color: var(--warning);
+}
+.chat-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+.msg {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.msg p {
+  margin: 0 0 6px;
+}
+.msg-user {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  margin-left: 15%;
+}
+.msg-assistant {
+  background: var(--panel);
+  margin-right: 5%;
+}
+.msg pre {
+  white-space: pre-wrap;
+  background: var(--surface);
+  padding: 6px;
+  border-radius: 4px;
+}
+.msg ul,
+.msg ol {
+  margin: 0 0 6px;
+  padding-left: 1.2em;
+}
+.md-heading {
+  font-weight: 600;
+}
+.msg-meta {
+  font-size: 0.8em;
+}
+.chat-input {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--grid);
+}
+.chat-input textarea {
+  flex: 1;
+  font: inherit;
+  resize: vertical;
+  padding: 6px;
+  border: 1px solid var(--baseline);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+}
+/* A saved report in the editor: wraps like the chat's messages, never wider than the page. */
+.report {
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.report pre {
+  white-space: pre-wrap;
+  background: var(--surface);
+  padding: 6px;
+  border-radius: 4px;
+}
+.report ul,
+.report ol {
+  padding-left: 1.2em;
+}
+.welcome ul {
+  padding-left: 1.2em;
+}
+nav.top button.current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.proposal {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 12px;
+}
+.proposal p {
+  margin: 4px 0;
+}
+.proposal .assumptions ul {
+  margin: 0 0 6px;
+  padding-left: 1.2em;
+}
+.proposal .row {
+  align-items: center;
+}
+
+.agents .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.agent-result {
+  margin-top: 8px;
+  border-left: 3px solid var(--baseline);
+  padding-left: 8px;
+}
+
+/* The Examples page: a grid of cards, each with its copy buttons. */
+.example-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.example-card h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+.example-card .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+

@@ -1,0 +1,19 @@
+# FON: a non-convex front. Source: Fonseca & Fleming (1995), in the form of Deb's 2001 book; not in pymoo 0.6.2, written from the paper.
+# Run: apex optimize fon_nsga2.toml, then apex report runs/fon_nsga2 --plots
+
+[optimization]
+name = "fon_nsga2"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [0.0, 0.0, 0.0]
+lower = -4.0
+upper = 4.0
+
+[objective]
+name = "fon"
+
+[optimizer]
+name = "nsga2"
+options = { pop_size = 40, maxiter = 150, transform = true }

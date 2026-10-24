@@ -1,0 +1,13 @@
+[example]
+title = "ZDT3: five disconnected pieces"
+summary = "ZDT's third problem: a front in five pieces."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/zdt.py; Zitzler, Deb & Thiele (2000)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "zdt3_nsga2.toml" },
+]

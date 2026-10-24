@@ -1,0 +1,31 @@
+{
+  "name": "esmda",
+  "method": "esmda",
+  "converged": null,
+  "complete": false,
+  "iterations": 2,
+  "prior_misfit_mean": 210.93548148562195,
+  "final_misfit_mean": 23.424133739881086,
+  "misfit_reduction": 0.8889511922086102,
+  "prior_metrics": {
+    "data_mismatch": {
+      "all": 25.155001844891178,
+      "y": 25.155001844891178
+    },
+    "rmse": {
+      "x": 1.007929426450884,
+      "all": 1.007929426450884
+    }
+  },
+  "final_metrics": {
+    "data_mismatch": {
+      "all": 1.7141151804810173,
+      "y": 1.7141151804810173
+    },
+    "rmse": {
+      "x": 0.2510203470603833,
+      "all": 0.2510203470603833
+    }
+  },
+  "final_members": 24
+}

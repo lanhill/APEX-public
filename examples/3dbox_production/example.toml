@@ -1,0 +1,32 @@
+[example]
+title = "3dBox: production data on OPM Flow"
+summary = "The 3dBox case: ES-MDA and GIES on the wells' rates, with the log-permeability and porosity uncertain."
+source = "The APEX authors' 3dBox case, set up for PET (GPL-3.0-or-later)"
+tags = [
+    "reservoir",
+]
+cost = "hours"
+requires = [
+    "reservoir",
+    "opm_flow",
+]
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_esmda.toml"
+title = "ES-MDA with localization"
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_gies.toml"
+title = "GIES with localization"
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_esmda_noloc.toml"
+title = "ES-MDA without localization"
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_gies_noloc.toml"
+title = "GIES without localization"

@@ -1,0 +1,25 @@
+# BNH: a constrained convex front. Source: pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/bnh.py; Binh & Korn (1997).
+# Run: apex optimize bnh_nsga2.toml, then apex report runs/bnh_nsga2 --plots
+
+[optimization]
+name = "bnh_nsga2"
+seed = 1
+
+[[controls.variables]]
+name = "x1"
+initial = 2.5
+lower = 0.0
+upper = 5.0
+
+[[controls.variables]]
+name = "x2"
+initial = 1.5
+lower = 0.0
+upper = 3.0
+
+[objective]
+name = "bnh"
+
+[optimizer]
+name = "nsga2"
+options = { pop_size = 40, maxiter = 150, transform = true }

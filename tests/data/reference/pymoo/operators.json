@@ -1,0 +1,6 @@
+{
+ "pymoo": "0.6.2",
+ "pymoo_commit": "217af1554f864ab9358d88eb883091adb78cb44a",
+ "numpy": "2.5.3",
+ "python": "3.12.3"
+}

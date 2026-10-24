@@ -1,0 +1,33 @@
+# ZDT1 by MOEA/D: 20 weights, Tchebicheff decomposition.
+# Run: apex optimize zdt1_moead.toml, then apex report runs/zdt1_moead --plots
+
+[optimization]
+name = "zdt1_moead"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+]
+lower = 0.0
+upper = 1.0
+
+[objective]
+name = "zdt1"
+
+[optimizer]
+name = "moead"
+
+[optimizer.options]
+maxiter = 150
+transform = true

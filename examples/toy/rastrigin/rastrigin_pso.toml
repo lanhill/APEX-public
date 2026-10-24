@@ -1,0 +1,19 @@
+# Rastrigin's function (2 variables, many local minima, global 0 at 0) with pso.
+# Run: apex optimize rastrigin_pso.toml, then apex report runs/rastrigin_pso --plots
+
+[optimization]
+name = "rastrigin_pso"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [3.0, -2.5]
+lower = -5.12
+upper = 5.12
+
+[objective]
+name = "rastrigin"
+
+[optimizer]
+name = "pso"
+options = { maxiter = 200, transform = true }

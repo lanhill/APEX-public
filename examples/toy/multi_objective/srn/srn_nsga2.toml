@@ -1,0 +1,19 @@
+# SRN: a constrained front. Source: pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/srn.py; Srinivas & Deb (1994).
+# Run: apex optimize srn_nsga2.toml, then apex report runs/srn_nsga2 --plots
+
+[optimization]
+name = "srn_nsga2"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [0.0, 0.0]
+lower = -20.0
+upper = 20.0
+
+[objective]
+name = "srn"
+
+[optimizer]
+name = "nsga2"
+options = { pop_size = 40, maxiter = 150, transform = true }

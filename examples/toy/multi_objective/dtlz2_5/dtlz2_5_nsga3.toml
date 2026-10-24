@@ -1,0 +1,40 @@
+# DTLZ2 with 5 objectives by NSGA-III: two layers of reference directions (20), a population of 20.
+# Run: apex optimize dtlz2_5_nsga3.toml, then apex report runs/dtlz2_5_nsga3 --plots
+
+[optimization]
+name = "dtlz2_5_nsga3"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+]
+lower = 0.0
+upper = 1.0
+
+[objective]
+name = "dtlz2"
+
+[objective.options]
+n_obj = 5
+
+[optimizer]
+name = "nsga3"
+
+[optimizer.options]
+maxiter = 150
+transform = true

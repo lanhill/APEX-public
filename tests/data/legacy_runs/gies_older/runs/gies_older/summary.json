@@ -1,0 +1,31 @@
+{
+  "name": "gies_older",
+  "method": "gies",
+  "converged": false,
+  "complete": false,
+  "iterations": 5,
+  "prior_misfit_mean": 140.11581675767346,
+  "final_misfit_mean": 51.421864385248206,
+  "misfit_reduction": 0.6330045702536142,
+  "prior_metrics": {
+    "data_mismatch": {
+      "all": 16.651899417465025,
+      "y": 16.651899417465025
+    },
+    "rmse": {
+      "x": 0.9457679401337147,
+      "all": 0.9457679401337147
+    }
+  },
+  "final_metrics": {
+    "data_mismatch": {
+      "all": 6.21742420431078,
+      "y": 6.21742420431078
+    },
+    "rmse": {
+      "x": 0.602697862150628,
+      "all": 0.602697862150628
+    }
+  },
+  "final_members": 22
+}

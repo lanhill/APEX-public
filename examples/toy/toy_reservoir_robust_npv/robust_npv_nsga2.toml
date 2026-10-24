@@ -1,0 +1,40 @@
+# Robust optimization on the toy reservoir: every member is simulated on 5 model
+# realizations (a permeability each, realizations.npz). The same NPV is listed twice: its mean
+# over the realizations, and its standard deviation (the risk). One simulation per member and
+# realization gives both; more injection gains NPV on average and spreads it more.
+# Run: apex optimize robust_npv_nsga2.toml, then apex report runs/robust_npv_nsga2 --plots
+
+[optimization]
+name = "robust_npv_nsga2"
+seed = 5
+
+[[controls.variables]]
+name = "inj"
+initial = [100.0, 100.0]
+lower = 1.0
+upper = 400.0
+
+[model]
+realizations_file = "realizations.npz"
+
+[[objectives]]
+name = "npv"
+label = "npv_mean"
+statistic = "mean"
+options = { start = "2000-01-01", times = ["2001-01-01", "2002-01-01", "2003-01-01"], wop = 1.0, wwi = 0.02, disc = 0.08, obj_scaling = -1000.0 }
+
+[[objectives]]
+name = "npv"
+label = "npv_std"
+statistic = "std"
+options = { start = "2000-01-01", times = ["2001-01-01", "2002-01-01", "2003-01-01"], wop = 1.0, wwi = 0.02, disc = 0.08, obj_scaling = -1000.0 }
+
+[optimizer]
+name = "nsga2"
+options = { pop_size = 20, maxiter = 30, transform = true }
+
+[simulator]
+name = "toy_reservoir"
+
+[execution]
+name = "serial"

@@ -1,0 +1,26 @@
+# A toy eCalc model (libecalc 15): one gas turbine drives the water-injection pumps, burning
+# 50 Sm3 of fuel gas per Sm3 of water injected (illustrative: the toy reservoir's units are
+# arbitrary, and real pump duty is far lower); fuel gas emits 2 kg CO2 per Sm3. The
+# optimization replaces the time series SIM with each simulation's step rates.
+START: 2000-01-01
+END: 2003-01-01
+TIME_SERIES:
+  - NAME: SIM
+    FILE: rates.csv
+    TYPE: DEFAULT
+FUEL_TYPES:
+  - NAME: fuel_gas
+    EMISSIONS:
+      - NAME: CO2
+        FACTOR: 2.0
+INSTALLATIONS:
+  - NAME: platform
+    HCEXPORT: SIM;OIL_PROD
+    FUEL: fuel_gas
+    CATEGORY: FIXED
+    FUELCONSUMERS:
+      - NAME: injection_pumps
+        CATEGORY: TURBINE-GENERATOR
+        ENERGY_USAGE_MODEL:
+          TYPE: DIRECT
+          FUELRATE: SIM;WATER_INJ {*} 50

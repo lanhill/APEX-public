@@ -1,0 +1,14 @@
+[example]
+title = "Toy reservoir: NPV against water injected"
+summary = "Two injectors on APEX's toy waterflood (an analytic simulator): NSGA-II finds the trade-off between the NPV and the water injected, both from one simulation per member."
+source = "APEX's toy_reservoir simulator (simulation/analytic.py)"
+tags = [
+    "toy",
+    "multi-objective",
+    "simulated",
+]
+cost = "seconds"
+requires = []
+entries = [
+    { workflow = "optimization", config = "npv_water_nsga2.toml" },
+]

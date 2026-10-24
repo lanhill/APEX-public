@@ -1,0 +1,16 @@
+[example]
+title = "Rastrigin: global search with GA and PSO"
+summary = "A function with a local minimum near every integer point; the population optimizers find the global one, where an ensemble gradient stops at the nearest."
+source = "Rastrigin (1974); the optimizers ported from pymoo 0.6.2 (Apache-2.0)"
+tags = [
+    "toy",
+    "single-objective",
+    "analytic",
+    "global",
+]
+cost = "seconds"
+requires = []
+entries = [
+    { workflow = "optimization", config = "rastrigin_ga.toml", title = "genetic algorithm" },
+    { workflow = "optimization", config = "rastrigin_pso.toml", title = "particle swarm" },
+]

@@ -1,0 +1,11 @@
+[example]
+title = "Toy reservoir: robust NPV, mean against spread"
+summary = "NSGA-II over 5 model realizations: the expected NPV against its standard deviation over the realizations, both from the same simulations."
+source = "APEX's analytic toy reservoir (simulation/analytic.py); statistics over realizations"
+tags = ["toy", "multi-objective", "robust"]
+cost = "seconds"
+requires = []
+
+[[example.entries]]
+workflow = "optimization"
+config = "robust_npv_nsga2.toml"

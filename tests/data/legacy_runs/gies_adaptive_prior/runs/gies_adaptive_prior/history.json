@@ -1,0 +1,65 @@
+[
+  {
+    "iteration": 0,
+    "misfit_mean": 147.54717517040612,
+    "misfit_std": 99.70257873433175,
+    "n_members": 24,
+    "accepted": true,
+    "damping": null,
+    "misfit_by_type": {
+      "y": 147.54717517040612
+    },
+    "metrics": {
+      "data_mismatch": {
+        "all": 17.558019988409935,
+        "y": 17.558019988409935
+      },
+      "rmse": {
+        "x": 1.007929426450884,
+        "all": 1.007929426450884
+      }
+    }
+  },
+  {
+    "iteration": 1,
+    "misfit_mean": 68.65467854322729,
+    "misfit_std": 26.116398382091596,
+    "n_members": 24,
+    "accepted": true,
+    "damping": 1.0,
+    "misfit_by_type": {
+      "y": 68.65467854322729
+    },
+    "metrics": {
+      "data_mismatch": {
+        "all": 8.00551111988405,
+        "y": 8.00551111988405
+      },
+      "rmse": {
+        "x": 0.5976850556972534,
+        "all": 0.5976850556972534
+      }
+    }
+  },
+  {
+    "iteration": 2,
+    "misfit_mean": 54.877862743732976,
+    "misfit_std": 14.16580953831964,
+    "n_members": 24,
+    "accepted": true,
+    "damping": 0.5,
+    "misfit_by_type": {
+      "y": 54.877862743732976
+    },
+    "metrics": {
+      "data_mismatch": {
+        "all": 6.5997863347891075,
+        "y": 6.5997863347891075
+      },
+      "rmse": {
+        "x": 0.5053091620935648,
+        "all": 0.5053091620935648
+      }
+    }
+  }
+]

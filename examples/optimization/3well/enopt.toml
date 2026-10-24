@@ -1,0 +1,42 @@
+# PET's popt tutorial (3WELL) in APEX: EnOpt maximises NPV over two injectors' and one
+# producer's bottom-hole pressures, with OPM Flow.
+#   uv run apex optimize examples/optimization/3well/enopt.toml
+# PET's settings (docs/tutorials/popt/init_optim.toml at fd17979): 10 members, 5 iterations,
+# step 0.2, momentum 0.1 with Nesterov, bounds as the tutorial's limits, unit-cube transform.
+
+[optimization]
+name = "3well_enopt"
+seed = 101122
+
+[[controls.variables]]
+name = "injbhp"
+initial = [300.0, 250.0]
+lower = 100.0
+upper = 500.0
+variance = 6250.0
+
+[[controls.variables]]
+name = "prodbhp"
+initial = [100.0]
+lower = 20.0
+upper = 300.0
+variance = 6250.0
+
+[objective]  # NPV in millions, minimised as -NPV (obj_scaling), PET's prices and costs
+name = "npv"
+options = { start = "1994-02-09", times = ["1995-01-01", "1996-01-01", "1997-01-01", "1998-01-01", "1999-01-01"], wop = 283.05, wgp = 0.0, wwp = 37.74, wwi = 12.58, disc = 0.08, obj_scaling = -1.0e6 }
+
+[optimizer]
+name = "enopt"
+options = { ne = 10, maxiter = 5, tol = 1e-6, alpha = 0.2, beta = 0.1, nesterov = true, alpha_maxiter = 3, resample = 0, transform = true }
+
+[simulator]
+name = "opm_flow"
+options = { deck_template_file = "deck.mako", flow_args = ["--tolerance-mb=1e-5", "--parsing-strictness=low"], timeout_s = 600 }
+
+[execution]
+name = "process"
+options = { workers = 4 }
+
+[output]
+keep_simulations = "failed"

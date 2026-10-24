@@ -1,0 +1,30 @@
+# DTLZ1 (3 objectives, 7 variables) by MOEA/D.
+# Run: apex optimize dtlz1_moead.toml, then apex report runs/dtlz1_moead --plots
+
+[optimization]
+name = "dtlz1_moead"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+]
+lower = 0.0
+upper = 1.0
+
+[objective]
+name = "dtlz1"
+
+[optimizer]
+name = "moead"
+
+[optimizer.options]
+maxiter = 300
+transform = true

@@ -1,0 +1,16 @@
+[example]
+title = "DTLZ2: five objectives"
+summary = "The unit sphere's positive part in five objectives: where NSGA-III's reference directions keep a spread that NSGA-II's crowding loses."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/many/dtlz.py; Deb, Thiele, Laumanns & Zitzler (2005)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+    "many-objective",
+]
+cost = "seconds"
+requires = []
+entries = [
+    { workflow = "optimization", config = "dtlz2_5_nsga3.toml", title = "NSGA-III" },
+    { workflow = "optimization", config = "dtlz2_5_nsga2.toml", title = "NSGA-II" },
+]

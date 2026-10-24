@@ -1,0 +1,30 @@
+# DTLZ1 (3 objectives, 7 variables) by NSGA-III: a linear front with many local fronts.
+# Run: apex optimize dtlz1_nsga3.toml, then apex report runs/dtlz1_nsga3 --plots
+
+[optimization]
+name = "dtlz1_nsga3"
+seed = 1
+
+[[controls.variables]]
+name = "x"
+initial = [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+]
+lower = 0.0
+upper = 1.0
+
+[objective]
+name = "dtlz1"
+
+[optimizer]
+name = "nsga3"
+
+[optimizer.options]
+maxiter = 300
+transform = true

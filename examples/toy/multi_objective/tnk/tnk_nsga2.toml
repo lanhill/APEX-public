@@ -1,0 +1,25 @@
+# TNK: a constrained, disconnected front. Source: pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/tnk.py; Tanaka et al. (1995).
+# Run: apex optimize tnk_nsga2.toml, then apex report runs/tnk_nsga2 --plots
+
+[optimization]
+name = "tnk_nsga2"
+seed = 1
+
+[[controls.variables]]
+name = "x1"
+initial = 1.570796
+lower = 0.0
+upper = 3.141592653589793
+
+[[controls.variables]]
+name = "x2"
+initial = 1.570796
+lower = 1e-30
+upper = 3.141592653589793
+
+[objective]
+name = "tnk"
+
+[optimizer]
+name = "nsga2"
+options = { pop_size = 40, maxiter = 150, transform = true }

@@ -1,0 +1,20 @@
+# EnOpt on the 4-control Rosenbrock function.
+#   uv run apex optimize examples/optimization/rosenbrock_enopt.toml
+
+[optimization]
+name = "rosenbrock_enopt"
+seed = 2026
+
+[[controls.variables]]
+name = "x"
+initial = [-1.2, 1.0, -0.5, 0.8]
+lower = -2.0
+upper = 2.0
+variance = 0.001
+
+[objective]
+name = "rosenbrock"
+
+[optimizer]
+name = "enopt"
+options = { ne = 20, maxiter = 300, alpha = 0.05, optimizer = "Adam", beta = 0.9, resample = 2 }

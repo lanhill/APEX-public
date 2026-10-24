@@ -1,0 +1,37 @@
+# Linear-Gaussian example: GIES/RLM-MAC, whose members converge to the least-squares fit.
+[run]
+name = "linear_gies"
+seed = 2026
+
+[[state.variables]]
+name = "x"
+size = 3
+
+[prior]
+ensemble_size = 500
+generator = { name = "gaussian", options = { mean = 0.0, std = 1.0 } }
+
+[observations]
+file = "observations.csv"
+
+[case]  # synthetic: the true model generated the data (RMSE is scored against it)
+kind = "synthetic"
+truth_file = "truth.npz"
+
+[simulator]
+name = "linear"
+
+[simulator.options]
+forward_file = "forward.npz"
+variables = ["x"]
+outputs = [["t0", "y"], ["t1", "y"], ["t2", "y"], ["t3", "y"], ["t4", "y"], ["t5", "y"], ["t6", "y"], ["t7", "y"]]
+
+[execution]
+name = "process"
+options = { workers = 4 }
+
+[method]
+name = "gies"
+strategy = { name = "rlmmac", options = { energy = 1.0 } }
+schedule = { initial = 1.0, factor = 2.0, data_mismatch_tolerance = 1e-4 }
+max_iterations = 20

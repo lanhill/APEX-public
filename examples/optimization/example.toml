@@ -1,0 +1,15 @@
+[example]
+title = "Rosenbrock: ensemble and deterministic optimizers"
+summary = "Rosenbrock's function minimised by EnOpt and by a trust region."
+source = "PET's popt examples (Rosenbrock 1960)"
+tags = [
+    "toy",
+    "single-objective",
+    "analytic",
+]
+cost = "seconds"
+requires = []
+entries = [
+    { workflow = "optimization", config = "rosenbrock_enopt.toml", title = "EnOpt" },
+    { workflow = "optimization", config = "rosenbrock_trust_region.toml", title = "trust region" },
+]

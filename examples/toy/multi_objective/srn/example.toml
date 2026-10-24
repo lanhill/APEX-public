@@ -1,0 +1,14 @@
+[example]
+title = "SRN: a constrained front"
+summary = "Srinivas and Deb's problem with two constraints."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/multi/srn.py; Srinivas & Deb (1994)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+    "constrained",
+]
+cost = "seconds"
+entries = [
+    { workflow = "optimization", config = "srn_nsga2.toml" },
+]

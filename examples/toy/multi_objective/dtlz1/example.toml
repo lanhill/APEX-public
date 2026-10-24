@@ -1,0 +1,16 @@
+[example]
+title = "DTLZ1: a linear front with local fronts"
+summary = "Three objectives on the simplex f1 + f2 + f3 = 0.5, with 11^5 - 1 local fronts to escape: NSGA-III's and MOEA/D's standard check."
+source = "pymoo 0.6.2 (github.com/anyoptimization/pymoo, Apache-2.0; Blank & Deb 2020), problems/many/dtlz.py; Deb, Thiele, Laumanns & Zitzler (2005)"
+tags = [
+    "toy",
+    "multi-objective",
+    "analytic",
+    "many-objective",
+]
+cost = "seconds"
+requires = []
+entries = [
+    { workflow = "optimization", config = "dtlz1_nsga3.toml", title = "NSGA-III" },
+    { workflow = "optimization", config = "dtlz1_moead.toml", title = "MOEA/D" },
+]
