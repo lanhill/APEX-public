@@ -117,22 +117,6 @@ name = "distance_entries"
 
 **`Entry`**: One localization entry (PET: one row of its entries CSV, or one dict of `entries`).
 
-Parameters
-----------
-data
- The data type it localizes (`"*"`: all, the default).
-time
- The data time it localizes (`"*"`: all, the default).
-parameter
- The state variable it localizes (`"*"`: all, the default).
-taper
- The kernel: `gaspari_cohn`, `furrer_bengtsson`, `region`, or `import` (read
- from `taper_file`).
-position
- The centre cell `[i, j, k]`, 1-based as in Eclipse decks.
-radius
- The kernel's length, in cells. …
-
 | option | type | default | description |
 |---|---|---|---|
 | `anisotropy` | array | | `[ratio, angle in degrees]`: the rotated offset's first (`j`) component is divided by the ratio, so a ratio of 2 doubles the reach along `j` (PET's docstring says it halves it; its code divides, as here). |

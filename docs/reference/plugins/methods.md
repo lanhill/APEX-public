@@ -113,10 +113,7 @@ name = "multilevel_esmda"
 | `inflation` | array | required | The ES-MDA inflation factors `alpha_i` (sum of `1 / alpha_i` equal to 1). |
 | `levels` | array | required | One table per level (`Level`), coarsest first as PET's: `members` (`N_l`) and `weight` (`w_l`; normalised to sum 1, as PET). Other keys (`upscale`, `deck_template_file`) are for the simulator (the composition passes them). |
 
-**`Level`**: One fidelity level: its members and weight, and what its simulator runs.
-
-Levels are listed coarsest first and hold consecutive member ids; their members add up
-to `[prior] ensemble_size`. A level with no simulator key runs the fine model.
+**`Level`**: One fidelity level: its members and weight, and what its simulator runs. Levels are listed coarsest first and hold consecutive member ids; their members add up to `[prior] ensemble_size`. A level with no simulator key runs the fine model.
 
 | option | type | default | description |
 |---|---|---|---|

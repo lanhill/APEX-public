@@ -344,15 +344,54 @@ def _described(
     """Return the schema with each option's docstring description where it has none.
 
     Nested types (``$defs``, e.g. a localization's entries) are described from the
-    "Parameters" section of the class of that name in the plugin's module.
+    "Parameters" section of the class of that name in the plugin's module. The types' own
+    descriptions (pydantic copies their docstrings whole) keep their prose only, as the
+    options' (a reported issue, H8: raw "Parameters" sections and literals in ``--json``).
     """
     _fill(schema, docs)
     module = inspect.getmodule(factory)
     for name, nested in schema.get("$defs", {}).items():
+        if not isinstance(nested, dict):
+            continue
         found = getattr(module, name, None)
-        if isinstance(nested, dict) and inspect.isclass(found):
+        if inspect.isclass(found):
             _fill(nested, option_docs(found))
+        _clean_description(nested)
+    _clean_description(schema)
     return schema
+
+
+def _clean_description(schema: dict[str, Any]) -> None:
+    """Keep a schema's description as prose, or drop it when it has none (all sections)."""
+    if isinstance(schema.get("description"), str):
+        text = _prose(schema["description"])
+        if text:
+            schema["description"] = text
+        else:
+            del schema["description"]
+
+
+#: NumPy docstring sections that hold prose for users; the others (Parameters, Attributes,
+#: Examples, ...) are lists the schema's own properties already give, or code.
+_PROSE_SECTIONS = frozenset({"Notes", "Warnings"})
+
+
+def _prose(doc: str) -> str:
+    """Return a docstring's prose (opening text, Notes, Warnings) in one line, as Markdown."""
+    lines = doc.splitlines()
+    kept: list[str] = []
+    keep = True
+    for index, line in enumerate(lines):
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if _HEADING.match(line):
+            continue
+        if line.strip() and _HEADING.match(following):
+            keep = line.strip() in _PROSE_SECTIONS
+            continue
+        if keep:
+            kept.append(line)
+    text = " ".join(" ".join(kept).split())
+    return _LITERAL.sub(r"`\1`", _ROLE.sub(r"`\1`", text))
 
 
 def _fill(schema: dict[str, Any], docs: dict[str, str]) -> None:

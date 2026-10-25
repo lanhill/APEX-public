@@ -212,7 +212,13 @@ function PluginDetails({ plugin: p }: { plugin: PluginInfo }) {
                 <tr key={r.name}>
                   <td>
                     <code>{r.name}</code>
-                    {r.description && <div className="muted">{withoutAdr(r.description)}</div>}
+                    {r.description && (
+                      <div className="muted">
+                        {summaryParts(withoutAdr(r.description)).map((part, i) =>
+                          part.code ? <code key={i}>{part.text}</code> : part.text,
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td>
                     {r.type}

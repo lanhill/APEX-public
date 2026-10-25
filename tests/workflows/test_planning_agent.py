@@ -518,60 +518,74 @@ def test_a_localization_variant_keeps_the_methods_own_strategy_options(
                                                       "options": {"energy": 0.95}}  # fmt: skip
 
 
-def test_a_localization_study_also_runs_a_smaller_ensemble(
+def test_a_localization_study_runs_every_arm_at_both_sizes_or_at_the_cases_alone(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
     """A reported issue (2026-10-24): a localization study at the case's size alone
-    cannot show where localization helps; the baseline and the localization run again at
-    half the size."""
+    cannot show where localization helps, so the arms run again at half the size; and the
+    reported issue #246: only some arms at the smaller size answered neither question, so every
+    arm runs at both sizes when they all fit, else every localization at the case's."""
+    from apex.agents.planner import rules
+
     service = _service(tmp_path)
     case = linear_case(ensemble_size=20)
+    facts = plan_facts(service, case.config, budget=50_000)
+    goal = "does localization help"
 
-    result = Planner(service, None).plan(case.config, "does localization help", budget=50_000)
+    def plan(cells: int, variants: int) -> dict[str, dict[str, Any]]:
+        update = {"max_cells": cells, "max_variants": variants}
+        return {v.name: v.patch for v in rules(facts.model_copy(update=update), goal).variants}
 
-    variants = {v.name: v.patch for v in result.proposal.variants}
-    assert variants["baseline_small_ensemble"] == {"prior": {"ensemble_size": 10}}
-    small = variants["adaptive_localization_small_ensemble"]
-    assert small["prior"] == {"ensemble_size": 10}
-    assert small["method"] == variants["adaptive_localization"]["method"]
-    assert result.within_budget
-    assert "two ensemble sizes" in result.proposal.reasoning
-    # Not for another goal, nor below ten members, nor half a pair when the budget is short.
+    arms = [n for n in plan(1000, 1000) if "small" not in n]
+    assert len(arms) >= 3  # the baseline and every adaptive localization the method takes
+    both = plan(1000, 1000)
+    assert list(both) == arms + [f"{a}_small_ensemble" for a in arms]
+    for arm in arms:
+        small = both[f"{arm}_small_ensemble"]
+        assert small["prior"] == {"ensemble_size": 10}
+        assert small.get("method") == both[arm].get("method")
+    # Too few variants or runs for both sizes: every arm at the case's size, none smaller.
+    assert list(plan(1000, 2 * len(arms) - 1)) == arms
+    assert list(plan(4 * len(arms) - 1, 1000)) == arms
+    # An unknown cost has no budget to fit both sizes in: every arm once, none trimmed.
+    unknown = rules(facts.model_copy(update={"max_cells": None, "max_variants": 1000}), goal)
+    assert [v.name for v in unknown.variants] == arms
+    # A case with its own localization gets no smaller arms.
+    localized = rules(
+        facts.model_copy(
+            update={"localization": "adaptive_prior", "max_cells": 1000, "max_variants": 1000}
+        ),
+        goal,
+    )
+    assert not any("small" in v.name for v in localized.variants)
+    # Not for another goal, nor below ten members.
     other = Planner(service, None).plan(case.config, "compare", budget=50_000)
     assert not any("small" in v.name for v in other.proposal.variants)
     tiny = linear_case(name="tiny", ensemble_size=18)
-    short = Planner(service, None).plan(tiny.config, "does localization help", budget=50_000)
+    short = Planner(service, None).plan(tiny.config, goal, budget=50_000)
     assert not any("small" in v.name for v in short.proposal.variants)
 
 
-def test_the_smaller_ensemble_is_left_out_where_it_cannot_run_and_never_by_half(
+def test_the_smaller_ensemble_is_left_out_where_it_cannot_run(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
-    """Its review: a stored prior or multilevel levels fix the ensemble size, and a
-    short budget drops the pair whole."""
+    """Its review: a stored prior or multilevel levels fix the ensemble size."""
     from apex.agents.planner import _smaller_ensemble, rules
 
     facts = plan_facts(_service(tmp_path), linear_case(ensemble_size=20).config, budget=50_000)
     goal = "does localization help"
-    localized = rules(facts, goal).variants[1]
-    assert len(_smaller_ensemble(facts, goal, localized)) == 2
+    arms = rules(facts, goal).variants[:2]
+    assert len(_smaller_ensemble(facts, goal, arms)) == 2
     config = facts.configuration
     stored = {**config, "prior": {**config["prior"], "generator": {"name": "file"}}}
     assert _smaller_ensemble(facts.model_copy(update={"configuration": stored}), goal,
-                             localized) == []  # fmt: skip
+                             arms) == []  # fmt: skip
     per_variable = {
         **config,
         "prior": {**config["prior"], "variables": {"x": {"generator": {"name": "file"}}}},
     }
     assert _smaller_ensemble(facts.model_copy(update={"configuration": per_variable}), goal,
-                             localized) == []  # fmt: skip
+                             arms) == []  # fmt: skip
     multilevel = {**facts.case_method, "options": {"levels": [{"members": 10}]}}
     assert _smaller_ensemble(facts.model_copy(update={"case_method": multilevel}), goal,
-                             localized) == []  # fmt: skip
-
-    def names(cells: int) -> list[str]:
-        return [v.name for v in rules(facts.model_copy(update={"max_cells": cells}), goal).variants]
-
-    assert names(8)[:4] == ["baseline", "adaptive_localization", "baseline_small_ensemble",
-                            "adaptive_localization_small_ensemble"]  # fmt: skip
-    assert not any("small" in n for n in names(6))  # three would split the pair
+                             arms) == []  # fmt: skip

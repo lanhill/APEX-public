@@ -666,6 +666,22 @@ describe("the Plugins page", () => {
       { text: "ini_only", code: true },
       { text: " (PET).", code: false },
     ]);
+    // H8: the service writes Markdown's single backticks.
+    expect(summaryParts("Eclipse decks (`.DATA`), in `[nx, ny, nz]` order")).toEqual([
+      { text: "Eclipse decks (", code: false },
+      { text: ".DATA", code: true },
+      { text: "), in ", code: false },
+      { text: "[nx, ny, nz]", code: true },
+      { text: " order", code: false },
+    ]);
+    expect(summaryParts("no code")).toEqual([{ text: "no code", code: false }]);
+    // Both kinds together, and a lone backtick stays text.
+    expect(summaryParts("``a`` and `b`, `c")).toEqual([
+      { text: "a", code: true },
+      { text: " and ", code: false },
+      { text: "b", code: true },
+      { text: ", `c", code: false },
+    ]);
   });
 });
 

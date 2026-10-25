@@ -422,15 +422,25 @@ def rules(facts: PlanFacts, goal: str, thresholds: PlannerSection | None = None)
         return _ert_localization_rules(facts, goal, t)
     if "ert" in facts.engines and _wants_ert(goal):
         return _ert_rules(facts, goal, t)
+    small: list[VariantProposal] = []
     if facts.localization is None:
-        localized = _localization_variants(facts, goal)
-        variants += localized[:1] + _smaller_ensemble(facts, goal, localized[0]) + localized[1:]
+        variants += _localization_variants(facts, goal)
+        small = _smaller_ensemble(facts, goal, variants)
+    both = len(variants) + len(small)
+    if (
+        small
+        and both <= facts.max_variants
+        and facts.max_cells is not None
+        and facts.max_cells >= 2 * both
+    ):
+        # Every arm at both sizes, with paired replicates, or the case's size alone: some
+        # arms at one size only answer neither question (a reported issue, #246).
+        variants += small
     cells = facts.max_cells if facts.max_cells is not None else len(variants)
-    if len(variants) > 2 and cells < 2 * len(variants):
-        # Paired replicates before breadth: drop the later localizations first.
+    if facts.max_cells is not None and len(variants) > 2 and cells < 2 * len(variants):
+        # Paired replicates before breadth: drop the later localizations first (with an
+        # unknown cost there is no budget to trim to).
         variants = variants[: max(2, cells // 2)]
-        if sum(_SMALL in v.name for v in variants) == 1:
-            variants = [v for v in variants if _SMALL not in v.name]  # never half a pair
     replicates = max(1, min(t.max_replicates, cells // len(variants)))
     if cells < len(variants):
         variants = variants[:1]  # not even one replicate of each: the baseline alone
@@ -501,14 +511,15 @@ MIN_SMALL_ENSEMBLE = 10
 
 
 def _smaller_ensemble(
-    facts: PlanFacts, goal: str, localized: VariantProposal
+    facts: PlanFacts, goal: str, arms: list[VariantProposal]
 ) -> list[VariantProposal]:
-    """Return the baseline and ``localized`` again at half the ensemble, for a localization goal.
+    """Return every arm again at half the ensemble, for a localization goal.
 
-    Localization matters most where the ensemble is small: a study at the case's size alone
-    cannot show it (a reported issue, 2026-10-24). None when the goal is not about
-    localization, the half would be below :data:`MIN_SMALL_ENSEMBLE`, a stored prior fixes
-    the size, or the method's levels do (multilevel ES-MDA's members are its levels').
+    Localization matters most where the ensemble is small (a reported issue, 2026-10-24);
+    the caller adds these only when every arm fits at both sizes (#246). None when the goal
+    is not about localization, the half would be below :data:`MIN_SMALL_ENSEMBLE`, a
+    stored prior fixes the size, or the method's levels do (multilevel ES-MDA's members are
+    its levels').
     """
     if not _wants_localization(goal) or facts.members is None:
         return []
@@ -521,11 +532,10 @@ def _smaller_ensemble(
         return []
     size = {"prior": {"ensemble_size": small}}
     return [
-        VariantProposal(name=f"baseline{_SMALL}", patch=size,
-                        rationale=f"the case at {small} members, where spurious correlations "
-                        "are stronger"),
-        VariantProposal(name=f"{localized.name}{_SMALL}", patch={**localized.patch, **size},
-                        rationale=f"{localized.rationale}, at {small} members"),
+        VariantProposal(name=f"{arm.name}{_SMALL}", patch={**arm.patch, **size},
+                        rationale=f"{arm.rationale}, at {small} members, where spurious "
+                        "correlations are stronger")
+        for arm in arms
     ]  # fmt: skip
 
 

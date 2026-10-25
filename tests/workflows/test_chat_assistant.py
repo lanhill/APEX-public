@@ -1185,6 +1185,31 @@ def test_the_prompt_describes_es_mda_and_keeps_the_users_length() -> None:
     assert "does not make the strategy shared" in SYSTEM
 
 
+def test_the_prompt_keeps_the_users_arms_and_states_inherited_limits() -> None:
+    """Reported issues #244-#246: asked for a baseline against adaptive_per_update, the
+    assistant proposed six arms; asked an open question, it tested two localizations at a
+    smaller ensemble only; and it compared damping schemes over the case's 2 iterations
+    without saying that this limits the comparison."""
+    from apex.agents.chat import SYSTEM
+
+    assert "the arms the user names are the study: plan exactly those" in SYSTEM
+    assert "never drop an arm the user named" in SYSTEM
+    assert "when a localization question names no arms" in SYSTEM
+    assert "at the case's own ensemble size" in SYSTEM
+    assert "joins only when every arm fits at both sizes" in SYSTEM
+    assert "never some arms at one size only" in SYSTEM
+    assert "is stated as a limit with an offer to raise it: never raise it unasked" in SYSTEM
+    # Its review: the "too small" rule must not override it, and the study rules are not
+    # inside the optimization sentence.
+    assert "a setting the arms inherit from the case is no reason to revise" in SYSTEM
+    assert "which an inherited setting you state as a limit does not make it" in SYSTEM
+    general = SYSTEM.index("For every study you plan (history matching or optimization): ")
+    assert general < SYSTEM.index("the arms the user names") < SYSTEM.index("is stated as a limit")
+    assert SYSTEM.index("When the user asks to optimize") < general
+    # The old rule made every localization study add a smaller ensemble.
+    assert "smaller ensemble (prior.ensemble_size as a variant" not in SYSTEM
+
+
 def test_erts_localization_is_planned_only_on_a_case_that_can_carry_it(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:

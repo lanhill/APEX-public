@@ -200,10 +200,13 @@ export function valueText(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** Summaries are reStructuredText: ``code`` becomes `code` (rendered as code by the page). */
+/**
+ * A summary or description as text and code: Markdown's `code`, as the service writes them,
+ * and reStructuredText's ``code`` (a reported issue, H8: the page showed the backticks).
+ */
 export function summaryParts(summary: string): { text: string; code: boolean }[] {
   return summary
-    .split(/``([^`]+)``/)
-    .map((text, i) => ({ text, code: i % 2 === 1 }))
+    .split(/``([^`]+)``|`([^`]+)`/)
+    .map((text, i) => ({ text: text ?? "", code: i % 3 !== 0 }))
     .filter((p) => p.text !== "");
 }
