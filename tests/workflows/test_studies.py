@@ -2,6 +2,7 @@
 
 import csv
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -90,8 +91,11 @@ def test_comparing_data_mismatch_warns_in_plain_words(
     (message,) = [r.getMessage() for r in caplog.records if "data_mismatch" in r.getMessage()]
     assert "the objective the methods minimise" in message
     assert "normalized_data_mismatch" in message
-    assert "ADR" not in message
-    assert "2026" not in message
+    # The warning names the study's file: a dated folder in its path is not a changelog
+    # (the release tester's H9: a temporary folder named 20261025-... failed this test).
+    words = message.replace(str(path.resolve()), "").replace(str(path), "")
+    assert "ADR" not in words
+    assert not re.search(r"\b20\d{2}\b", words)  # a year, as in a date of any form
 
 
 def test_budget_and_approval_are_checked_before_anything_runs(
