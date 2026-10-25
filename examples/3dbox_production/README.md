@@ -41,6 +41,7 @@ The notebook also tabulates these metrics at every kept iteration of each run. N
 | `truth.npz`, `poro.inc` | the case's true model (log-permeability and porosity; `poro.inc` holds the porosity too) |
 | `observations.csv` | the truth's monthly rates with noise: a standard deviation of 10 % of the rate, at least 8 (a rate of 0 observed as 0, variance 10²; a small rate may come out negative) |
 | `true_rates.csv` | the truth's noise-free rates (for the demonstration's figures) |
+| `BOX.DATA` | `deck.mako` rendered with the true model and ln PERMX capped at 8: a plain OPM Flow deck to try the case-converter on, with `observations.csv` as its history (docs/getting_started/case_converter.md); re-render it after changing the template or the truth (a test checks it) |
 | `config_esmda.toml`, `config_gies.toml`, `config_esmda_noloc.toml`, `config_gies_noloc.toml` | written by `prepare.py` |
 | `prior_ensemble.npz` | the 100 prior members (float32), drawn by `prepare.py`; the same in both 3dBox examples, each folder standing alone |
 | `prepare.py` | regenerates the prior, observations and configurations, running the truth once |

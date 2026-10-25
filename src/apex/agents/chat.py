@@ -436,6 +436,11 @@ class DraftPriorArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     draft: str = Field(description="A run's configuration drafted in this chat.")
+    data: str | None = Field(
+        default=None,
+        description="Hard data of the user's to estimate the prior from: a CSV "
+        "of i,j,k,property,value (1-based cells, the deck's units; property facies: codes).",
+    )
 
 
 class ReadDraftArguments(BaseModel):
@@ -1132,29 +1137,30 @@ class ChatAssistant:
             return {"draft": args.draft, "cost": total, "diff": diff, **comparison,
                     "approval": approval}  # fmt: skip
 
+        def readable(path: Path) -> bool:
+            """Whether the chat's user may read ``path`` (a deck, or what it includes)."""
+            space = service.workspace()
+            try:
+                space.real(path)
+            except ApexError:
+                return False
+            folder_ok = access is None or access.folder(space.relative(path))
+            return folder_ok and self.ui_visible(path, chat_id)
+
+        def visible(path_text: str) -> Path:
+            """Return a file of the user's: a deck, a history, hard data (one answer if not)."""
+            try:
+                path = service.workspace().real(path_text)  # any file, not only the editor's
+            except ApexError:
+                raise KeyError(f"no file {path_text!r}") from None
+            if not readable(path) or not path.is_file():
+                raise KeyError(f"no file {path_text!r}")
+            return path
+
         def convert_case(args: ConvertCaseArguments) -> dict[str, Any]:
             from apex.agents.converter import CaseConverter, case_name, visible_skills
 
             space = service.workspace()
-
-            def readable(path: Path) -> bool:
-                """Whether the chat's user may read ``path`` (a deck, or what it includes)."""
-                try:
-                    space.real(path)
-                except ApexError:
-                    return False
-                folder_ok = access is None or access.folder(space.relative(path))
-                return folder_ok and self.ui_visible(path, chat_id)
-
-            def visible(path_text: str) -> Path:
-                try:
-                    path = space.real(path_text)  # a deck: any file, not the editor's TOML
-                except ApexError:
-                    raise KeyError(f"no file {path_text!r}") from None
-                if not readable(path) or not path.is_file():
-                    raise KeyError(f"no file {path_text!r}")
-                return path
-
             source = visible(args.source)
             history = None if args.history is None else visible(args.history)
             converter = CaseConverter(service, None)  # its rules, as the agents' tools
@@ -1213,10 +1219,11 @@ class ChatAssistant:
             from apex.agents.geomodeler import Geomodeler
 
             path = draft_path(args.draft)
+            data = None if args.data is None else visible(args.data)
             geomodeler = Geomodeler(service, None)  # its rules
             if access is not None:
                 geomodeler.max_cells = service.jobs.settings.agents.geomodeler.ui_max_cells
-            outcome = geomodeler.model(path)
+            outcome = geomodeler.model(path, data=data)
             space = service.workspace()
             draft = space.relative(outcome.config)
             total, errors = cost(outcome.config)
@@ -1810,13 +1817,16 @@ class ChatAssistant:
             data["auto_proposed"] = proposed
         if outcome.fell_back:
             data["reason"] = outcome.reason
-            self._emit(chat_id, "fallback", {"reason": outcome.reason})
+            # The activity line is the user's: a timeout in plain words (issue #239); the
+            # provider's error stays in the turn's data and the decision's trace.
+            shown = "the model took too long to answer" if outcome.timed_out else outcome.reason
+            self._emit(chat_id, "fallback", {"reason": shown})
             # The model is there but gave no usable answer this time: say so, why, and what
             # was done for the request so far (G6d, 2026-10-05: not a list of commands).
             drafts = [str(e.data.get("draft")) for e in store.events(chat_id)
                       if e.kind == "draft" and e.data.get("draft")]  # fmt: skip
             return _no_answer(outcome.reason or "no valid answer", text, outcome.tool_calls,
-                              drafts) + note, data  # fmt: skip
+                              drafts, timed_out=outcome.timed_out) + note, data  # fmt: skip
         return outcome.decision.answer + note, data
 
 
@@ -2753,13 +2763,24 @@ def _no_answer(
     request: str = "",
     tool_calls: Sequence[Mapping[str, Any]] = (),
     drafts: Sequence[str] = (),
+    *,
+    timed_out: bool = False,
 ) -> str:
-    """Return the answer when the model gave none: about the request, and what was done."""
+    """Return the answer when the model gave none: about the request, and what was done.
+
+    A timeout is said in plain words, without the provider's error (issue #239): the
+    provider has already tried again where it can (``claude_code``'s ``hang_retries``).
+    """
     asked = " ".join(request.split())
     asked = asked if len(asked) <= 160 else asked[:157] + "..."
-    lines = [f"I could not finish answering \u201c{asked}\u201d: the model gave no usable "
-             f"answer this time ({why})." if asked else
-             f"I got no usable answer from the model this time ({why})."]  # fmt: skip
+    if timed_out:
+        lines = [f"The model took too long to answer \u201c{asked}\u201d, so I have no "
+                 "answer this time." if asked else
+                 "The model took too long to answer, so I have no answer this time."]  # fmt: skip
+    else:
+        lines = [f"I could not finish answering \u201c{asked}\u201d: the model gave no "
+                 f"usable answer this time ({why})." if asked else
+                 f"I got no usable answer from the model this time ({why})."]  # fmt: skip
     done = [f"{c['tool']} ({'done' if c.get('ok') else 'refused'})" for c in tool_calls]
     if done:
         lines.append("So far: " + ", ".join(done) + ".")

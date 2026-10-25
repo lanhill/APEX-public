@@ -164,6 +164,39 @@ def test_a_finished_run_that_left_the_prior_unchanged_is_flagged() -> None:
     assert rules(fits).findings == []
 
 
+def test_a_finished_run_whose_mismatch_rose_is_not_called_no_progress() -> None:
+    """A reported issue (2026-10-25): ES-MDA without localization ended 45 % above its prior's
+    mismatch, with its spread at 0.33 and 0.17 of the prior's, and was reported as
+    no_progress, "the posterior is still close to the prior"."""
+    diverged = rules(
+        _observation(
+            state="complete", data_mismatch_means=[5.877e8, 7.1e8, 8.51e8],
+            data_mismatch_iterations=[0, 1, 2], normalized_data_mismatch=5.95e4,
+            spread_ratio={"permx": 0.33, "poro": 0.17},
+        )
+    )  # fmt: skip
+
+    assert "no_progress" not in _codes(diverged)
+    rose = next(f for f in diverged.findings if f.code == "mismatch_increased")
+    assert rose.severity == "warning"
+    assert "5.877e+08 -> 8.51e+08 (44.8% higher)" in rose.evidence
+    assert "away from the data" in rose.evidence
+    assert "permx 0.33, poro 0.17" in rose.evidence
+    assert diverged.recommendation != "none"
+    # Where the data are fitted, a rise is a note; within 1 % it is noise, and an unfitted
+    # run's is no progress; a run still going is not judged.
+    fitted = rules(_observation(state="complete", data_mismatch_means=[52.0, 54.0],
+                                normalized_data_mismatch=1.1))  # fmt: skip
+    assert [(f.code, f.severity) for f in fitted.findings] == [("mismatch_increased", "info")]
+    assert rules(_observation(state="complete", data_mismatch_means=[52.0, 52.3],
+                              normalized_data_mismatch=1.1)).findings == []  # fmt: skip
+    flat = rules(_observation(state="complete", data_mismatch_means=[252.0, 252.3],
+                              normalized_data_mismatch=5.0))  # fmt: skip
+    assert _codes(flat) == {"no_progress"}
+    assert "(0.1% higher, a change < 10%)" in flat.findings[0].evidence
+    assert "mismatch_increased" not in _codes(rules(_observation(data_mismatch_means=[5.0, 9.0])))
+
+
 def test_thresholds_are_configurable() -> None:
     strict = MonitorSection(collapse_spread_ratio=0.5)
 
@@ -201,6 +234,17 @@ def test_model_findings_that_the_facts_contradict_are_dropped() -> None:
     assert report.summary.endswith(
         "[Corrected: stagnation, ensemble_collapse dropped, not supported by the facts.]"
     )
+
+
+def test_a_model_calling_a_rising_mismatch_no_progress_is_corrected() -> None:
+    """A reported issue (2026-10-25): the model's no_progress is held to the rules too."""
+    rose = rules(_observation(state="complete", data_mismatch_means=[5.877e8, 8.51e8],
+                              normalized_data_mismatch=5.95e4))  # fmt: skip
+
+    report, changes = reconcile(_model_report("investigate", "no_progress"), rose)
+
+    assert report.findings == []
+    assert changes[0].startswith("dropped no_progress")
 
 
 def test_a_stop_without_support_becomes_investigate() -> None:

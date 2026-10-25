@@ -22,12 +22,14 @@ class PetSkill(ConverterSkill):
     formats: ClassVar[tuple[str, ...]] = ("pet_config", "apex_config")
     capabilities: ClassVar[frozenset[Capability]] = frozenset({"convert_to", "convert_from"})
     guidance = (
-        "PET (the Python Ensemble Toolbox) runs ES, ES-MDA, LM-EnRML, GN-EnRML and "
-        "PET-fork's GIES with rlmmac, on decks rendered from a Mako runfile, with a "
-        "stored or variogram prior and data in wide CSV tables."
+        "PET (the Python Ensemble Toolbox) runs ES, ES-MDA, LM-EnRML and GN-EnRML, on decks "
+        "rendered from a Mako runfile, with a stored or variogram prior and data in wide CSV "
+        "tables. GIES, CHOP and APEX's other methods are not implemented in PET: say so when "
+        "a case using one is to be exported."
     )
     unsupported: ClassVar[tuple[str, ...]] = (
-        "APEX's own methods and strategies (GMAC, CHOP, adaptive_rows, the ERT strategies)",
+        "methods not implemented in PET (GIES, CHOP, multilevel ES-MDA) and APEX's own "
+        "strategies (GMAC, adaptive_rows, the ERT strategies)",
         "parameterizations, model error, cross validation, geophysics",
         "data transforms and localization (not exported yet)",
         "template values, joint priors, priors other than a stored ensemble or a variogram",

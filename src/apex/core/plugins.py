@@ -9,7 +9,7 @@ from apex.core.conversion import ConverterSkill
 from apex.core.engines import RunEngine
 from apex.core.figures import Figure, FigurePreset
 from apex.core.forecast import ForecastScore
-from apex.core.geomodeling import GeomodelingSkill
+from apex.core.geomodeling import GeomodelingSkill, VariogramEstimator
 from apex.core.llm import LLMProvider
 from apex.core.maintenance import MaintenanceTask
 from apex.core.metrics import PerformanceMetric
@@ -81,3 +81,6 @@ converter_skills: Registry[ConverterSkill] = Registry("converter_skills")
 #: Geomodeling skills by name (``"continuous"``, ``"facies_pluri"``), also
 #: registered by other packages through the entry-point group ``apex.geomodeling_skills``.
 geomodeling_skills: Registry[GeomodelingSkill] = Registry("geomodeling_skills")
+
+#: Variogram estimators by name (``"wls"``): a variogram from hard data.
+variogram_estimators: Registry[VariogramEstimator] = Registry("variogram_estimators")

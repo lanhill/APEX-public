@@ -5,7 +5,16 @@ statistics, wells with their controls, a schedule of report steps and a fluid pr
 deck skill writes the deck from it; the truth and the prior are drawn from the property
 statistics. Everything is validated here, before a deck is written.
 
-Units are METRIC: metres, bar, mD, sm3/day, days.
+Fluid presets:
+
+- ``oil_water`` (:class:`FluidSpec`): dead oil and water, producers with water injectors;
+- ``co2_brine`` (:class:`Co2BrineSpec`): CO2 storage in a saline aquifer, OPM Flow's
+  ``CO2STORE`` (CO2 and brine properties computed by the simulator from the pressure,
+  temperature and salinity; CO2 dissolving in the brine), CO2 injectors with optional brine
+  producers. A CO2 rate is in sm3/day of CO2 at surface conditions: 1 Mt a year is about
+  1.46e6 sm3/day (CO2's surface density, 1.87 kg/m3).
+
+Units are METRIC: metres, bar, mD, sm3/day, days, degrees Celsius.
 """
 
 import datetime as dt
@@ -49,15 +58,17 @@ class WellSpec(_Spec):
     j: int = Field(ge=1)
     k_top: int = Field(default=1, ge=1)
     k_bottom: int | None = Field(default=None, ge=1, description="Default: the last layer.")
-    control: Literal["bhp", "liquid_rate", "water_rate"] = Field(
-        description="Producers: bhp or liquid_rate; injectors: water_rate or bhp."
+    control: Literal["bhp", "liquid_rate", "water_rate", "gas_rate"] = Field(
+        description="Producers: bhp or liquid_rate; injectors: water_rate (oil_water), "
+        "gas_rate (co2_brine: CO2) or bhp."
     )
     target: float = Field(gt=0, description="The rate (sm3/day) or the pressure (bar).")
     bhp_limit: float = Field(gt=0, description="The pressure limit (bar): minimum or maximum.")
 
     @model_validator(mode="after")
     def _controls(self) -> Self:
-        allowed = {"producer": ("bhp", "liquid_rate"), "injector": ("bhp", "water_rate")}
+        allowed = {"producer": ("bhp", "liquid_rate"),
+                   "injector": ("bhp", "water_rate", "gas_rate")}  # fmt: skip
         if self.control not in allowed[self.kind]:
             raise ValueError(f"a {self.kind} is controlled by {' or '.join(allowed[self.kind])}")
         return self
@@ -99,6 +110,33 @@ class FluidSpec(_Spec):
         return self
 
 
+class Co2BrineSpec(_Spec):
+    """The ``co2_brine`` preset: CO2 into brine (OPM Flow's CO2STORE), Corey drainage curves.
+
+    The aquifer is all brine at the start (hydrostatic, from ``initial_pressure`` at the
+    top), at one temperature. Brine and CO2 densities, viscosities and the CO2's solubility
+    come from the simulator's correlations; only the salinity and temperature are given.
+    """
+
+    preset: Literal["co2_brine"]
+    initial_pressure: float = Field(default=200.0, gt=1, description="bar, at the top")
+    temperature: float = Field(default=60.0, gt=0, le=200, description="degrees C, uniform")
+    salinity: float = Field(default=0.62, ge=0, le=6.0, description="mol NaCl per kg water")
+    swc: float = Field(default=0.2, ge=0, lt=1, description="Irreducible water saturation.")
+    sgc: float = Field(default=0.05, ge=0, lt=1, description="Critical gas (CO2) saturation.")
+    corey_gas: float = Field(default=2.0, gt=0)
+    corey_water: float = Field(default=3.0, gt=0)
+    krg_max: float = Field(default=1.0, gt=0, le=1, description="CO2's at irreducible water.")
+    krw_max: float = Field(default=1.0, gt=0, le=1)
+    rock_compressibility: float = Field(default=4.5e-5, ge=0, description="1/bar")
+
+    @model_validator(mode="after")
+    def _mobile(self) -> Self:
+        if self.swc + self.sgc >= 1:
+            raise ValueError("swc + sgc must leave mobile CO2 (< 1)")
+        return self
+
+
 class PropertySpec(_Spec):
     """The truth's and the prior's statistics: ln PERMX and PORO as Gaussian fields."""
 
@@ -122,7 +160,7 @@ class DeckSpec(_Spec):
     grid: GridSpec
     wells: list[WellSpec] = Field(min_length=1)
     schedule: ScheduleSpec = Field(default_factory=ScheduleSpec)
-    fluid: FluidSpec = Field(default_factory=FluidSpec)
+    fluid: FluidSpec | Co2BrineSpec = Field(default_factory=FluidSpec, discriminator="preset")
     properties: PropertySpec = Field(default_factory=PropertySpec)
 
     @model_validator(mode="after")
@@ -130,8 +168,17 @@ class DeckSpec(_Spec):
         names = [w.name for w in self.wells]
         if len(set(names)) != len(names):
             raise ValueError("well names must differ")
-        if not any(w.kind == "producer" for w in self.wells):
+        co2 = self.fluid.preset == "co2_brine"
+        if co2 and not any(w.kind == "injector" for w in self.wells):
+            raise ValueError("at least one CO2 injector")
+        if not co2 and not any(w.kind == "producer" for w in self.wells):
             raise ValueError("at least one producer")
+        for well in self.wells:
+            if co2 and well.control == "water_rate":
+                raise ValueError(f"{well.name}: co2_brine injectors inject CO2 (gas_rate or bhp)")
+            if not co2 and well.control == "gas_rate":
+                raise ValueError(f"{well.name}: oil_water injectors inject water (water_rate "
+                                 "or bhp); gas_rate is co2_brine's")  # fmt: skip
         pressure = self.fluid.initial_pressure
         for well in self.wells:
             limit = well.target if well.control == "bhp" else well.bhp_limit
@@ -171,3 +218,22 @@ def five_spot(name: str = "five_spot", n: int = 21, layers: int = 3) -> DeckSpec
                         target=400.0, bhp_limit=400.0)  # fmt: skip
     return DeckSpec(name=name, grid=GridSpec(nx=n, ny=n, nz=layers),
                     wells=[*producers, injector])  # fmt: skip
+
+
+def co2_injection(name: str = "co2_box", n: int = 21, layers: int = 4) -> DeckSpec:
+    """Return a CO2 storage case: one CO2 injector in the middle, brine producers at corners.
+
+    About 0.5 Mt of CO2 a year (7.3e5 sm3/day) at the base, within 400 bar; two brine
+    producers relieve the pressure; monthly reports for three years.
+    """
+    middle = (n + 1) // 2
+    injector = WellSpec(name="INJ", kind="injector", i=middle, j=middle, k_top=layers,
+                        control="gas_rate", target=7.3e5, bhp_limit=400.0)  # fmt: skip
+    producers = [
+        WellSpec(name=f"PROD{k + 1}", kind="producer", i=i, j=j, control="liquid_rate",
+                 target=500.0, bhp_limit=100.0)
+        for k, (i, j) in enumerate([(2, 2), (n - 1, n - 1)])
+    ]  # fmt: skip
+    return DeckSpec(name=name, grid=GridSpec(nx=n, ny=n, nz=layers),
+                    wells=[injector, *producers], schedule=ScheduleSpec(steps=36),
+                    fluid=Co2BrineSpec(preset="co2_brine"))  # fmt: skip

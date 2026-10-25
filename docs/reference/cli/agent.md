@@ -22,7 +22,7 @@ apex agent ask QUESTION
 | `--model` | | Model (default: [agents.llm] model). |
 | `--base-url` | | Server address. |
 | `--api-key-env` | | Variable holding the key (never the key itself). |
-| `--no-tool-calls` (on) / `--no-no-tool-calls` (off) | false | The model has no native tool calling: prompt for JSON. |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
 | `--tools` (on) / `--no-tools` (off) | true | Offer APEX's tools. |
 | `--max-turns` | 8 | Model calls at most. |
 | `--client` | agent | Client name for quotas and the call log. |
@@ -38,13 +38,13 @@ apex agent diagnose TARGET
 | option | default | description |
 |---|---|---|
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
-| `--no-llm` (on) / `--no-no-llm` (off) | false | Rules only: no model is asked. |
+| `--no-llm` | false | Rules only: no model is asked. |
 | `--json` | false | Print the result as JSON. |
 | `--provider` | | Provider (default: [agents.llm] provider). |
 | `--model` | | Model (default: [agents.llm] model). |
 | `--base-url` | | Server address. |
 | `--api-key-env` | | Variable holding the key (never the key itself). |
-| `--no-tool-calls` (on) / `--no-no-tool-calls` (off) | false | The model has no native tool calling: prompt for JSON. |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
 
 ## `apex agent draft-optimization`
 
@@ -88,13 +88,13 @@ apex agent monitor TARGET
 | `--watch` (on) / `--no-watch` (off) | false | Check whenever a new forecast is scored, until the job ends. |
 | `--interval` | 60 | Seconds between looks, with --watch. |
 | `--act` (on) / `--no-act` (off) | false | Offer to stop the job when a stop is recommended (running iterative runs only); you are asked to confirm first. |
-| `--no-llm` (on) / `--no-no-llm` (off) | false | Rules only: no model is asked. |
+| `--no-llm` | false | Rules only: no model is asked. |
 | `--json` | false | Print the result as JSON. |
 | `--provider` | | Provider (default: [agents.llm] provider). |
 | `--model` | | Model (default: [agents.llm] model). |
 | `--base-url` | | Server address. |
 | `--api-key-env` | | Variable holding the key (never the key itself). |
-| `--no-tool-calls` (on) / `--no-no-tool-calls` (off) | false | The model has no native tool calling: prompt for JSON. |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
 
 ## `apex agent plan`
 
@@ -112,13 +112,13 @@ apex agent plan CONFIG
 | `--out` | | Where to write the study (default: beside the case). |
 | `--submit` (on) / `--no-submit` (off) | false | Submit the study after you confirm (through the tools, with an approval token). |
 | `--approval-token` | | Submit with this token, approved by `apex approve` after an earlier --submit was pending (implies --submit). |
-| `--no-llm` (on) / `--no-no-llm` (off) | false | Rules only: no model is asked. |
+| `--no-llm` | false | Rules only: no model is asked. |
 | `--json` | false | Print the result as JSON. |
 | `--provider` | | Provider (default: [agents.llm] provider). |
 | `--model` | | Model (default: [agents.llm] model). |
 | `--base-url` | | Server address. |
 | `--api-key-env` | | Variable holding the key (never the key itself). |
-| `--no-tool-calls` (on) / `--no-no-tool-calls` (off) | false | The model has no native tool calling: prompt for JSON. |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
 
 ## `apex agent plot`
 
@@ -135,12 +135,12 @@ apex agent plot TARGET
 | `--with` | | Switch on a preset's option, e.g. --with model_change --with normalized (brugge_classic). |
 | `--output` | | Output folder (default <run>/report/plots). |
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
-| `--no-llm` (on) / `--no-no-llm` (off) | false | Rules only: no model is asked. |
+| `--no-llm` | false | Rules only: no model is asked. |
 | `--provider` | | Provider (default: [agents.llm] provider). |
 | `--model` | | Model (default: [agents.llm] model). |
 | `--base-url` | | Server address. |
 | `--api-key-env` | | Variable holding the key (never the key itself). |
-| `--no-tool-calls` (on) / `--no-no-tool-calls` (off) | false | The model has no native tool calling: prompt for JSON. |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
 
 ## `apex agent providers`
 
@@ -164,9 +164,9 @@ apex agent report TARGET
 | `--study` | | Report on this study instead. |
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 | `--out` | | Where to write the Markdown. |
-| `--no-llm` (on) / `--no-no-llm` (off) | false | Rules only: no model is asked. |
+| `--no-llm` | false | Rules only: no model is asked. |
 | `--provider` | | Provider (default: [agents.llm] provider). |
 | `--model` | | Model (default: [agents.llm] model). |
 | `--base-url` | | Server address. |
 | `--api-key-env` | | Variable holding the key (never the key itself). |
-| `--no-tool-calls` (on) / `--no-no-tool-calls` (off) | false | The model has no native tool calling: prompt for JSON. |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |

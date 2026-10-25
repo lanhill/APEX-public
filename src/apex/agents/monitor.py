@@ -51,7 +51,7 @@ STOP_WORTHY = frozenset({"damping_runaway", "stagnation", "overfitting", "cv_pas
 #: the rules did not find is contradicted by the facts, and is dropped (:func:`reconcile`).
 RULE_CODES = frozenset({
     "ensemble_collapse", "member_failures", "damping_runaway", "stagnation", "overfitting",
-    "poor_fit", "cv_past_minimum",
+    "poor_fit", "cv_past_minimum", "no_progress", "mismatch_increased",
 })  # fmt: skip
 
 
@@ -282,14 +282,26 @@ def rules(observation: RunObservation, thresholds: MonitorSection | None = None)
     means = o.data_mismatch_means
     # A prior that already fits (normalized mismatch near 1, the noise) has nothing to gain.
     unfit = o.normalized_data_mismatch is None or o.normalized_data_mismatch > 2.0
-    if o.state == "complete" and unfit and len(means) >= 2 and means[0] > 0:
+    if o.state == "complete" and len(means) >= 2 and means[0] > 0:
         drop = 1.0 - means[-1] / means[0]
-        if drop < t.min_mismatch_reduction:
-            spread = ", ".join(f"{k} {v:.2g}" for k, v in sorted(o.spread_ratio.items()))
+        spread = ", ".join(f"{k} {v:.2g}" for k, v in sorted(o.spread_ratio.items()))
+        if -drop > t.stagnation_tolerance:
+            # A rise is not "no progress": the update moved the ensemble away from the data
+            # (a reported issue, 2026-10-25: ES-MDA without localization, 45 % higher). Within
+            # the stagnation tolerance it is noise; where the data are fitted, a note only.
+            findings.append(Finding(
+                code="mismatch_increased", severity="warning" if unfit else "info",
+                evidence=f"finished with the data mismatch {means[0]:.4g} -> {means[-1]:.4g} "
+                f"({-drop:.1%} higher) after {len(means) - 1} accepted iterate(s); spread "
+                f"relative to the prior's: {spread or 'n/a'}: the update moved the ensemble "
+                "away from the data",
+            ))  # fmt: skip
+        elif unfit and drop < t.min_mismatch_reduction:
             findings.append(Finding(
                 code="no_progress", severity="warning",
                 evidence=f"finished with the data mismatch {means[0]:.4g} -> {means[-1]:.4g} "
-                f"({drop:.1%} lower, < {t.min_mismatch_reduction:.0%}) after "
+                f"({abs(drop):.1%} {'lower' if drop >= 0 else 'higher'}, a change < "
+                f"{t.min_mismatch_reduction:.0%}) after "
                 f"{len(means) - 1} accepted iterate(s); spread relative to the prior's: "
                 f"{spread or 'n/a'}: the posterior is still close to the prior",
             ))  # fmt: skip

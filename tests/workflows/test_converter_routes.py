@@ -157,3 +157,30 @@ def test_the_web_ui_bounds_the_work_it_starts(tmp_path: Path) -> None:
     assert created.status_code == 422
     assert "at most 100" in created.json()["detail"]
     assert small.status_code == 200, small.text  # 24 cells
+
+
+def test_hard_data_are_read_only_from_the_callers_folders(tmp_path: Path) -> None:
+    """The review (2026-10-25): a guest's `data` outside their folders is not found, as a
+    missing file is; their own is estimated from."""
+    root, http, _ = _world(tmp_path)
+    (root / "ui_access.toml").write_text(GUEST_ACCESS)
+    guest = {"Authorization": f"Bearer {ui_token(root, create=True, guest='alice')}"}
+    converted = http.post("/v1/agents/convert", headers=guest,
+                          json={"source": "decks/CASE.DATA", "name": "small"})  # fmt: skip
+    assert converted.status_code == 200, converted.text
+    draft = converted.json()["draft"]
+    rows = "i,j,k,property,value\n1,1,1,poro,0.2\n2,1,1,poro,0.22\n3,2,2,poro,0.18\n"
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "wells.csv").write_text(rows)
+    (tmp_path / "decks" / "wells.csv").write_text(rows)
+
+    hidden = http.post("/v1/agents/geomodel", headers=guest,
+                       json={"config": draft, "data": "private/wells.csv"})  # fmt: skip
+    missing = http.post("/v1/agents/geomodel", headers=guest,
+                        json={"config": draft, "data": "private/none.csv"})  # fmt: skip
+    own = http.post("/v1/agents/geomodel", headers=guest,
+                    json={"config": draft, "data": "decks/wells.csv"})  # fmt: skip
+
+    assert hidden.status_code == missing.status_code == 404
+    assert own.status_code == 200, own.text
+    assert any("estimated from the hard data" in n for n in own.json()["notes"])

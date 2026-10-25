@@ -39,8 +39,10 @@ BaseURL = Annotated[str | None, typer.Option(help="Server address.")]
 KeyEnv = Annotated[
     str | None, typer.Option(help="Variable holding the key (never the key itself).")
 ]
+# Flags without a "--no-no-..." form (a reported issue, 2026-10-24).
 NoToolCalls = Annotated[
-    bool, typer.Option(help="The model has no native tool calling: prompt for JSON.")
+    bool,
+    typer.Option("--no-tool-calls", help="The model has no native tool calling: prompt for JSON."),
 ]
 
 
@@ -135,7 +137,9 @@ def monitor(
             "only); you are asked to confirm first."
         ),
     ] = False,
-    no_llm: Annotated[bool, typer.Option(help="Rules only: no model is asked.")] = False,
+    no_llm: Annotated[
+        bool, typer.Option("--no-llm", help="Rules only: no model is asked.")
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON.")] = False,
     provider: Provider = None,
     model: Model = None,
@@ -356,7 +360,7 @@ def _footer(decided_by: str, reason: str | None, corrections: tuple[str, ...], t
     typer.secho(f"decided by: {decided_by}; trace: {trace}", err=True, dim=True)
 
 
-NoLLM = Annotated[bool, typer.Option(help="Rules only: no model is asked.")]
+NoLLM = Annotated[bool, typer.Option("--no-llm", help="Rules only: no model is asked.")]
 JsonOutput = Annotated[bool, typer.Option("--json", help="Print the result as JSON.")]
 
 
@@ -991,7 +995,17 @@ def geomodel(
     ] = None,
     reference: Annotated[
         Path | None,
-        typer.Option(help="An .npz of reference fields in state space (e.g. the deck's values)."),
+        typer.Option(
+            help="An .npz of reference fields in state space (e.g. the deck's values): the "
+            "prior shares their mean, std and variogram, without reproducing them."
+        ),
+    ] = None,
+    data: Annotated[
+        Path | None,
+        typer.Option(
+            help="Hard data to estimate from and condition to: a CSV of i,j,k,property,value "
+            "(1-based cells; values in the deck's units; property facies: codes)."
+        ),
     ] = None,
     root: Root = None,
     no_llm: NoLLM = False,
@@ -1011,7 +1025,7 @@ def geomodel(
     )
     try:
         outcome = Geomodeler(service, chosen, loop_settings=settings).model(
-            config, output, request=request, reference=reference
+            config, output, request=request, reference=reference, data=data
         )
     except ApexError as error:
         raise _fail(error) from error

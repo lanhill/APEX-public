@@ -5,7 +5,11 @@ items:
   - cli:apex report
   - cli:apex resume
   - cli:apex run
+  - cli:apex schema
   - cli:apex stop
+  - config:history_match:method
+  - config:history_match:prior
+  - plugin:damping_schemes:rlmmac
   - plugin:methods:chop
   - plugin:methods:es
   - plugin:methods:esmda
@@ -13,46 +17,59 @@ items:
   - plugin:methods:gn_enrml
   - plugin:methods:lm_enrml
   - plugin:methods:multilevel_esmda
+  - plugin:update_strategies:hybrid
+  - plugin:update_strategies:rlmmac
 ---
 
 # Methods
 
-This page covers the plugins in the `methods` registry: `chop`, `es`, `esmda`, `gies`, `gn_enrml`, `lm_enrml` and `multilevel_esmda`. Each one is a history-matching method, meaning an algorithm that adjusts an ensemble of model parameters until the model output matches your observed data. You choose one in the method section of your TOML run configuration.
+This page covers the plugins in the `methods` registry: `chop`, `es`, `esmda`, `gies`, `gn_enrml`, `lm_enrml` and `multilevel_esmda`. Each one is a history-matching method: an algorithm that adjusts an ensemble of model parameters until the model output matches your observed data. You choose one in the `[method]` section of your TOML run configuration.
 
 ## Goal
 
 By the end of this lesson you will be able to:
 
 - list the method plugins and their options with `apex plugins`,
-- choose a method and know which options it accepts,
+- choose a method and know which options it accepts and where to set them,
 - start, stop, resume and report on a run with `apex run`, `apex stop`, `apex resume` and `apex report`.
 
 ## Prerequisites
 
-- A complete APEX run configuration file in TOML. The data, model and other sections are described on other pages. This page covers only the method.
+- A complete APEX run configuration file in TOML. The data, model and other sections are described on other pages. This page covers only `[method]`.
 - APEX installed, so that the `apex` command works.
+
+## Some words used on this page
+
+- **Analysis step**: one update of the ensemble. `es` makes one step. `esmda` makes one step per inflation factor. An iterative method (`gies`, `gn_enrml`, `lm_enrml`) makes one step per iteration, up to `max_iterations`.
+- **Update strategy**: the formula that turns the data mismatch into an update of the ensemble. You set it in `[method.strategy]`, by name (`strategy = "rlmmac"`) or with options. Examples are `rlmmac` and `hybrid`.
+- **Localization**: a way to limit each datum's influence to the parameters that are plausibly related to it. You set it in `[method.localization]`. If you leave it out, no localization is used, except by the local-analysis strategies, which select data by prior correlation.
+- **Damping**: shrinking the steps of an iterative method when the fit gets worse. You set it in `[method.damping]`, with the scheme `rlmmac` (the default for `gies`) or `lm` (the default for `lm_enrml`), for `gies` and `lm_enrml`.
+- **Checkpoint**: the state a run saves as it goes. `apex resume` continues from the last one, and `apex stop` takes effect at the next one.
 
 ## Steps
 
-1. Run `apex plugins` to list every plugin with its status and options. Add `--json` for the full descriptions as JSON.
+1. Run `apex plugins` to list every plugin with its options. Add `--json` for the full descriptions as JSON.
 2. Pick a method from the guide below.
 3. In the `[method]` section of your configuration, set `name` to the plugin you chose.
-4. Set the options of that plugin, and only those. Option schemas reject unknown options.
-5. Start the run with `apex run config.toml`.
+4. Put the plugin's own options in `[method.options]`, and only those. Option schemas reject unknown options.
+5. Set the settings that belong to `[method]` itself, directly under `[method]`: `strategy`, `localization`, `damping`, `schedule` and `max_iterations` (default 10, at least 1). Iterative methods use `max_iterations` and `schedule`.
+6. Start the run with `apex run config.toml`.
+
+To see everything a configuration file accepts, run `apex schema`. Its argument is one of `history_match` (the default), `prediction`, `study`, `optimization`, `optimization_study` or `service`.
 
 ### The seven methods
 
-Every method here except `chop` has the registry status `parity`; `chop` has none, as it is not a port of a PET method. That is the status `apex plugins` reports. It is informational: you never set it, and it does not change how you configure a method.
+Every method here except `chop` has the registry status `parity`; `chop` has none. That status is informational: you never set it.
 
 | Plugin | What it does | When to pick it | Options |
 |---|---|---|---|
-| `chop` | CHOP (continuous hyper-parameter optimization): wraps `gies` (the default) or `lm_enrml` and estimates hyper-parameters of its update, such as localization length scales, during the history match (X. Luo, W. C. Cruz, X.-L. Zhang and H. Xiao (2023). Hyper-parameter optimization for improving the performance of localization in an iterative ensemble smoother. *Geoenergy Science and Engineering* 231, 212404. [doi:10.1016/j.geoen.2023.212404](https://doi.org/10.1016/j.geoen.2023.212404)). | When you would otherwise tune localization length scales or inflation factors by hand. | `inner`, `components`, `hyper_localization`, `max_batch_mb`, and the inner method's own options |
-| `es` | Ensemble smoother: one single update of the ensemble using all the data at once (ES-MDA with one step at `alpha = 1`). | The simplest and cheapest choice, for a first pass or a nearly linear problem. | none |
-| `esmda` | ES-MDA (ensemble smoother with multiple data assimilation): several smaller updates, each using a covariance inflation factor `alpha_i` that makes the observation noise look larger. The factors come from a fixed schedule. | When a single update is too coarse and you want a few gentler updates. | `inflation` (required) |
-| `gies` | GIES, an iterative smoother (X. Luo (2021). Novel iterative ensemble smoothers derived from a class of generalized cost functions. *Computational Geosciences* 25(3), 1159–1189. [doi:10.1007/s10596-021-10046-1](https://doi.org/10.1007/s10596-021-10046-1)). It keeps the perturbed observations fixed and damps the updates it makes to the strategy. | When you want an iterative method that limits how far each update moves. | `max_trials_per_iteration` |
-| `gn_enrml` | GN-EnRML: the loop of `lm_enrml`, plus a step length that scales each update. | An iterative method where you want control of the step taken. | `max_inner_iterations` |
-| `lm_enrml` | LM-EnRML: the loop of `gies`, with a simplified (approximate) update and Levenberg-Marquardt damping, which shrinks steps when the fit gets worse. | A damped iterative method for strongly nonlinear problems. | `max_inner_iterations` |
-| `multilevel_esmda` | ES-MDA that works with several fidelity levels (versions of the model of differing accuracy and cost). | When you have models of different fidelity. | `inflation` (required), `levels` (required) |
+| `chop` | CHOP (continuous hyper-parameter optimization): wraps `gies` (the default) or `lm_enrml` and estimates hyper-parameters of its update, such as localization length scales, per member during the history match (X. Luo, W. C. Cruz, X.-L. Zhang and H. Xiao (2023). Hyper-parameter optimization for improving the performance of localization in an iterative ensemble smoother. *Geoenergy Science and Engineering* 231, 212404. [doi:10.1016/j.geoen.2023.212404](https://doi.org/10.1016/j.geoen.2023.212404)). | When you would otherwise tune localization length scales by hand. | `inner`, `components`, `hyper_localization`, `max_batch_mb` |
+| `es` | Ensemble smoother: a single update of the ensemble using all the data at once (ES-MDA with one step at `alpha = 1`). | The simplest and cheapest choice, for a first pass or a nearly linear problem. | none |
+| `esmda` | ES-MDA (ensemble smoother with multiple data assimilation): several smaller updates. Each uses an inflation factor `alpha_i` that makes the observation noise look larger. You list the factors in `inflation`. | When a single update is too coarse and you want a few gentler updates. | `inflation` (required) |
+| `gies` | GIES, an iterative smoother (X. Luo (2021). Novel iterative ensemble smoothers derived from a class of generalized cost functions. *Computational Geosciences* 25(3), 1159–1189. [doi:10.1007/s10596-021-10046-1](https://doi.org/10.1007/s10596-021-10046-1)). It keeps the same perturbed observations in every iteration and applies the update of the update strategy in damped form, so each step is limited. | When you want an iterative method that limits how far each update moves. | `max_trials_per_iteration` |
+| `gn_enrml` | GN-EnRML: an iterative smoother with Gauss-Newton steps scaled by a step length. | An iterative method where you want control of the step taken. | `max_inner_iterations` |
+| `lm_enrml` | LM-EnRML: an iterative smoother with Levenberg-Marquardt damping of its steps. | A damped iterative method for strongly nonlinear problems. | `max_inner_iterations` |
+| `multilevel_esmda` | ES-MDA on an ensemble split over several fidelity levels (versions of the model of differing accuracy and cost). | When you have models of different fidelity. | `inflation` (required), `levels` (required) |
 
 ### Options
 
@@ -71,9 +88,21 @@ Every method here except `chop` has the registry status `parity`; `chop` has non
 
 The `es` plugin has no options.
 
-`chop` passes every option it does not know itself to its inner method, so a `chop` method's options may also hold, for example, `max_trials_per_iteration` for `gies`. CHOP needs the `rlmmac` strategy and replaces a localization, so leave out the method's `localization` section. Its components and hyper-parameter localization are described on the [CHOP page](../../chop.md).
-
 TOML has no null value. To get the default (null) for `max_trials_per_iteration`, leave the key out. Likewise, leaving out `max_inner_iterations` gives 10.
+
+#### The `inflation` list
+
+`inflation` (for `esmda` and `multilevel_esmda`) holds the factors `alpha_i`, one per analysis step, and you set it yourself. The rule is that the sum of 1/`alpha_i` must be 1. Check it by adding the reciprocals:
+
+- `[2.0, 2.0]`: 1/2 + 1/2 = 1, so two steps.
+- `[4.0, 4.0, 4.0, 4.0]`: four times 1/4 = 1, so four steps.
+
+The length of the list is the number of steps. With a single factor `[1.0]` you get the same single update as `es`.
+
+#### The `strategy` of each method
+
+- `rlmmac` works with `gies` and `lm_enrml`, and with `chop`. APEX rejects it for `es`, `esmda` and `gn_enrml`, and for `multilevel_esmda`. For those, use another strategy or leave `[method.strategy]` out.
+- `hybrid` works with `multilevel_esmda` only, and is its default: leave out `[method.strategy]`.
 
 #### The levels of `multilevel_esmda`
 
@@ -83,13 +112,12 @@ TOML has no null value. To get the default (null) for `max_trials_per_iteration`
 |---|---|---|
 | `members` | yes | The level's number of members, at least 2. The levels' members must add up to `[prior] ensemble_size`. |
 | `weight` | yes | The level's weight in the hybrid gain, non-negative. The weights are normalised to sum 1. |
-| `upscale` | no | Grid coarsening of the level's deck (`method`, `dim`, `max_trunc`, ...), for `eclipse`. |
-| `deck_template_file` | no | A coarse deck template of the level's own, for `opm_flow` or `eclipse`. |
+| `upscale` | no | Grid coarsening of the level's simulator (`method`, `dim`, `max_trunc`, and more). |
+| `deck_template_file` | no | A deck template of the level's own (a coarse model). |
+| `forward_file` | no | The linear simulator's G of the level, an `.npz` file. |
+| `matrix` | no | The linear simulator's G, inline. |
 
-A level with neither `upscale` nor `deck_template_file` runs the fine model. The rules:
-
-- `inflation` is ES-MDA's schedule, as for `esmda`: one factor per step, and the sum of 1/α must be 1 (`[2, 2]`, `[4, 4, 4, 4]`). Its length is the number of steps and has nothing to do with the number of levels.
-- The only update strategy is `hybrid`, the default: leave out `[method.strategy]`.
+A level with no simulator key runs the fine model. The *hybrid gain* is the one gain, used to update the whole ensemble, that is built from the anomalies (deviations from the mean) of every level; the weights say how much each level counts. Run `apex plugins --json` for the full description of the level keys.
 
 ```toml
 [prior]
@@ -106,50 +134,43 @@ levels = [
 ]
 ```
 
-Here members 0–69 run the coarse deck and members 70–99 the fine one.
+The members add up to 70 + 30 = 100, the `ensemble_size`. Members 0–69 run the coarse deck and members 70–99 the fine one. The weights 0.3 and 0.7 already sum to 1.
 
 ### Items APEX supplies
 
-APEX itself hands each method some items. They are not options of the method, so never set them there:
+APEX itself hands each method some items from the rest of your configuration. They are not options of the method, so never put them in `[method.options]`:
 
-- `lower_bounds`, `strategy` and `upper_bounds`: supplied to all six methods other than `chop`, which passes them on to its inner method.
+- `lower_bounds`, `strategy` and `upper_bounds`: supplied to `es`, `esmda`, `gies`, `gn_enrml`, `lm_enrml` and `multilevel_esmda`. You choose the strategy in `[method.strategy]`; the bounds are not set on the method. `chop` wraps its inner method and hands the same items on to it.
 - `inner_method` and `block_sizes`: supplied to `chop`. The inner method comes from the `inner` option.
-- `max_iterations` and `schedule`: also supplied to `gies`, `gn_enrml` and `lm_enrml`. These come from the rest of your configuration, not from the method options. The `inflation` array of `esmda` and `multilevel_esmda` is a separate thing: it is a method option that you set yourself.
+- `max_iterations` and `schedule`: also supplied to `gies`, `gn_enrml` and `lm_enrml`. You set them directly under `[method]`, not in `[method.options]`.
 
 ## Worked example
 
-This example picks the plain ensemble smoother, `es`, which needs no options. It is a fragment: your `config.toml` must also contain the other required sections (data, model and so on).
+This example uses `esmda` with two steps. It is a fragment: your `config.toml` must also contain the other required sections (data, model and so on).
 
 ```toml
 [method]
-name = "es"
+name = "esmda"
+
+[method.options]
+inflation = [2.0, 2.0]
 ```
 
-Start the run:
+Start the run, stopping after one analysis step:
 
 ```bash
-apex run config.toml
+apex run config.toml --max-steps 1
 ```
 
-Progress goes to standard error: bars on a terminal, timestamped lines otherwise. Use `--no-progress` to hide it (`--progress` is the default).
+Progress goes to standard error: bars on a terminal, timestamped lines otherwise. Add `--no-progress` to hide it (`--progress` is the default).
+
+A run lives in its own run directory. The `[run]` section of your configuration sets it (the `name` or `output_dir`). Because of `--max-steps`, this run has stopped with work left. Continue it from its last checkpoint by giving `apex resume` that directory:
 
 ```bash
-apex run config.toml --no-progress
+apex resume RUN_DIR
 ```
 
-An analysis step is one update of the ensemble. To stop after a few steps, add `--max-steps`:
-
-```bash
-apex run config.toml --max-steps 2
-```
-
-Continue from the last checkpoint by giving `apex resume` the run directory:
-
-```bash
-apex resume RUN_DIR --max-steps 2
-```
-
-`apex resume` accepts the same `--max-steps` and `--progress`/`--no-progress` flags. To stop a run that is still going, at its next checkpoint, use:
+Replace `RUN_DIR` with your run directory. `apex resume` accepts the same `--max-steps` and `--progress`/`--no-progress` flags. To ask a run that is still going to stop at its next checkpoint, use:
 
 ```bash
 apex stop RUN_DIR
@@ -165,7 +186,7 @@ Figures go to `RUN_DIR/report` unless you pass `--output`. `--font-size` sets th
 
 ### Example: CHOP
 
-GIES with its localization length scales estimated by CHOP, one per datum:
+GIES with its localization length scales estimated by CHOP, one per datum. `max_iterations` and `strategy` are `[method]` settings, so they sit directly under `[method]`; the rest are options of `chop`:
 
 ```toml
 [method]
@@ -175,24 +196,27 @@ strategy = { name = "rlmmac", options = { energy = 0.99 } }
 
 [method.options]
 inner = "gies"
-max_trials_per_iteration = 4
 components = [{ name = "length_scale", mode = "data" }]
 ```
 
+CHOP needs the `rlmmac` strategy and estimates the localization itself, so leave out `[method.localization]`.
+
 ## Pitfalls
 
-- Starting `apex run` when the run directory already holds a run. APEX refuses with an error. Use `apex resume` on that directory, or choose another run directory.
+- Starting `apex run` when the run directory already holds a run. APEX refuses with an error. Run `apex resume` on that directory, or start a new run in another folder by changing the `name` or `output_dir` in `[run]`, or after moving the old folder away. This also means you cannot repeat the same `apex run` command to try another flag.
 - Leaving out `inflation` (for `esmda` and `multilevel_esmda`) or `levels` (for `multilevel_esmda`). They are required.
-- Giving `inflation` as a single number. It must be an array of numbers.
-- Giving `levels` as anything other than an array of objects.
-- Setting `lower_bounds`, `strategy`, `upper_bounds`, `max_iterations` or `schedule` as method options. APEX supplies them, and unknown options are rejected.
+- Giving `inflation` as a single number, or with reciprocals that do not sum to 1. It must be an array of numbers whose 1/`alpha_i` sum to 1.
+- Giving `levels` as anything other than an array of objects, or with members that do not add up to `[prior] ensemble_size`.
+- Setting `lower_bounds`, `strategy`, `upper_bounds`, `max_iterations` or `schedule` in `[method.options]`. Set `strategy`, `max_iterations` and `schedule` directly under `[method]`; unknown options are rejected.
 - Setting any option on `es`. It accepts none.
 - Setting `max_inner_iterations` on a method other than `gn_enrml` and `lm_enrml`.
 - Passing a non-integer to `max_inner_iterations` or `max_trials_per_iteration`.
 - Looking for a null in TOML. Omit the key instead.
-- Giving `chop` a strategy other than `rlmmac`, an inner method other than `gies` or `lm_enrml` (`gn_enrml` runs on GIES's loop but refuses `rlmmac`), or a `localization` section. CHOP refuses all three.
+- Choosing the `rlmmac` strategy with `es`, `esmda`, `gn_enrml` or `multilevel_esmda`. Use it with `gies`, `lm_enrml` or `chop`.
+- Giving `chop` a strategy other than `rlmmac`, an inner method other than `gies` or `lm_enrml` (`gn_enrml` refuses `rlmmac`), or a `localization` section. CHOP refuses all three.
 
 ## What to read next
 
 - The other pages in the plugins guide, for the rest of your run configuration.
 - The output of `apex plugins --json`, for the full description of each method, including the keys a `multilevel_esmda` level accepts.
+- The output of `apex schema`, for what the `[method]` section of the configuration accepts.

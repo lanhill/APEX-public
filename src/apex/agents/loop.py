@@ -44,6 +44,7 @@ from apex.core.llm import (
     LLMError,
     LLMInvalidOutput,
     LLMProvider,
+    LLMTimeout,
     LLMUnavailable,
     Message,
     StreamingProvider,
@@ -234,6 +235,8 @@ class Outcome[T: BaseModel]:
     unavailable
         Whether it fell back because the provider was unavailable (``LLMUnavailable``: it
         could not be reached, a usage limit, a timeout), not for another failure.
+    timed_out
+        Whether that was a timeout (``LLMTimeout``): the model took too long to answer.
     """
 
     decision: T
@@ -243,6 +246,7 @@ class Outcome[T: BaseModel]:
     tool_calls: list[dict[str, Any]]
     trace: Path
     unavailable: bool = False
+    timed_out: bool = False
 
 
 class _Invalid(Exception):
@@ -367,7 +371,7 @@ class AgentLoop:
                 limit, granted = limit + 1, granted + 1
 
         reason = f"no valid answer in {limit} turns"
-        unavailable = False
+        unavailable = timed_out = False
         turn = -1
         while (turn := turn + 1) < limit:
             self._check_stop()
@@ -396,6 +400,7 @@ class AgentLoop:
                 self._check_stop()  # a call cut short by a stop (claude -p killed) is a stop
                 reason = f"the provider failed: {error}"
                 unavailable = isinstance(error, LLMUnavailable)
+                timed_out = isinstance(error, LLMTimeout)
                 break
             try:
                 if native and completion.tool_calls:
@@ -455,7 +460,7 @@ class AgentLoop:
             "agent falls back: %s", reason, extra={"event": "agent_fallback", "reason": reason}
         )
         return self._outcome(task, fallback.decide(), True, reason, fallback, calls, tool_log,
-                             unavailable=unavailable)  # fmt: skip
+                             unavailable=unavailable, timed_out=timed_out)  # fmt: skip
 
     # ------------------------------------------------------------------ parts
 
@@ -742,6 +747,7 @@ class AgentLoop:
         tool_log: list[dict[str, Any]],
         *,
         unavailable: bool = False,
+        timed_out: bool = False,
     ) -> Outcome[T]:
         trace = self.recorder.record_decision(
             self.provider,
@@ -753,7 +759,7 @@ class AgentLoop:
             thresholds=fallback.thresholds,
             tool_calls=tool_log,
         )
-        return Outcome(decision, fell_back, reason, calls, tool_log, trace, unavailable)
+        return Outcome(decision, fell_back, reason, calls, tool_log, trace, unavailable, timed_out)
 
 
 _AGAIN = "Reply again with only the JSON object."

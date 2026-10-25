@@ -53,7 +53,7 @@ DIAGNOSIS_CODES = frozenset({
 })  # fmt: skip
 MONITOR_CODES = frozenset({
     "ensemble_collapse", "member_failures", "damping_runaway", "stagnation", "overfitting",
-    "poor_fit", "cv_past_minimum", "no_progress",
+    "poor_fit", "cv_past_minimum", "no_progress", "mismatch_increased",
 })  # fmt: skip
 RULE_CODES = DIAGNOSIS_CODES | MONITOR_CODES
 
@@ -337,7 +337,10 @@ def rules(
             evidence="; ".join(f"{f.members} members: {f.reason!r}" for f in recurring[:3]),
         ))  # fmt: skip
     codes = {c.code for c in causes}
-    recommendations = _recommend(facts, codes)
+    # A rise on a run that fits its data is a note only: nothing to change for it.
+    advised = codes - {c.code for c in causes if c.code == "mismatch_increased"
+                       and c.severity == "info"}  # fmt: skip
+    recommendations = _recommend(facts, advised)
     failed = o.state == "failed"
     serious = any(c.severity != "info" for c in causes)
     verdict: Literal["healthy", "problems", "failed"] = (
@@ -355,14 +358,24 @@ def rules(
 def _recommend(facts: DiagnosisFacts, codes: set[str]) -> list[Recommendation]:
     """Return the rules' recommendations for the causes found."""
     out: list[Recommendation] = []
-    if codes & {"ensemble_collapse", "overcorrection"} and facts.localization is None:
+    spurious = codes & {"ensemble_collapse", "overcorrection", "mismatch_increased"}
+    if spurious and facts.localization is None:
         name = default_localization(facts.observation.method)
         out.append(Recommendation(
             change=f"Localize the update with adaptive localization ({name})",
-            rationale="the ensemble collapsed or over-corrected, the signature of spurious "
-            "correlations in a small ensemble; localization removes them",
-            addresses=sorted(codes & {"ensemble_collapse", "overcorrection"}),
+            rationale="the ensemble collapsed, over-corrected or moved away from the data, "
+            "the signature of spurious correlations in a small ensemble; localization "
+            "removes them",
+            addresses=sorted(spurious),
             patch={"method": {"localization": {"name": name}}},
+        ))  # fmt: skip
+    elif "mismatch_increased" in codes:
+        out.append(Recommendation(
+            change="Use more members, or smaller steps (for ES-MDA, more steps with larger "
+            "inflation factors), and check that the data errors are not too small",
+            rationale="the localized update still moved the ensemble away from the data: "
+            "the steps are too large for what the ensemble can estimate",
+            addresses=["mismatch_increased"],
         ))  # fmt: skip
     if "overfitting" in codes and not facts.has_validation:
         out.append(Recommendation(

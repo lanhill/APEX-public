@@ -101,6 +101,51 @@ def test_an_unavailable_model_leaves_it_to_the_rules(tmp_path: Path, small_deck:
     assert outcome.valid
 
 
+def test_a_request_the_rules_did_not_apply_is_named(tmp_path: Path, small_deck: Path) -> None:
+    """A reported issue (2026-10-24): a failed model's request was dropped without a word."""
+    service = ApexService(tmp_path / "service")
+
+    down = CaseConverter(service, StubProvider([LLMUnavailable("down")]), settings=SMALL).convert(
+        small_deck, tmp_path / "a", request="porosity only, with ES-MDA"
+    )
+    unasked = CaseConverter(service, None, settings=SMALL).convert(
+        small_deck, tmp_path / "b", request="porosity only, with ES-MDA"
+    )
+
+    assert down.notes[0].startswith("the request was not applied (")
+    assert down.notes[0].endswith(": 'porosity only, with ES-MDA'; the rules' choices are used")
+    assert unasked.notes[0] == ("the request was not applied (no model was asked): 'porosity "
+                                "only, with ES-MDA'; the rules' choices are used")  # fmt: skip
+    assert "the request was not applied" in (tmp_path / "b" / NOTES).read_text()
+    plain = CaseConverter(service, None, settings=SMALL).convert(small_deck, tmp_path / "c")
+    assert not any("request" in note for note in plain.notes)
+
+
+def test_the_prior_is_noted_with_its_mean_and_variance(tmp_path: Path, small_deck: Path) -> None:
+    """A reported issue (2026-10-24): the notes said "a Gaussian field around the deck's
+    values"; the prior is stationary, with the deck's mean and variance, which were not said."""
+    service = ApexService(tmp_path / "service")
+
+    outcome = CaseConverter(service, None, settings=SMALL).convert(small_deck, tmp_path / "out")
+
+    raw = tomllib.loads((tmp_path / "out" / CONFIG).read_text())
+    for name, space in (("permx", " of its logarithm"), ("poro", "")):
+        options = raw["prior"]["variables"][name]["options"]
+        note = next(n for n in outcome.notes if n.startswith(f"{name}: a stationary"))
+        assert (f"with the deck's mean {options['mean']:.4g} and variance "
+                f"{options['variance']:.4g}{space}, range") in note  # fmt: skip
+    assert "around the deck's values" not in (tmp_path / "out" / NOTES).read_text()
+
+
+def test_a_missing_deck_is_named_by_the_path_given(tmp_path: Path) -> None:
+    given = tmp_path / "decks" / "MODEL.DATA"
+
+    with pytest.raises(ConfigError, match=f"^no case at {given}$"):
+        CaseConverter(ApexService(tmp_path / "s"), None, settings=SMALL).convert(
+            given, tmp_path / "out"
+        )
+
+
 def test_an_invalid_draft_goes_back_to_the_model_then_to_the_rules(
     tmp_path: Path, small_deck: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -155,6 +200,17 @@ def test_the_command_converts_and_lists_the_skills(tmp_path: Path, small_deck: P
     assert shown["choices"]["ensemble_size"] == 20
     assert "opm_flow" in skills.stdout
     assert "eclipse" in skills.stdout
+
+
+def test_agent_commands_have_one_no_llm_flag() -> None:
+    """A reported issue (2026-10-24): `--help` showed a flag named `--no-no-llm`."""
+    import re
+
+    shown = CliRunner().invoke(app, ["agent", "convert", "create", "--help"], terminal_width=200)
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", shown.stdout)
+    assert "--no-llm" in plain
+    assert "--no-no-" not in plain
 
 
 def test_the_converter_is_in_the_catalogue() -> None:
@@ -303,3 +359,31 @@ def test_installed_advisors_advise_a_skill_and_hear_its_events(
     assert "fake:7" in decision["advice"]
     assert [(a, s) for a, s, _ in heard] == [("case-converter", "pet")]
     assert heard[0][2].startswith("refused:to:")
+
+
+def test_the_example_deck_is_its_template_rendered_and_converts(tmp_path: Path) -> None:
+    """The 3dBox example ships a rendered deck to try `convert import` on (a reported issue,
+    2026-10-24: the examples had only templates). It stays the template rendered with the
+    truth, and converts with the example's observations as its history."""
+    import numpy as np
+
+    from apex.core.simulation import MemberInput
+    from apex.simulation.deck import render_deck
+
+    example = Path(__file__).resolve().parents[2] / "examples" / "3dbox_production"
+    with np.load(example / "truth.npz") as truth:
+        state = {"permx": truth["permx"], "poro": truth["poro"]}
+    rendered = render_deck(example / "deck.mako", MemberInput(0, state), {"permx_cap": 8.0},
+                           case_dir=Path("."))  # fmt: skip
+    shipped = (example / "BOX.DATA").read_text()
+    assert shipped.startswith("-- BOX.DATA: ")
+    assert shipped.endswith(rendered), "re-render BOX.DATA: see the example's README"
+
+    outcome = CaseConverter(ApexService(tmp_path / "service"), None, settings=SMALL).convert(
+        example / "BOX.DATA", tmp_path / "box", history=example / "observations.csv"
+    )
+
+    assert outcome.valid, outcome.validation.errors
+    assert [(v.property, v.transform) for v in outcome.choices.variables] == [
+        ("PERMX", "log"), ("PORO", "none")]  # fmt: skip
+    assert {f.name for f in (tmp_path / "box").iterdir()} >= {"pvt.txt", "Schdl.sch"}

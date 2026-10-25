@@ -190,6 +190,30 @@ def test_no_progress_is_a_cause_with_less_damping_as_its_advice() -> None:
     assert "initial damping" in advice.change
 
 
+def test_a_mismatch_that_rose_is_a_cause_with_localization_as_its_advice() -> None:
+    """A reported issue (2026-10-25): a diverging ES-MDA run was diagnosed as no_progress."""
+    diverged = _observation(state="complete", method="esmda",
+                            data_mismatch_means=[5.877e8, 8.51e8], data_mismatch_iterations=[0, 1],
+                            normalized_data_mismatch=5.95e4)  # fmt: skip
+
+    d = rules(_facts(observation=diverged))
+
+    assert "mismatch_increased" in _codes(d)
+    assert "no_progress" not in _codes(d)
+    advice = next(r for r in d.recommendations if "mismatch_increased" in r.addresses)
+    assert advice.patch == {"method": {"localization": {"name": "adaptive"}}}
+    localized = rules(_facts(observation=diverged, localization="adaptive_prior"))
+    advice = next(r for r in localized.recommendations if "mismatch_increased" in r.addresses)
+    assert advice.patch is None
+    assert "more members" in advice.change
+    fitted = _observation(state="complete", method="esmda", data_mismatch_means=[52.0, 54.0],
+                          data_mismatch_iterations=[0, 1],
+                          normalized_data_mismatch=1.1)  # fmt: skip
+    noted = rules(_facts(observation=fitted))
+    assert "mismatch_increased" in _codes(noted)
+    assert not any("mismatch_increased" in r.addresses for r in noted.recommendations)
+
+
 def test_the_model_is_held_to_the_facts() -> None:
     rules_d = rules(_facts(data_scores=[("y @ t0", 40.0)]))
     model = Diagnosis(

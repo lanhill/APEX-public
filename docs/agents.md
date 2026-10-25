@@ -98,6 +98,8 @@ apex agent monitor RUN --json                     # everything, for scripts
    | `overfitting` | normalized data mismatch < 0.5: the noise is fitted |
    | `poor_fit` | a finished run's normalized data mismatch > 10 000 |
    | `cv_past_minimum` | no CV improvement for 2 accepted iterates |
+   | `no_progress` | a finished run's data mismatch fell by less than 10 % (`min_mismatch_reduction`) while the data are not yet fitted (normalized mismatch > 2) |
+   | `mismatch_increased` | a finished run's data mismatch is more than 1 % (`stagnation_tolerance`) higher than the prior's: the update moved the ensemble away from the data (a note only where the data are fitted) |
 
    For example, a mismatch of 2.00 that is still 1.99 three accepted iterates later has changed by 0.5 %, so `stagnation` fires.
 3. **Judgement.** The model gets the facts, the rules' report and read-only tools. It returns its own report, with evidence for each finding. If it fails, or no model is set, the rules decide. The model's report is then held to the facts:
@@ -142,7 +144,7 @@ Thresholds are in `[agents.diagnosis]`:
 | `overcorrection` | more than 10 % (`overcorrection_percent`) of a group's parameters moved far from the prior |
 | `recurring_failure` | 3 or more members failed for the same reason |
 
-The monitor's findings are also causes. Recommendations address the causes, e.g. adaptive localization for a collapse or an overcorrection, `[validation]` for overfitting, checking data errors and the prior for a model deficiency (never dropping the data), a larger initial damping for a damping runaway.
+The monitor's findings are also causes. Recommendations address the causes, e.g. adaptive localization for a collapse, an overcorrection or a mismatch that increased, `[validation]` for overfitting, checking data errors and the prior for a model deficiency (never dropping the data), a larger initial damping for a damping runaway.
 
 A recommendation that is a setting carries a **JSON merge patch** over the run's configuration, the same kind a study variant uses. Every patch is applied to the run's configuration and validated by the service before it is shown; patches that fail are dropped, with the error, and the advice stays. A cause with a rule's code that the rules did not find is dropped.
 
@@ -188,6 +190,7 @@ The plotter draws a run's result figures into `RUN/report/plots/`, where the run
 
 ```bash
 apex agent convert import CASE.DATA --out my_case
+apex agent convert import examples/3dbox_production/BOX.DATA --history examples/3dbox_production/observations.csv --out my_box --no-llm   # the deck APEX ships
 apex agent convert import CASE.DATA --out my_case --history observed.csv --request "match porosity with ES-MDA"
 apex agent convert skills
 ```
@@ -202,16 +205,17 @@ How the case is put together:
 - **Cells that are 0 in the deck stay 0.** Inactive cells and barriers are not matched.
 - **Validation.** The draft is validated. Errors go back to the model up to `max_revisions` times (3), and then the rules convert.
 
-Every value the converter assumed is listed in `my_case/CONVERSION.md`: the bounds, and the prior's spread and correlation range. Read it before running. A converted case is `real`: its prior is centred on the deck's values, so replace it with a prior of your own where you have one.
+Every value the converter assumed is listed in `my_case/CONVERSION.md`: the bounds, and the prior's spread and correlation range. Read it before running. A converted case is `real`: its prior is a stationary field with the deck's mean and variance of each property (one value for the whole grid, not the deck's values cell by cell), so replace it with a prior of your own where you have one.
 
 Synthetic cases are created from a description:
 
 ```bash
 apex agent convert create --out box --request "a 30 x 30 x 4 five-spot, 200 mD, monthly for three years"
+apex agent convert create --out store --request "CO2 storage: inject 1 Mt a year for 3 years into a 25 x 25 x 5 brine aquifer"
 apex agent convert observe box   # if you answered no to the truth run
 ```
 
-- **The description.** The model turns the request into a case description: a box grid, the wells and their controls, the report steps, an oil-water fluid, and the statistics of ln PERMX and PORO. Code checks it, for example that the wells lie inside the grid. Without a model, the rules give a five-spot: 21 × 21 × 3 cells, four producers and an injector, monthly reports for two years.
+- **The description.** The model turns the request into a case description: a box grid, the wells and their controls, the report steps, a fluid preset, and the statistics of ln PERMX and PORO. The presets are `oil_water` (dead oil and water) and `co2_brine` (CO2 stored in a brine aquifer: OPM Flow's `CO2STORE`, with the CO2 dissolving in the brine, at a given salinity and temperature; CO2 injectors on rate, in sm3/day of CO2, about 1.46 million for 1 Mt a year, and optional brine producers). `co2_brine` runs on OPM Flow only: Eclipse would need E300's compositional `CO2STORE`, which the preset does not write. Code checks it, for example that the wells lie inside the grid. Without a model, the rules give a five-spot: 21 × 21 × 3 cells, four producers and an injector, monthly reports for two years.
 - **What is written.** The converter writes the deck, a prior of Gaussian fields from those statistics, and a truth drawn from the same prior with a seed of its own.
 - **The observations.** After you confirm (or with `--yes`), the truth runs once on the simulator, and its well rates and pressures, with noise, become the observations. A vector that stays 0 is not observed. The case is then `synthetic` and validates; `case_spec.json` keeps its description.
 
@@ -225,8 +229,7 @@ apex agent convert to-pet apex_case/config.toml pet_case   # pet.toml, data.csv,
 An APEX case written for PET reads back to the same APEX case, and PET's own reader accepts it. What PET cannot run as APEX does is refused with the reason, never approximated:
 - data transforms, geophysics, parameterizations, model error and cross validation;
 - localization and damping;
-- GIES: the PET fork that runs it has a configuration format of its own, which is not written yet;
-- APEX's own methods, strategies and options PET has no place for;
+- methods not implemented in PET, such as GIES and CHOP (the refusal says so), and APEX's own strategies and options PET has no place for;
 - template values, one-sided bounds and joint priors;
 - variogram priors PET's sampler would not reproduce. Only isotropic fields, or fields anisotropic along j, on a square grid are written; give a stored ensemble otherwise.
 
@@ -246,16 +249,21 @@ Each simulator, and PET and ERT, has a converter skill; `apex agent convert skil
 ```bash
 apex agent geomodel my_case/config.toml --reference my_case/reference.npz
 apex agent geomodel my_case/config.toml --request "ln PERMX around 5 with a 10-cell range, porosity 0.2 ± 0.03"
+apex agent geomodel my_case/config.toml --data my_case/wells.csv   # estimate from well data
 ```
 
 The geomodeler gives a case's state variables a prior. It works on every variable not read from a stored ensemble, and writes the prior into a new configuration beside the old one (`config_prior.toml`).
 
-- **Skills.** `continuous` draws Gaussian fields of properties such as ln PERMX and PORO. `facies_pluri` draws facies by proportion from a latent field, conditioned to the wells' facies, with each facies' property values.
-- **Parameters.** Your values come first. Then come the mean and spread of a reference field (`--reference`: an `.npz` of arrays in state space, e.g. the deck's values). Anything else is proposed and listed as assumed.
+- **Skills.**
+  - `continuous` draws Gaussian fields of properties such as ln PERMX and PORO.
+  - `correlated_continuous` draws properties that vary together, such as porosity and ln PERMX, into a stored ensemble.
+  - `facies_pluri` draws facies by proportion from a latent field, conditioned to the wells' facies, with each facies' property values.
+  - `facies_mps` draws facies with the shapes of a training image (SNESIM).
+- **Parameters.** Your values come first. Then come estimates from hard data (`--data`: a CSV of `i,j,k,property,value`), each property's mean, spread and variogram, and the facies' proportions, length scale and wells. Then the mean and spread of a reference field (`--reference`: an `.npz` of arrays in state space, e.g. the deck's values). Anything else is proposed and listed as assumed.
 - **Rules.** Without a model, each variable gets a Gaussian field around the reference (or the middle of its bounds), with a range of a quarter of the grid (`[agents.geomodeler]`).
 - **The drawn sample is checked.** Code draws a small sample of the new prior and compares its mean and spread, or its facies proportions, with what was asked. Bounds that clip a field show up here. A prior that fails goes back to the model to revise.
 
-A run never calls the geomodeler: a prior is always a recorded section or file, so runs stay reproducible.
+A run never calls the geomodeler: a prior is always a recorded section or file, so runs stay reproducible. [The geomodeler](geomodeler.md) has the skills, the hard data and the variogram estimator in full.
 
 ### Optimizations
 

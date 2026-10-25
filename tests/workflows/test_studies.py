@@ -136,6 +136,49 @@ def test_a_study_metric_its_cells_do_not_record_is_refused(
     assert service.validate_study(_study(case)).valid  # rmse is recorded
 
 
+def test_a_study_metric_with_an_unknown_label_or_name_is_refused(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue (2026-10-24): ``rmse:xx``, a typo for the state variable ``x``,
+    validated, ran, and was left out of the comparison without a word."""
+    case = linear_case(ensemble_size=20)
+    path = _study(case)
+    path.write_text(path.read_text().replace(
+        '"rmse:all"', '"rmse:xx", "rmse:x", "normalized_data_mismatch:y", '
+        '"normalized_data_mismatch:z", "rmsee:all", "rmse:x:skill", '
+        '"constraint_cost:all"'))  # fmt: skip
+    service = ApexService(tmp_path / "service")
+
+    validation = service.validate_study(path)
+
+    assert not validation.valid
+    refused = [e for e in validation.errors if "would have no values" not in e]
+    assert refused == [
+        "study metric 'rmse:xx': no 'xx' in the cases; give 'all' or one of their state "
+        "variables: x",
+        "study metric 'normalized_data_mismatch:z': no 'z' in the cases; give 'all' or one "
+        "of their data types: y",
+        refused[2],
+        "study metric 'constraint_cost:all': no 'all' in the cases; give one of their labels: "
+        "cost, violations",
+    ]  # rmse:x:skill: a facies score's parts follow the variable
+    assert refused[2].startswith("study metric 'rmsee:all': no metric 'rmsee'; ")
+    assert "rmse" in refused[2].split("the metrics are ")[1].split(", ")
+
+
+def test_a_comparison_names_a_metric_no_cell_recorded(tmp_path: Path) -> None:
+    """A study planned before labels were checked says which metric has no values."""
+    from apex.services.study import comparison_from_values
+
+    notes = comparison_from_values(
+        tmp_path, "s", cases=["c"], metrics=["rmse:x", "rmse:xx"], methods=[None],
+        variants=["v"], replicates=1, values={("c", "rmse:x", None, "v"): {0: 1.0}},
+        missing=[], skipped=[],
+    ).notes  # fmt: skip
+    assert "rmse:xx: no values in any finished cell; check the metric's name and label" in notes
+    assert not any(note.startswith("rmse:x:") for note in notes)
+
+
 def test_a_study_runs_its_cells_and_compares_its_variants(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:

@@ -508,6 +508,35 @@ def test_a_card_shown_after_a_fallback_answer_is_named_in_it(
     assert len(store.proposals(chat.id)) == 1
 
 
+def test_a_timed_out_model_is_said_in_plain_words_and_the_card_still_named(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """issue #239: the answer was the provider's error ("no answer in 120 s (2
+    attempt(s))"); a timeout is now said plainly, with what was done and the card named."""
+    from apex.core.llm import LLMTimeout
+
+    variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"}]
+    stub = StubProvider([
+        Completion(tool_calls=(ToolCall("c1", "plan_study", {
+            "case": "alpha/config.toml", "goal": "baseline only", "budget": 200,
+            "name": "slow", "variants": variants, "replicates": 1}),)),
+        LLMTimeout("claude_code: no answer in 120 s (2 attempt(s))"),
+    ])  # fmt: skip
+    _, _, store, assistant = _planning(tmp_path, linear_case, stub)
+    chat = store.create("plan")
+
+    answer = assistant.run(chat.id, "Set up a baseline study on alpha and propose it")
+
+    assert answer.startswith("The model took too long to answer")
+    assert "120 s" not in answer
+    assert "attempt" not in answer
+    assert "plan_study (done)" in answer
+    assert answer.endswith(AUTO_PROPOSED.format(drafts="`study_slow.toml`"))
+    assert "no answer in 120 s" in store.turns(chat.id)[-1].data["reason"]
+    [shown] = [e for e in store.events(chat.id) if e.kind == "fallback"]
+    assert shown.data["reason"] == "the model took too long to answer"
+
+
 def test_the_closing_sentence_names_every_card_and_who_may_launch() -> None:
     """One card, several, and a sign-in that may not launch (its card says so)."""
     from types import SimpleNamespace

@@ -11,8 +11,9 @@ is written as follows:
   come from the deck's values: a log property's range widened by
   ``LOG_MARGIN``, other properties' range scaled by ``LINEAR_MARGIN``, within physical
   limits;
-- **the prior**: centred on the deck's values. Its spread is the deck's own, or an assumed
-  one where the deck's values are uniform. Its correlation range is ``RANGE_FRACTION`` of the
+- **the prior**: a stationary field with the deck's mean and variance of the property (one
+  mean for the whole grid, not the deck's values cell by cell); the variance is assumed
+  where the deck's values are uniform. Its correlation range is ``RANGE_FRACTION`` of the
   grid's larger side. Layers of up to ``DENSE_LAYER_CELLS`` cells use the ``gaussian_field``
   generator, which needs one dense Cholesky factor per layer; larger layers use independent
   ``gaussian`` values. Every assumed value is noted for the geomodeler to replace;
@@ -162,6 +163,12 @@ class DeckSkill(ConverterSkill):
         about their means (PORO within physical limits); the case is synthetic, its truth
         ``truth.npz``, its observations ``observations.csv`` (written by the agent).
         """
+        if spec.fluid.preset == "co2_brine" and self.simulator != "opm_flow":
+            raise ConfigError(
+                f"co2_brine is written for OPM Flow's CO2STORE; {self.simulator} would need "
+                "E300's compositional CO2STORE, which this preset does not write: create the "
+                "case on opm_flow"
+            )
         grid = [spec.grid.nx, spec.grid.ny, spec.grid.nz]
         size = spec.grid.nx * spec.grid.ny * spec.grid.nz
         props = spec.properties
@@ -258,15 +265,22 @@ class DeckSkill(ConverterSkill):
         nx, ny = grid[0], grid[1]
         if nx * ny > DENSE_LAYER_CELLS:
             notes.append(f"{name.lower()}: layers of {nx * ny} cells are too large for "
-                         "gaussian_field; independent gaussian values (assumed: ask the "
-                         "geomodeler for a correlated prior)")  # fmt: skip
+                         f"gaussian_field; independent gaussian values with the deck's mean "
+                         f"{mean:.4g} and variance {variance:.4g}{_space(transform)} (assumed: "
+                         "ask the geomodeler for a correlated prior)")  # fmt: skip
             return {"name": "gaussian", "options": {"mean": mean, "std": math.sqrt(variance)}}
         major = max(1.0, round(RANGE_FRACTION * max(nx, ny), 1))
-        notes.append(f"{name.lower()}: a Gaussian field around the deck's values, range "
+        notes.append(f"{name.lower()}: a stationary Gaussian field with the deck's mean "
+                     f"{mean:.4g} and variance {variance:.4g}{_space(transform)}, range "
                      f"{major:g} cells (assumed: ask the geomodeler to estimate it)")  # fmt: skip
         return {"name": "gaussian_field", "options": {
             "grid": grid, "mean": mean, "variance": variance, "major_range": major,
         }}  # fmt: skip
+
+
+def _space(transform: str) -> str:
+    """Return where a prior's statistics are taken: the logarithm's, for a 'log' variable."""
+    return " of its logarithm" if transform == "log" else ""
 
 
 def method_section(method_name: str, iterations: int, localization: str) -> dict[str, object]:

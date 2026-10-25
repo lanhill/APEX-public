@@ -48,9 +48,9 @@ Most agent commands share the same model options:
 | `--model` | Model. Default: `model` in `[agents.llm]`. |
 | `--base-url` | Address of the model server. Set it when the model is served somewhere other than the provider's usual address, for example a local server: `--base-url http://localhost:8000`. Leave it out otherwise. |
 | `--api-key-env` | The name of the environment variable that holds the key. Never put the key itself here. |
-| `--no-tool-calls` | Use this when the model has no native tool calling; APEX then prompts it for JSON. `--no-no-tool-calls` switches it back off. Default: off. |
+| `--no-tool-calls` | Use this when the model has no native tool calling; APEX then prompts it for JSON. Default: off. |
 
-The commands `diagnose`, `monitor`, `plan`, `plot` and `report` also accept `--no-llm`. It means rules only: no model is asked. `--no-no-llm` switches it off again. Default: off, so a model is asked. `apex agent draft-optimization` never uses a model.
+The commands `diagnose`, `monitor`, `plan`, `plot` and `report` also accept `--no-llm`. It means rules only: no model is asked. Default: off, so a model is asked. `apex agent draft-optimization` never uses a model.
 
 **What the model receives.** An agent sends the model facts computed from your runs and cases: configuration settings, data-mismatch and metric values, well and data-type names, and paths. A hosted provider (`anthropic`, `claude_code`, or a `--base-url` outside your own machines) receives them on its servers, under its terms; a local server (Ollama, vLLM, llama.cpp on `localhost` or your network) keeps them on your machines, and `--no-llm` sends nothing. See [what a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
 
@@ -230,7 +230,7 @@ Suppose a history-matching run `hm_run` has finished and you want to review it, 
 ## Pitfalls
 
 - **Passing the key itself.** `--api-key-env` takes the name of a variable, never the key.
-- **Mixing up the switches.** `--no-tool-calls` turns on prompting for JSON; it is not the same as `--no-tools`, which stops the agent from being offered APEX's tools. `--no-no-tool-calls` and `--no-no-llm` are the off switches for their options, not aliases.
+- **Mixing up the switches.** `--no-tool-calls` turns on prompting for JSON; it is not the same as `--no-tools`, which stops the agent from being offered APEX's tools.
 - **Expecting a model to be asked with `--no-llm`.** It gives rules only.
 - **Forgetting `--forecast-end`.** `apex agent draft-optimization` requires it, and the date must come after the history.
 - **Using `--producer-bhp` with `oil_rate` control.** The bounds are for bhp control.

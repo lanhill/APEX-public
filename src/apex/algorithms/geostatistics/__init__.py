@@ -23,10 +23,18 @@ Differences:
 - **Ranges.** Anisotropy is ``major_range`` / ``minor_range`` plus an ``azimuth`` (degrees,
   counter-clockwise from the i-axis). PET's ``range`` and ``aniso`` correspond to
   ``minor_range = range`` and ``major_range = aniso * range``.
+- **Conditioning** to hard data (not in PET) is by kriging the residuals:
+  :mod:`apex.algorithms.geostatistics.conditioning`.
 - **Singular covariances** (e.g. Gaussian variograms) fall back to a clipped
   eigen-decomposition with a logged warning; PET's Cholesky fails.
 """
 
+from apex.algorithms.geostatistics.conditioning import (
+    condition_by_kriging,
+    kriged_excursion,
+    kriging_factor,
+    layer_cross_covariance,
+)
 from apex.algorithms.geostatistics.covariance import (
     VARIOGRAM_MODELS,
     correlated_sample,
@@ -37,8 +45,12 @@ from apex.algorithms.geostatistics.covariance import (
 
 __all__ = [
     "VARIOGRAM_MODELS",
+    "condition_by_kriging",
     "correlated_sample",
     "covariance_factor",
+    "kriged_excursion",
+    "kriging_factor",
     "layer_covariance",
+    "layer_cross_covariance",
     "variogram_covariance",
 ]

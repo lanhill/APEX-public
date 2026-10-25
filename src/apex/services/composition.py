@@ -33,6 +33,7 @@ from pydantic import ValidationError
 import apex.algorithms.data_compression
 import apex.algorithms.facies
 import apex.algorithms.geophysics
+import apex.algorithms.geostatistics.variogram
 import apex.algorithms.metrics
 import apex.algorithms.priors
 import apex.algorithms.validation

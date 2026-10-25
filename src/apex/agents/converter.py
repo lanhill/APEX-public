@@ -23,6 +23,7 @@ The agent reads the case and writes only its output folder. It never simulates o
 
 import json
 import math
+import os
 import re
 import tomllib
 from collections.abc import Callable, Sequence
@@ -91,7 +92,9 @@ CREATE_SYSTEM = (
     "You are APEX's case-converter. Turn the user's request for a synthetic reservoir case "
     "into a deck description following the schema: a box grid, wells (producers and "
     "injectors with their controls and limits, inside the grid, 1-based columns), a "
-    "schedule of report steps, the oil_water fluid, and the properties' statistics (the "
+    "schedule of report steps, a fluid preset (oil_water: oil with water injection; "
+    "co2_brine: CO2 storage in brine, on OPM Flow only, CO2 injectors on gas_rate in sm3/day "
+    "of CO2, 1 Mt a year being about 1.46e6), and the properties' statistics (the "
     "geometric mean of PERMX in mD with the std of its logarithm, porosity's mean and std, "
     "the variogram range in cells). Keep what the request does not mention as in the "
     "example. Give only the description."
@@ -307,10 +310,12 @@ class CaseConverter:
             If the case cannot be read, ``output`` holds other files, or neither the model's
             draft nor the rules' can be written.
         """
-        source = Path(source).resolve()
+        given = Path(source)
+        source = given.resolve()
         if not source.is_file():
-            raise ConfigError(f"no case at {source.name}")
-        output = Path(output)
+            raise ConfigError(f"no case at {given}")
+        # Absolute: the simulator runs in a folder of its own (a reported issue, 2026-10-24).
+        output = Path(os.path.abspath(output))  # normalized: shown to the user
         if output.exists() and (not output.is_dir() or any(output.iterdir())):
             raise ConfigError(f"{output} is not an empty folder: give a new one")
         self._written = []
@@ -354,7 +359,10 @@ class CaseConverter:
             decided_by = "fallback"
             reason = f"the model's draft did not validate after {settings.max_revisions} revisions"
         self._report(supervised, chosen, source, facts, first_errors, decided_by, validation)
-        notes = draft.notes if draft is not None else []
+        notes = list(draft.notes) if draft is not None else []
+        if request and decided_by != "model":
+            notes.insert(0, f"{_not_applied(request, decided_by, reason)}; the rules' choices "
+                         "are used")  # fmt: skip
         if draft is not None:
             _write_notes(output, chosen, choices, notes, validation, decided_by)
         supervised.recorder.record_action(
@@ -390,7 +398,7 @@ class CaseConverter:
         ConfigError
             If ``output`` holds other files, or the skill cannot create cases.
         """
-        output = Path(output)
+        output = Path(os.path.abspath(output))
         if output.exists() and (not output.is_dir() or any(output.iterdir())):
             raise ConfigError(f"{output} is not an empty folder: give a new one")
         chosen = converter_skills.create(skill or self.settings.default_skill)
@@ -440,6 +448,11 @@ class CaseConverter:
         truth = _draw_truth(draft.config)
         np.savez(output / TRUTH_FILE, **truth)
         notes = [*draft.notes, f"the truth is one draw of the prior from seed {TRUTH_SEED}"]
+        if request and decided_by not in ("model", "request"):
+            # A reported issue (2026-10-24): the request was dropped without a word.
+            notes.insert(0, f"{_not_applied(request, decided_by, reason)}; the rules' case "
+                         f"is written instead: {_spec_summary(spec)} (its values are in "
+                         f"{NOTES})")  # fmt: skip
         missing = f"no observations yet: run `apex agent convert observe {output}` (one truth run)"
         validation = Validation(valid=False, errors=[missing])
         failure: ConfigError | None = None
@@ -492,7 +505,7 @@ class CaseConverter:
         ConfigError
             If ``output`` is not a created case, or the run fails.
         """
-        output = Path(output)
+        output = Path(os.path.abspath(output))
         try:
             spec = DeckSpec.model_validate_json((output / SPEC_FILE).read_text())
             with np.load(output / TRUTH_FILE) as data:
@@ -516,13 +529,13 @@ class CaseConverter:
     ) -> list[str]:
         """Run the truth (the case's simulator, one run) and write its observations."""
         from apex.services.synthetic import observe_truth
-        from apex.simulation.conversion.deck_writer import WELL_VECTORS
+        from apex.simulation.conversion.deck_writer import well_vectors
 
         config = tomllib.loads((output / CONFIG).read_text())
         simulator = dict(config["simulator"])
         options = dict(simulator.get("options", {}))
         options["deck_template_file"] = str((output / str(options["deck_template_file"])).resolve())
-        vectors = [f"{vector}:{w.name}" for w in spec.wells for vector in WELL_VECTORS[w.kind]]
+        vectors = well_vectors(spec)
         observed = observe_truth(
             simulator=str(simulator["name"]), options=options, truth=truth, vectors=vectors,
             dates=spec.schedule.report_dates(), relative_error=settings.relative_error,
@@ -557,7 +570,7 @@ class CaseConverter:
         if capability not in chosen.capabilities:
             raise ConfigError(f"the converter skill {skill!r} cannot translate {direction} its "
                               "format")  # fmt: skip
-        output = Path(output)
+        output = Path(os.path.abspath(output))
         if output.exists() and (not output.is_dir() or any(output.iterdir())):
             raise ConfigError(f"{output} is not an empty folder: give a new one")
         supervised = AgentContext(self.service.root, NAME)
@@ -799,11 +812,55 @@ def _write_create_notes(
     decided_by: str,
 ) -> None:
     shown = [f"- {_no_paths(n)}" for n in notes]
+    values = [f"- {line}" for line in _spec_values(spec)]
     lines = ["# Created case", "", f"`{spec.name}`, described by the {decided_by} "
-             "(case_spec.json).", "", "## Notes", "", *shown]  # fmt: skip
+             "(case_spec.json).", "", "## Notes", "", *shown, "",
+             "## Values", "", "What the request did not give is assumed.", "", *values]  # fmt: skip
     if not validation.valid:
         lines += ["", "## Not valid yet", "", *(f"- {_no_paths(e)}" for e in validation.errors)]
     (output / NOTES).write_text("\n".join(lines) + "\n")
+
+
+def _not_applied(request: str, decided_by: str, reason: str | None) -> str:
+    """Return a note that ``request`` was not applied, and why (the model was not used)."""
+    why = "no model was asked" if decided_by == "rules" else (reason or "the model failed")
+    return f"the request was not applied ({_no_paths(why)}): {request!r}"
+
+
+def _spec_summary(spec: DeckSpec) -> str:
+    """Return a created case's grid, wells and schedule in a few words."""
+    g, s = spec.grid, spec.schedule
+    return (f"{g.nx} x {g.ny} x {g.nz} cells, {len(spec.wells)} wells, {s.steps} report steps "
+            f"of {s.step_days} days")  # fmt: skip
+
+
+def _spec_values(spec: DeckSpec) -> list[str]:
+    """Return every value of a created case's description, one line per part."""
+    g, s, p = spec.grid, spec.schedule, spec.properties
+    fields = type(spec.fluid).model_fields
+    fluid = ", ".join(
+        f"{key} {value}" + (f" ({fields[key].description})" if fields[key].description else "")
+        for key, value in spec.fluid.model_dump().items()
+    )
+    lines = [
+        f"grid: {g.nx} x {g.ny} x {g.nz} cells of {g.dx:g} x {g.dy:g} x {g.dz:g} m, its top "
+        f"at {g.top:g} m",
+        f"schedule: {s.steps} report steps of {s.step_days} days from {s.start}",
+        f"permeability: PERMX's geometric mean {p.permx_md:g} mD, standard deviation of "
+        f"ln PERMX {p.permx_log_std:g}, kv/kh {p.kv_kh:g}",
+        f"porosity: mean {p.poro:g}, standard deviation {p.poro_std:g}",
+        f"correlation range: {p.range_cells:g} cells",
+        f"fluid: {fluid}",
+    ]
+    for well in spec.wells:
+        unit = "bar" if well.control == "bhp" else "sm3/day"
+        limit = "minimum" if well.kind == "producer" else "maximum"
+        lines.append(
+            f"well {well.name}: {well.kind} at ({well.i}, {well.j}), layers {well.k_top}-"
+            f"{well.k_bottom or g.nz}, {well.control} {well.target:g} {unit}, {limit} "
+            f"bottom-hole pressure {well.bhp_limit:g} bar"
+        )
+    return lines
 
 
 def visible_skills(*, public_only: bool) -> list[str]:

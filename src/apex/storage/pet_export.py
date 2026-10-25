@@ -20,8 +20,8 @@ PET's own form (as in PET's own tutorials):
 Everything is checked before anything is written. What PET cannot run as APEX does is
 refused with the reason, never approximated: data transforms, geophysics,
 parameterizations, model error, cross validation, field data, localization, damping, the
-methods and strategies PET lacks, method options it has no place for, GIES (PET-fork's
-own configuration format is not written yet), template values, one-sided bounds, joint
+methods and strategies PET lacks (said to be not implemented in PET: GIES, CHOP, ...),
+method options it has no place for, template values, one-sided bounds, joint
 priors, and variogram priors PET's sampler would not reproduce (any but the isotropic or
 j-anisotropic, unrotated fields of a square grid). What differs although it runs (the
 stopping rules of the EnRML methods) is noted.
@@ -57,6 +57,8 @@ ANALYSES = {
 METHOD_OPTIONS: dict[str, set[str]] = {"es": set(), "esmda": {"inflation"},
                                        "lm_enrml": {"max_inner_iterations"},
                                        "gn_enrml": {"max_inner_iterations"}}  # fmt: skip
+#: How a method PET lacks is named in its refusal ("GIES is not implemented in PET").
+METHOD_NAMES = {"gies": "GIES", "chop": "CHOP", "multilevel_esmda": "multilevel ES-MDA"}
 #: The method keys this module reads; any other is refused.
 METHOD_KEYS = {"name", "options", "strategy", "schedule", "max_iterations", "diagnostics"}
 #: Simulator options PET's runfile carries (the others are PET's simulator's own: noted).
@@ -283,11 +285,9 @@ def _dataassim(
     plan: _Plan,
 ) -> dict[str, Any]:
     name = str(method.get("name", ""))
-    if name == "gies":
-        raise ConfigError("GIES runs in PET-fork, whose own configuration format is not "
-                          "exported yet")  # fmt: skip
     if name not in SCHEMES:
-        raise ConfigError(f"PET has no method {name!r} (it has es, esmda, lm_enrml, gn_enrml)")
+        raise ConfigError(f"{METHOD_NAMES.get(name, repr(name))} is not implemented in PET "
+                          "(it has es, esmda, lm_enrml and gn_enrml)")  # fmt: skip
     extra_keys = sorted(set(method) - METHOD_KEYS)
     if extra_keys:
         raise ConfigError(f"PET has no place for [method] {', '.join(extra_keys)}")
@@ -300,8 +300,8 @@ def _dataassim(
     strategy = dict(method.get("strategy", {}))
     analysis = str(strategy.get("name", "approx"))
     if analysis not in ANALYSES[name]:
-        raise ConfigError(f"PET's {name} has the {', '.join(ANALYSES[name])} analyses, not "
-                          f"{analysis!r}")  # fmt: skip
+        raise ConfigError(f"the {analysis!r} analysis is not implemented in PET's {name} "
+                          f"(it has {', '.join(ANALYSES[name])})")  # fmt: skip
     strategy_options = dict(strategy.get("options", {}))
     scaling = strategy_options.pop("state_scaling_file", None)
     if analysis == "full":

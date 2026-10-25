@@ -54,7 +54,9 @@ def test_gaussian_field_matches_pet_prior_sampler(
         variance=[float(v) for v in ref["in_variance"]],
         variogram=variogram,
         exponent=exponent,
-        **geometry,
+        major_range=geometry["major_range"],
+        minor_range=geometry["minor_range"],
+        azimuth=geometry["azimuth"],
     )
 
     field = prior.generate(

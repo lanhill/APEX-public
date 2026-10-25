@@ -156,7 +156,9 @@ def _walk(
         if keyword == "INCLUDE" and records:
             target = resolve_include(records[0], path, root, aliases)
             if allowed is not None and isinstance(target, Path) and not allowed(target.resolve()):
-                raise ConfigError(f"INCLUDE {records[0][:80]}: not a file of your folders")
+                # The whole name, as the deck gives it (the API takes the workspace's root
+                # out): cut short, two refusals differed by whether the cut fell in it.
+                raise ConfigError(f"INCLUDE {records[0][:300]}: not a file of your folders")
             if not isinstance(target, Path) or not target.is_file():
                 yield _Keyword("INCLUDE?", records, section[0], path)
                 continue

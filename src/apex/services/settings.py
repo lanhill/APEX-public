@@ -252,6 +252,8 @@ class GeomodelerSection(_Strict):
     # The rules' correlation range, as a fraction of the grid's larger side (cells): no
     # data says otherwise, and a quarter keeps several correlated patches in the field.
     default_range_fraction: float = Field(default=0.25, gt=0, le=2)
+    # The variogram estimator (registry variogram_estimators) for hard data (--data).
+    estimator: str = "wls"
     # Members the QC draws, and its tolerance: the drawn mean's error in stds and the
     # std's relative error, and a facies' proportion's absolute error (a correlated sample
     # has few independent values, so the tolerance is loose; it catches clipping and

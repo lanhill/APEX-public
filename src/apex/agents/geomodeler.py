@@ -12,10 +12,19 @@
 4. **Code validates** it and draws a small sample (``qc_members``): the skill's QC says
    whether it is the prior asked for. Problems go back to the model, up to
    ``max_revisions`` times; then the rules decide.
-5. **The rules** (:func:`rules`): ``continuous`` Gaussian fields, the mean and std of the
-   reference (else the bounds' midpoint and a sixth of their width, else 0 and 1), ranges
-   of ``default_range_fraction`` of the grid's larger side, every such value marked
-   assumed.
+5. **The rules** (:func:`rules`): ``continuous`` Gaussian fields, with the statistics and
+   variogram estimated from the reference field or the hard data where given
+   (``--reference``, ``--data``, :mod:`apex.services.geomodeling_data`), conditioned to
+   the hard data, else the bounds' midpoint and a sixth of their width (else 0 and 1) and
+   ranges of ``default_range_fraction`` of the grid's larger side, every such value
+   marked assumed.
+
+Hard data (phase 2) and a reference field (revision 1) are estimated from by code, not the
+model: the facts carry each property's mean, std and fitted variogram (the reference's
+where both are given), and the facies' proportions, length scale and conditioning cells;
+the model takes them unless the user gives other values. The continuous skills condition
+their fields to the hard data (revision 1; code passes the data on, never the model); a
+reference is never conditioned to, only its statistics are shared.
 
 The agent writes only the new configuration and its files; a run never calls it: a prior
 is a recorded section, so runs stay reproducible.
@@ -37,7 +46,13 @@ from apex.agents.base import AgentContext
 from apex.agents.common import decide
 from apex.agents.loop import LoopSettings
 from apex.core.errors import ApexError, ConfigError
-from apex.core.geomodeling import GeomodelFacts, GeomodelingSkill, PriorDraft, VariableFact
+from apex.core.geomodeling import (
+    GeomodelFacts,
+    GeomodelingSkill,
+    PriorDraft,
+    PropertyEstimate,
+    VariableFact,
+)
 from apex.core.llm import LLMProvider
 from apex.core.plugins import geomodeling_skills
 from apex.domain.services import Validation
@@ -49,8 +64,9 @@ NAME = "geomodeler"
 SYSTEM = (
     "You are APEX's geomodeler. You give a history-matching case's state variables a prior: "
     "choose one geomodeling skill from the facts and its parameters, following its schema "
-    "and guidance. Take the user's values as given; use the reference field's mean and std "
-    "where there is one; otherwise propose values and list each such value in `assumed`. "
+    "and guidance. Take the user's values as given; use the estimates in the facts (from a "
+    "reference field or hard data) where there are some, and list those values in "
+    "`estimated`; otherwise propose values and list each such value in `assumed`. "
     "Name only state variables from the facts. Give a short reason."
 )
 
@@ -114,16 +130,19 @@ def geomodel_facts(raw: dict[str, Any], base: Path, reference: Path | None) -> G
                 arrays = {name: np.asarray(data[name], dtype=float) for name in data.files}
         except (OSError, ValueError) as error:
             raise ConfigError(f"cannot read the reference {reference.name}: {error}") from None
+    log_variables = _log_variables(raw, base)
     found = {}
     for variable in variables:
         name = str(variable["name"])
         generator = _named(dict(prior.get("variables", {})).get(name, default))
         values = arrays.get(name)
         if values is not None:
+            from apex.services.geomodeling_data import active_cells
+
             values = values.ravel()
             # Cells that are 0 (inactive, barriers; the converter keeps them so) are not
-            # the field's, nor are ln 0's -inf.
-            values = values[np.isfinite(values) & (values != 0)]
+            # the field's, nor are ln 0's -inf; a log variable's 0 is ln 1, a value.
+            values = values[active_cells(values, name in log_variables)]
         found[name] = VariableFact(
             name=name, size=int(variable["size"]), grid=variable.get("grid"),
             lower=variable.get("lower"), upper=variable.get("upper"),
@@ -134,7 +153,7 @@ def geomodel_facts(raw: dict[str, Any], base: Path, reference: Path | None) -> G
     size = prior.get("ensemble_size")
     return GeomodelFacts(variables=found, ensemble_size=None if size is None else int(size),
                          kind=str(dict(raw.get("case", {})).get("kind", "synthetic")),
-                         log_variables=_log_variables(raw, base))  # fmt: skip
+                         log_variables=log_variables, folder=str(base))  # fmt: skip
 
 
 def _named(section: object) -> dict[str, Any]:
@@ -189,6 +208,10 @@ def rules(facts: GeomodelFacts, settings: GeomodelerSection) -> GeomodelPlan:
     for name in names:
         fact = facts.variables[name]
         assert fact.grid is not None
+        estimate = facts.estimates.get(name)
+        if estimate is not None and estimate.std > 0:
+            fields.append(_estimated_field(estimate, fact, fact.grid, settings))
+            continue
         assumed = ["range", "variogram"]
         if fact.reference_mean is not None and fact.reference_std:
             mean, std = fact.reference_mean, fact.reference_std
@@ -203,9 +226,69 @@ def rules(facts: GeomodelFacts, settings: GeomodelerSection) -> GeomodelPlan:
         fields.append({"variable": name, "mean": mean, "std": std, "variogram": "spherical",
                        "major_range": max(1.0, round(settings.default_range_fraction * extent, 1)),
                        "assumed": assumed})  # fmt: skip
-    return GeomodelPlan(skill="continuous", parameters={"fields": fields},
-                        reason="rules: Gaussian fields around the reference (or the bounds), "
-                        "ranges a fraction of the grid")  # fmt: skip
+    for chosen in fields:
+        _keep_conditioning_valid(chosen, facts)
+    reason = (
+        "rules: Gaussian fields from the reference's or the hard data's estimates where "
+        "given (conditioned to the hard data), else around the bounds with ranges a "
+        "fraction of the grid"
+    )
+    return GeomodelPlan(skill="continuous", parameters={"fields": fields}, reason=reason)
+
+
+def _keep_conditioning_valid(field: dict[str, Any], facts: GeomodelFacts) -> None:
+    """Turn a rules' field's conditioning off when its data cannot be honoured, and say so.
+
+    Data outside the bounds (the prior is clipped) or improbable under the field's
+    variogram: the skill would refuse them, and the rules' plan must pass, so the field
+    shares the data's statistics only. Every field, whether or not its statistics came from
+    the data (one datum gives no std).
+    """
+    estimate = facts.estimates.get(field["variable"])
+    if estimate is None or not estimate.values:
+        return
+    from apex.services.geomodeling_skills import FieldChoice, conditioning_problems
+
+    problems = conditioning_problems(FieldChoice.model_validate(field), facts)
+    if problems:
+        field["condition"] = False
+        field["assumed"].append(f"no conditioning ({problems[0]})")
+
+
+def _estimated_field(
+    estimate: PropertyEstimate, fact: VariableFact, grid: list[int], settings: GeomodelerSection
+) -> dict[str, Any]:
+    """Return the rules' field from a hard-data estimate; what it lacks is assumed.
+
+    A mean outside the variable's bounds (data in other units than the deck's, say) is
+    moved to the nearer bound and listed as assumed, so that the rules' plan still passes.
+    """
+    mean = estimate.mean
+    if fact.lower is not None and fact.upper is not None:
+        mean = min(max(mean, fact.lower), fact.upper)
+    field: dict[str, Any] = {"variable": estimate.variable, "mean": mean,
+                             "std": estimate.std, "estimated": ["std"], "assumed": []}  # fmt: skip
+
+    if mean == estimate.mean:
+        field["estimated"].insert(0, "mean")
+    else:
+        field["assumed"].append(f"mean (the data's {estimate.mean:.4g} is outside the bounds)")
+    if estimate.major_range is not None and estimate.variogram is not None:
+        # The skill's own limits: half a cell to four grid lengths.
+        top = 4.0 * max(grid[0], grid[1])
+        field.update(variogram=estimate.variogram,
+                     major_range=min(max(estimate.major_range, 0.5), top),
+                     azimuth=estimate.azimuth or 0.0)  # fmt: skip
+        if estimate.minor_range is not None and estimate.minor_range < estimate.major_range:
+            field["minor_range"] = min(max(estimate.minor_range, 0.5), top)
+        field["estimated"] += ["variogram", "range", "azimuth"]
+    else:
+        field.update(
+            variogram="spherical",
+            major_range=max(1.0, round(settings.default_range_fraction * max(grid[0], grid[1]), 1)),
+        )
+        field["assumed"] += ["range", "variogram"]
+    return field
 
 
 @dataclass
@@ -264,8 +347,12 @@ class Geomodeler:
         *,
         request: str | None = None,
         reference: Path | None = None,
+        data: Path | None = None,
     ) -> GeomodelOutcome:
         """Write ``config`` with a new prior to ``output`` (see the module).
+
+        ``data`` is a CSV of hard data (:mod:`apex.services.geomodeling_data`): the
+        properties' statistics and variograms, and the facies, are estimated from it.
 
         ``output`` defaults to ``<config>_prior.toml`` beside it, so relative paths still
         resolve; it must not exist.
@@ -283,12 +370,44 @@ class Geomodeler:
         output = (
             Path(output) if output is not None else config.with_name(f"{config.stem}_prior.toml")
         )
-        if output.exists():
+        if output.exists() or output.is_symlink():
             raise ConfigError(f"{output.name} exists: give another output")
         if output.resolve().parent != config.parent:
             raise ConfigError("write the new configuration beside the old one, so that its "
                               "relative paths still resolve")  # fmt: skip
         facts = geomodel_facts(raw, config.parent, reference)
+        if facts.ensemble_size is None:  # the size the draft will have, for skills that draw
+            facts = facts.model_copy(update={"ensemble_size": self.settings.ensemble_size})
+        # A skill's stored ensemble is named after the new configuration: one per output.
+        ensemble = output.with_name(f"{output.stem}_ensemble.npz")
+        if ensemble.exists() or ensemble.is_symlink():
+            raise ConfigError(f"{ensemble.name} exists: give another output")
+        facts = facts.model_copy(update={"ensemble_file": ensemble.name})
+        data_notes: list[str] = []
+        if data is not None or reference is not None:
+            from apex.services.geomodeling_data import (
+                estimate_from_data,
+                estimate_from_reference,
+                load_hard_data,
+                merge_estimates,
+            )
+
+            estimates: dict[str, PropertyEstimate] = {}
+            facies = None
+            if reference is not None:
+                estimates, data_notes = estimate_from_reference(
+                    Path(reference), facts, self.settings.estimator
+                )
+            if data is not None:
+                found, facies, found_notes = estimate_from_data(
+                    load_hard_data(Path(data)), facts, self.settings.estimator
+                )
+                estimates, data_notes = merge_estimates(estimates, found), data_notes + found_notes
+            for estimate in estimates.values():
+                data_notes += [f"{estimate.variable}: {n}" for n in estimate.notes]
+            if facies is not None:
+                data_notes += [f"facies: {n}" for n in facies.notes]
+            facts = facts.model_copy(update={"estimates": estimates, "facies_data": facies})
         cells = sum(v.size for v in facts.variables.values())
         if self.max_cells is not None and cells > self.max_cells:
             raise ConfigError(f"{cells} cells: the web UI models priors of at most "
@@ -306,7 +425,7 @@ class Geomodeler:
         previous: GeomodelPlan | None = None
         traces: list[Path] = []
         written: list[Path] = []
-        notes: list[str] = []
+        notes: list[str] = list(data_notes)
         try:
             for _ in range(settings.max_revisions + 1):
                 decision = decide(
@@ -394,7 +513,7 @@ class Geomodeler:
         updated = _with_prior(raw, draft, settings.ensemble_size)
         for relative, content in draft.files.items():
             path = output.parent / relative
-            if path.exists():
+            if path.exists() or path.is_symlink():  # never through a link out
                 raise ConfigError(f"{relative} exists beside the configuration: not overwritten")
             written.append(path)
             path.write_bytes(content)
@@ -433,7 +552,10 @@ class Geomodeler:
             return []
         try:
             loaded = composition.load_config(config)
-            prior = loaded.prior.model_copy(update={"ensemble_size": settings.qc_members})
+            members = settings.qc_members
+            if draft.files:  # a stored ensemble: at most its own members
+                members = min(members, loaded.prior.ensemble_size or members)
+            prior = loaded.prior.model_copy(update={"ensemble_size": members})
             run = composition.build_run(loaded.model_copy(update={"prior": prior}))
             sample = run.workflow.layout.split(composition.draw_prior(run))
         except (ApexError, ImportError) as error:

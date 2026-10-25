@@ -317,6 +317,7 @@ def plan_study(
         if not validation.errors:
             valid_cells.append(cell)
     errors += _unrecorded_metrics(spec, valid_cells)
+    errors += _unknown_metric_labels(spec, valid_cells)
     plan = StudyPlan(spec, cells, Validation(valid=not errors, errors=errors, plans=plans), skipped)
     limit = spec.study.budget.max_simulator_runs
     total = plan.max_simulator_runs
@@ -359,6 +360,85 @@ def _unrecorded_metrics(spec: StudySpec, cells: Sequence[PlannedCell]) -> list[s
         for key in asked
         if key not in recorded
     ]
+
+
+#: Metrics the workflow records itself, labelled ``all`` and by data type.
+_DATA_METRICS = frozenset({
+    "data_mismatch", "normalized_data_mismatch",
+    "cv_normalized_data_mismatch", "test_normalized_data_mismatch",
+})  # fmt: skip
+#: Metrics whose labels are their own, not the state's variables.
+_OWN_LABELS = {"constraint_cost": frozenset({"cost", "violations"})}
+
+
+def _unknown_metric_labels(spec: StudySpec, cells: Sequence[PlannedCell]) -> list[str]:
+    """Return why a study metric's name or label cannot be recorded by any of its cells.
+
+    A reported issue (2026-10-24): ``rmse:xx``, a typo for the state variable ``x``,
+    validated, ran, and was left out of the comparison without a word. The labels are
+    known from each case: ``all``, its state variables for the metrics of the state, and
+    its data types for the data metrics. Where a case does not fix them before it runs
+    (data transforms rename its data types, parameterizations give the metrics properties,
+    data read from another program), its labels are not checked.
+    """
+    from apex.core.plugins import metrics
+
+    if not cells:
+        return []
+    known = set(metrics.names()) | _DATA_METRICS
+    variables: set[str] = set()
+    datatypes: set[str] = set()
+    open_variables = open_datatypes = False
+    for cell in cells:
+        if cell.replicate != 0:
+            continue  # replicates differ in their seeds only
+        config = cell.config
+        variables |= {v.name for v in config.state.variables}
+        open_variables |= bool(config.parameterizations)
+        found = _datatypes(config)
+        open_datatypes |= found is None
+        datatypes |= found or set()
+    errors = []
+    for metric in spec.study.metrics:
+        key, _, label = metric.partition(":")
+        if key not in known:
+            errors.append(f"study metric {metric!r}: no metric {key!r}; the metrics are "
+                          f"{', '.join(sorted(known))}")  # fmt: skip
+            continue
+        if key in _OWN_LABELS:
+            labels, kind, label = set(_OWN_LABELS[key]), "labels", label or "all"
+        elif not label or label == "all" or (key in _DATA_METRICS and open_datatypes):
+            continue
+        elif key in _DATA_METRICS:
+            labels, kind = datatypes, "data types"
+        elif open_variables:
+            continue
+        else:
+            # Facies scores add their own parts after the variable ("facies:skill").
+            labels, kind, label = variables, "state variables", label.split(":", 1)[0]
+        if label not in labels:
+            given = "'all' or " if key not in _OWN_LABELS else ""
+            errors.append(f"study metric {metric!r}: no {label!r} in the cases; give {given}"
+                          f"one of their {kind}: {', '.join(sorted(labels))}")  # fmt: skip
+    return errors
+
+
+def _datatypes(config: HistoryMatchConfig) -> set[str] | None:
+    """Return a case's data types as its metrics label them, or None if not known yet."""
+    from apex.storage.inputs import read_observations
+
+    section = config.observations
+    if config.data_transforms or (section.file is None and not section.fields):
+        return None
+    found = {entry.datatype for entry in section.fields}
+    if config.geophysics is not None:
+        found |= {name for datum in config.geophysics.data for name in datum.datatypes()}
+    if section.file is not None:
+        try:
+            found |= {key.datatype for key in read_observations(section.file).keys}
+        except ConfigError:
+            return None  # the cell's own validation reports it
+    return found
 
 
 def _prediction_violations(
@@ -789,6 +869,15 @@ def comparison_from_values(
             comparisons.append(
                 MetricComparison(case=case, metric=metric, variants=stats, differences=differences)
             )
+    if values:
+        # A metric no finished cell recorded (a misspelt label in an older study) is said,
+        # not left out without a word.
+        compared = {m.metric for m in comparisons}
+        notes += [
+            f"{metric}: no values in any finished cell; check the metric's name and label"
+            for metric in wanted
+            if metric not in compared
+        ]
     comparison = Comparison(
         study=name,
         replicates=replicates,

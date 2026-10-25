@@ -7,6 +7,7 @@ Status: early development.
 ## Quick start
 
 - [Using agents from the command line](docs/getting_started/agents_cli.md)
+- [Bringing your own case: a deck and its history as an APEX case](docs/getting_started/case_converter.md)
 - [Setting up your web UI with an AI assistant](docs/getting_started/web_ui.md)
 - [Writing and registering your own plugin](docs/getting_started/writing_a_plugin.md)
 

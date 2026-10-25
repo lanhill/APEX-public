@@ -367,8 +367,11 @@ export function PlanStudy({ casePath, optimization = false }: { casePath: string
 export function BringCase() {
   const api = useApi();
   const names = useAgentNames();
+  const who = useWho();
   // Only the owner runs a created case's truth (a simulation); guests submit it later.
-  const owner = useWho().role === "owner";
+  const owner = who.role === "owner";
+  // Workspace paths, as the Editor lists them (a reported issue, 2026-10-24).
+  const folder = who.ui_folder ?? "UI/<your folder>";
   const [source, setSource] = useState("");
   const [history, setHistory] = useState("");
   const [request, setRequest] = useState("");
@@ -420,7 +423,7 @@ export function BringCase() {
         }}
       >
         <input
-          placeholder="the deck, e.g. Norne/NORNE.DATA"
+          placeholder={`the deck, e.g. ${folder}/decks/CASE.DATA`}
           value={source}
           onChange={(e) => setSource(e.target.value)}
           size={40}

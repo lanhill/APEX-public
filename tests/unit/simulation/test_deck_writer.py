@@ -72,3 +72,74 @@ def test_a_description_is_checked(change: dict[str, object], message: str) -> No
         WellSpec(name="P", kind="producer", i=1, j=1, control="water_rate", target=1, bhp_limit=1)
     with pytest.raises(ValidationError, match="more than"):
         GridSpec(nx=1000, ny=1000, nz=2)
+
+
+def test_the_co2_deck_reads_back_with_its_keywords(tmp_path: Path) -> None:
+    from apex.domain.deck_spec import co2_injection
+    from apex.simulation.conversion.deck_writer import well_vectors
+
+    spec = co2_injection("co2", n=11, layers=3)
+    template = write_deck(spec)
+    (tmp_path / "deck.mako").write_text(template)
+    cells = 11 * 11 * 3
+    state = {"permx": np.full(cells, np.log(200.0)), "poro": np.full(cells, 0.25)}
+    rendered = render_deck(tmp_path / "deck.mako", MemberInput(0, state), {})
+    (tmp_path / "CO2.DATA").write_text(rendered)
+    facts = read_deck(tmp_path / "CO2.DATA", skill="opm_flow").facts
+
+    for keyword in ("CO2STORE", "DISGASW", "SALINITY", "RTEMPVD", "SGFN", "SWFN"):
+        assert f"\n{keyword}\n" in rendered
+    assert " 'INJ' 'GAS' 'OPEN' 'RATE' 730000 1* 400 /" in rendered
+    assert facts.grid == [11, 11, 3]
+    assert facts.wells["INJ"].kind == "injector"
+    assert facts.wells["INJ"].cells == [[6, 6, 3]]
+    assert well_vectors(spec)[:2] == ["WGIR:INJ", "WBHP:INJ"]
+    assert "WGPR:PROD1" in well_vectors(spec)
+
+
+def test_the_co2_saturation_tables_span_their_ranges() -> None:
+    from apex.domain.deck_spec import Co2BrineSpec
+    from apex.simulation.conversion.deck_writer import sgfn, swfn
+
+    fluid = Co2BrineSpec(preset="co2_brine", swc=0.2, sgc=0.05)
+    gas, water = sgfn(fluid), swfn(fluid)
+
+    assert gas[0] == (0.0, 0.0, 0.0)
+    assert gas[1] == (0.05, 0.0, 0.0)
+    assert gas[-1] == (1.0, 1.0, 0.0)
+    assert [g[0] for g in gas] == sorted({g[0] for g in gas})  # increasing, no repeats
+    assert gas[-2][0] == pytest.approx(0.8)  # 1 - swc: the most CO2 drainage reaches
+    assert water[0] == (0.2, 0.0, 0.0)
+    assert water[-1] == pytest.approx((1.0, 1.0, 0.0))
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"fluid": {"preset": "co2_brine"}, "wells": "producers only"}, "CO2 injector"),
+        ({"fluid": {"preset": "co2_brine"}, "control": "water_rate"}, "inject CO2"),
+        ({"control": "gas_rate"}, "gas_rate is co2_brine's"),
+        ({"fluid": {"preset": "co2_brine", "swc": 0.6, "sgc": 0.5}}, "mobile CO2"),
+    ],
+)  # fmt: skip
+def test_a_co2_case_that_cannot_run_is_refused(change: dict[str, object], message: str) -> None:
+    raw = five_spot("box", n=11, layers=2).model_dump()
+    if "fluid" in change:
+        raw["fluid"] = change["fluid"]
+    if change.get("wells") == "producers only":
+        raw["wells"] = [w for w in raw["wells"] if w["kind"] == "producer"]
+    if "control" in change:
+        injector = next(w for w in raw["wells"] if w["kind"] == "injector")
+        injector["control"] = change["control"]
+
+    with pytest.raises(ValidationError, match=message):
+        DeckSpec.model_validate(raw)
+
+
+def test_eclipse_refuses_a_co2_case() -> None:
+    from apex.core.errors import ConfigError
+    from apex.core.plugins import converter_skills
+    from apex.domain.deck_spec import co2_injection
+
+    with pytest.raises(ConfigError, match="E300's compositional CO2STORE"):
+        converter_skills.create("eclipse").create(co2_injection())

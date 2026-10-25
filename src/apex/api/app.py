@@ -1488,7 +1488,11 @@ class AgentGeomodelBody(_Body):
     config: str = Field(description="The configuration, as the workspace shows it.")
     request: str | None = Field(default=None, max_length=2000)
     reference: str | None = Field(default=None, description="An .npz of reference fields in "
-                                  "state space, as the workspace shows it.")  # fmt: skip
+                                  "state space, as the workspace shows it: the prior shares "
+                                  "their statistics and variogram.")  # fmt: skip
+    data: str | None = Field(default=None, description="Hard data to estimate from and "
+                             "condition to: a CSV of i,j,k,property,value, as the workspace "
+                             "shows it.")  # fmt: skip
     model: bool = False
 
 
@@ -1763,10 +1767,12 @@ def _agent_routes(
             raise Denied(403, "the geomodeler writes beside the configuration: give one in "
                          "your own web-UI folder")  # fmt: skip
         reference = None if body.reference is None else existing(who, space, body.reference)
+        data = None if body.data is None else existing(who, space, body.data)
         geomodeler = Geomodeler(service, chosen, loop_settings=settings)
         if who.ui:
             geomodeler.max_cells = service.jobs.settings.agents.geomodeler.ui_max_cells
-        outcome = geomodeler.model(config, request=body.request, reference=reference)
+        outcome = geomodeler.model(config, request=body.request, reference=reference,
+                                   data=data)  # fmt: skip
         return {"config": space.relative(outcome.config), "skill": outcome.plan.skill,
                 "valid": outcome.valid, "errors": outcome.validation.errors, "qc": outcome.qc,
                 "notes": outcome.notes, "decided_by": outcome.decided_by,

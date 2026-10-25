@@ -145,3 +145,60 @@ def test_a_name_is_checked_as_the_descriptions_own(tmp_path: Path) -> None:
         CaseConverter(ApexService(tmp_path / "s"), None, settings=SMALL).create(
             tmp_path / "case", name="${evil}"
         )
+
+
+def test_a_relative_output_folder_runs_the_truth_where_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reported issue (2026-10-24): `convert create --out box` ran the truth in
+    `box/truth_run`, relative to the simulator's own folder: 'Cannot find input case'."""
+    import apex.services.synthetic as synthetic
+    from apex.core.errors import ConfigError
+
+    seen: dict[str, object] = {}
+
+    def capture(**kwargs: object) -> None:
+        seen.update(kwargs)
+        raise ConfigError("stopped by the test")
+
+    monkeypatch.setattr(synthetic, "observe_truth", capture)
+    monkeypatch.chdir(tmp_path)
+    converter = CaseConverter(ApexService(tmp_path / "service"), None, settings=SMALL)
+
+    with pytest.raises(ConfigError, match="stopped by the test"):
+        converter.create(Path("box"), name="box", simulate=True)
+    assert seen["work_dir"] == tmp_path / "box" / "truth_run"
+    seen.clear()
+    with pytest.raises(ConfigError, match="stopped by the test"):
+        converter.observe(Path("box"))
+    assert seen["work_dir"] == tmp_path / "box" / "truth_run"
+    assert seen["output"] == tmp_path / "box" / "observations.csv"
+
+
+def test_a_request_the_rules_replaced_is_named_and_every_value_listed(tmp_path: Path) -> None:
+    """A reported issue (2026-10-24): with three empty replies, "a 30 x 30 x 4 five-spot" became
+    the rules' 21 x 21 x 3 case, and only "decided by: fallback" said so; CONVERSION.md listed
+    none of the values assumed."""
+    from apex.core.llm import LLMUnavailable
+
+    service = ApexService(tmp_path / "service")
+    request = "a 30 x 30 x 4 five-spot, monthly for three years"
+
+    created = CaseConverter(service, StubProvider([LLMUnavailable("down")]), settings=SMALL).create(
+        tmp_path / "case", request=request
+    )
+
+    assert created.decided_by == "fallback"
+    assert created.notes[0].startswith("the request was not applied (")
+    assert f"{request!r}; the rules' case is written instead: 21 x 21 x 3 cells, 5 wells" in (
+        created.notes[0])  # fmt: skip
+    text = (tmp_path / "case" / "CONVERSION.md").read_text()
+    spec = created.spec
+    assert "## Values" in text
+    assert f"- grid: 21 x 21 x 3 cells of {spec.grid.dx:g} x" in text
+    assert f"- correlation range: {spec.properties.range_cells:g} cells" in text
+    assert f"kv/kh {spec.properties.kv_kh:g}" in text
+    assert "- fluid: preset oil_water, initial_pressure" in text
+    assert sum(line.startswith("- well ") for line in text.splitlines()) == len(spec.wells)
+    described = CaseConverter(service, None, settings=SMALL).create(tmp_path / "plain")
+    assert not any("request" in note for note in described.notes)

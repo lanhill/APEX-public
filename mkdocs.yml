@@ -24,6 +24,7 @@ nav:
   - Getting started:
       - getting_started/web_ui.md
       - getting_started/agents_cli.md
+      - getting_started/case_converter.md
       - getting_started/writing_a_plugin.md
   - User guide:
       - guide/index.md
@@ -124,6 +125,7 @@ nav:
   - REST API: api.md
   - Web UI: ui.md
   - Runtime agents: agents.md
+  - The geomodeler, priors from parameters or data: geomodeler.md
   - ERT: ert.md
   - GMAC and C-GIES: gmac.md
   - CHOP, hyper-parameters estimated as the run goes: chop.md
