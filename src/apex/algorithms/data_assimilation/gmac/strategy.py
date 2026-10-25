@@ -221,7 +221,7 @@ class GMACUpdate(EmitsDiagnostics):
         (subspace form).
     metric_energy
         Also keep only the eigenvalues up to the first whose cumulative share exceeds this
-        fraction of their sum (MATLAB's ``> tsvdCut``), in ``(0, 1)``. Default: 0.99 when no
+        fraction of their sum (the paper's energy rule), in ``(0, 1)``. Default: 0.99 when no
         term is ``identity`` (nothing bounds such a metric below, and its smallest
         eigenvalues would dominate the step), else off: with the I term the metric has many
         equal eigenvalues (all N with I alone), of which the rule would drop an arbitrary

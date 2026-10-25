@@ -10,7 +10,9 @@ import re
 from apex.services.plugins import all_plugins, is_private, option_docs, plugin_info
 
 #: Descriptions that send the reader to the code instead of saying what the option does.
-CODE_POINTERS = re.compile(r"the module|\bsee `|\(see |:class:|:func:|:data:", re.IGNORECASE)
+CODE_POINTERS = re.compile(
+    r"the module|\bsee `|\(see |:class:|:func:|:data:|``|EPF_DEFAULTS|tsvdCut", re.IGNORECASE
+)
 
 
 class _Base:
@@ -73,6 +75,7 @@ def test_every_public_option_says_what_it_does() -> None:
 
 
 def test_summaries_do_not_point_at_the_code() -> None:
+    """Nor keep reStructuredText's literals (the tester's H7: ``.DATA`` in `apex plugins`)."""
     public = [i for i in all_plugins() if not is_private(i.registry, i.name)]
     pointing = [f"{i.registry}:{i.name}: {i.summary}" for i in public
                 if CODE_POINTERS.search(i.summary)]  # fmt: skip

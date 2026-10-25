@@ -5,7 +5,7 @@ generated: reference
 
 # The REST API: reference
 
-Every one of these 51 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 56 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `DELETE /v1/chats/{chat_id}`
 
@@ -25,6 +25,12 @@ Agents
 
 Every agent with its visibility; a guest gets the public ones its list allows.
 
+## `GET /v1/agents/convert/skills`
+
+Convert Skills
+
+Return the converter skills the caller may use, and what each can do.
+
 ## `GET /v1/agents/plot/{run_id}`
 
 Plot State
@@ -36,6 +42,15 @@ Return how a run's figure drawing stands: none, drawing, done or failed.
 Chats
 
 
+
+## `GET /v1/chats/models`
+
+Chat Models
+
+Return the models this user's assistant may answer with.
+
+`choosable`: the owner picks one per message; a guest's are tried in order, with
+`note` saying so. No `models`: the service's one model answers every chat.
 
 ## `GET /v1/chats/{chat_id}`
 
@@ -195,11 +210,29 @@ Return the roots: each one's name (the prefix of relative paths) and folder.
 
 UI users get the names only: every route takes relative paths.
 
+## `POST /v1/agents/convert`
+
+Convert
+
+Import a deck as an APEX case: a draft in the user's web-UI folder, validated.
+
+## `POST /v1/agents/convert/create`
+
+Convert Create
+
+Create a synthetic case (a draft); `observe` runs its truth once (owner only).
+
 ## `POST /v1/agents/diagnose`
 
 Diagnose
 
 Return a diagnosis of a run: causes, with evidence, and recommended changes.
+
+## `POST /v1/agents/geomodel`
+
+Geomodel
+
+Give a configuration's fields a prior: a new configuration beside it.
 
 ## `POST /v1/agents/monitor`
 

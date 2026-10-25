@@ -159,8 +159,9 @@ class OptimizerBase(ABC):
     transform
         Optimize in the unit cube of the bounds.
     epf
-        External penalty options: ``r`` (required), ``r_factor``, ``tol_factor``,
-        ``conv_crit``, ``max_epf_iter`` (:data:`EPF_DEFAULTS`). Needs a constrained objective.
+        External penalty options: ``r`` (required), ``r_factor`` (default 2),
+        ``tol_factor`` (0.9), ``conv_crit`` (1e-5), ``max_epf_iter`` (10). Needs a
+        constrained objective.
     """
 
     status: ClassVar[Status] = "experimental"

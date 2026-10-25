@@ -20,7 +20,7 @@ name = "file"
 
 | option | type | default | description |
 |---|---|---|---|
-| `ensemble_file` | string or string | required | `.npz` with one array per variable. |
+| `ensemble_file` | string | required | `.npz` with one array per variable. |
 | `key` | string or null | | Array name; defaults to the variable's name. |
 
 ## `gaussian`
@@ -104,7 +104,7 @@ name = "gstools_pgs"
 | `fields` | array | required | One covariance model per latent field, in the order of the group's variables: `{model = "Gaussian", len_scale = 10 or [10, 5(2)], angles = 0 or [...]}` (GSTools' `CovModel` arguments; variance 1). `model` is one of `MODELS`. |
 | `gibbs_sweeps` | integer | 100 | Iterations of the conditioning sampler (exact HMC and a coordinate sweep per field; `condition_latent`), default 100. |
 | `proportions` | array or null | | The truncation rule, as for `pgs_truncation` (the composition checks they match). |
-| `rule_file` | string or string or null | | The truncation rule, as for `pgs_truncation` (the composition checks they match). |
+| `rule_file` | string or null | | The truncation rule, as for `pgs_truncation` (the composition checks they match). |
 
 ## `mpslib_snesim`
 
@@ -128,7 +128,7 @@ name = "mpslib_snesim"
 | `n_multiple_grids` | integer | 3 | Multiple grids (coarse to fine; MPSlib counts from 0). |
 | `program` | string or null | | MPSlib's `mps_snesim_tree` (default: the one installed with `scikit-mps`). |
 | `random_path` | string | random | `random` (1) or `preferential` (2, MPSlib's default, with `entropy_factor`). |
-| `soft_probability_file` | string or string or null | | Soft data: a `.npy` grid of facies probabilities `(nx, ny, nz, K)` (e.g. from seismic), NaN in cells without soft data. MPSlib combines each cell's probabilities with the training image's conditional ones (`P ∝ P_TI · P_soft`), so they shift the facies rather than fix them, unless they are 0 or 1. MPSlib reads the first `K - 1` and takes the last as one minus their sum (each cell is renormalised before writing). With the `preferential` path MPSlib also copies them to nearby coarse-grid nodes; with `random` they act at their own cell only. A realisation whose facies has soft probability 0 somewhere is refused: where the soft data contradict the training image MPSlib returns a probability as the facies code (`SNESIM.cpp`, its conflict branch; right only by chance for two facies). Hard data take precedence. A pdf is certain or has no zeros (refused otherwise). Needs a program that reads every soft category (checked). |
+| `soft_probability_file` | string or null | | Soft data: a `.npy` grid of facies probabilities `(nx, ny, nz, K)` (e.g. from seismic), NaN in cells without soft data. MPSlib combines each cell's probabilities with the training image's conditional ones (`P ∝ P_TI · P_soft`), so they shift the facies rather than fix them, unless they are 0 or 1. MPSlib reads the first `K - 1` and takes the last as one minus their sum (each cell is renormalised before writing). With the `preferential` path MPSlib also copies them to nearby coarse-grid nodes; with `random` they act at their own cell only. A realisation whose facies has soft probability 0 somewhere is refused: where the soft data contradict the training image MPSlib returns a probability as the facies code (`SNESIM.cpp`, its conflict branch; right only by chance for two facies). Hard data take precedence. A pdf is certain or has no zeros (refused otherwise). Needs a program that reads every soft category (checked). |
 | `template_size` | array | [8, 7, 1] | The search template `[tx, ty, tz]`. |
 | `timeout_s` | number | 3600.0 | Seconds the program may take. |
-| `training_image_file` | string or string | required | The training image: `.npy` codes `[i, j(k)]` or a GSLIB/EAS grid file. |
+| `training_image_file` | string | required | The training image: `.npy` codes `[i, j(k)]` or a GSLIB/EAS grid file. |

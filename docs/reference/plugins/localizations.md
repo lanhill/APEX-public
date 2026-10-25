@@ -20,7 +20,7 @@ name = "adaptive"
 
 | option | type | default | description |
 |---|---|---|---|
-| `cutoff` | number or null | | The fixed threshold on `\|correlation\|`, in `(0, 1)`; by default `3/sqrt(N)` for `N` members (0.3 at 100), three standard deviations of a sample correlation where there is none. Only with `threshold = "fixed"`. |
+| `cutoff` | number or null | | The fixed threshold on <code>&#124;correlation&#124;</code>, in `(0, 1)`; by default `3/sqrt(N)` for `N` members (0.3 at 100), three standard deviations of a sample correlation where there is none. Only with `threshold = "fixed"`. |
 | `taper` | string | hard | How correlations are kept: `"hard"` (default) keeps those above the threshold and drops the rest, `"soft"` scales them down smoothly with Gaspari-Cohn, and `"sigmoid"` uses a steep logistic step. |
 | `threshold` | string | universal | `"universal"` (default): a threshold per state variable and datum, estimated from correlations with a shuffled ensemble and growing with the variable's size; `"fixed"`: `cutoff` everywhere. With many cells and few members the universal threshold can keep almost nothing; a fixed one does not. |
 | `threshold_scale` | number | 1.0 | Multiplier of the universal threshold (positive, default 1); larger keeps fewer correlations. Not with `threshold = "fixed"`. |
@@ -38,7 +38,7 @@ name = "adaptive_per_update"
 
 | option | type | default | description |
 |---|---|---|---|
-| `cutoff` | number or null | | The fixed threshold, in `(0, 1)`; by default `3/sqrt(N)` for `N` members, three standard deviations of a sample correlation where there is none (Vossepoel, Evensen & van Leeuwen 2025, eq. 6; 0.3 at 100). Only with `threshold = "fixed"`, which also takes no `threshold_scale`. The `hard` taper keeps exactly `\|rho\| > cutoff`; `soft` (Gaspari-Cohn of `(1 - \|rho\|) / (1 - cutoff)`) reaches 0 only at `\|rho\| = 2 cutoff - 1`, so below 0.5 it keeps a little of every correlation. |
+| `cutoff` | number or null | | The fixed threshold, in `(0, 1)`; by default `3/sqrt(N)` for `N` members, three standard deviations of a sample correlation where there is none (Vossepoel, Evensen & van Leeuwen 2025, eq. 6; 0.3 at 100). Only with `threshold = "fixed"`, which also takes no `threshold_scale`. The `hard` taper keeps exactly <code>&#124;rho&#124; &gt; cutoff</code>; `soft` (Gaspari-Cohn of <code>(1 - &#124;rho&#124;) / (1 - cutoff)</code>) reaches 0 only at <code>&#124;rho&#124; = 2 cutoff - 1</code>, so below 0.5 it keeps a little of every correlation. |
 | `taper` | string | hard | `"hard"` (default), `"soft"` or `"sigmoid"` (PET `type`). |
 | `threshold` | string | universal | `"universal"` (default): `threshold_scale * sqrt(2 ln n_block) * sigma` from the shuffled correlations; `"fixed"`: `cutoff` for every datum and cell. The universal threshold grows with the block's size, so with many cells and few members it can keep almost nothing (0.45 for 18,000 cells and 100 members); a fixed one does not. |
 | `threshold_scale` | number | 1.0 | Multiplier of the universal threshold (PET `autoadaloc` value, `nstd`). |
@@ -56,7 +56,7 @@ name = "adaptive_prior"
 
 | option | type | default | description |
 |---|---|---|---|
-| `cutoff` | number or null | | The fixed threshold on `\|correlation\|`, in `(0, 1)`; by default `3/sqrt(N)` for `N` members (0.3 at 100), three standard deviations of a sample correlation where there is none. Only with `threshold = "fixed"`. |
+| `cutoff` | number or null | | The fixed threshold on <code>&#124;correlation&#124;</code>, in `(0, 1)`; by default `3/sqrt(N)` for `N` members (0.3 at 100), three standard deviations of a sample correlation where there is none. Only with `threshold = "fixed"`. |
 | `taper` | string | hard | How correlations are kept: `"hard"` (default) keeps those above the threshold and drops the rest, `"soft"` scales them down smoothly with Gaspari-Cohn, and `"sigmoid"` uses a steep logistic step. |
 | `threshold` | string | universal | `"universal"` (default): a threshold per state variable and datum, estimated from correlations with a shuffled ensemble and growing with the variable's size; `"fixed"`: `cutoff` everywhere. With many cells and few members the universal threshold can keep almost nothing; a fixed one does not. |
 | `threshold_scale` | number | 1.0 | Multiplier of the universal threshold (positive, default 1); larger keeps fewer correlations. Not with `threshold = "fixed"`. |
@@ -111,7 +111,7 @@ name = "distance_entries"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum_file` | string or string or null | | Optional `.npy`/`.npz` of active cells (one boolean per grid cell, Eclipse order); the tapers are then taken over the active cells (PET `actnum`). |
+| `actnum_file` | string or null | | Optional `.npy`/`.npz` of active cells (one boolean per grid cell, Eclipse order); the tapers are then taken over the active cells (PET `actnum`). |
 | `entries` | array | required | The entries, in order: a later entry replaces an earlier one for the (data, time, variable) it names, as in PET. |
 | `grid` | array | required | `[nx, ny, nz]`; each state variable named by an entry is a grid property in Eclipse order (`i` fastest) over all cells, or over the active cells of `actnum_file`. |
 

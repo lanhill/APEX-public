@@ -26,7 +26,7 @@ name = "enopt"
 | `beta` | number | 0.0 | Momentum of the step and of the covariance update (Adam's first moment rate). |
 | `cov_factor` | number | 0.5 | Covariance shrink factor per resampling attempt. |
 | `ensemble_hessian` | boolean | false | Estimate the ensemble Hessian (PET passes `hess`): it adapts the covariance and feeds the Steihaug rule. |
-| `epf` | | | External penalty options: `r` (required), `r_factor`, `tol_factor`, `conv_crit`, `max_epf_iter` (`EPF_DEFAULTS`). Needs a constrained objective. |
+| `epf` | | | External penalty options: `r` (required), `r_factor` (default 2), `tol_factor` (0.9), `conv_crit` (1e-5), `max_epf_iter` (10). Needs a constrained objective. |
 | `ftol` | number or null | | Relative change of the mean objective that counts as converged. |
 | `gtol` | number | 1e-05 | Infinity norm of the projected gradient that counts as converged. |
 | `hessian` | boolean | false | Precondition the gradient with the Hessian (needs `ensemble_hessian`). |
@@ -100,7 +100,7 @@ name = "genopt"
 | `cma_equal_weights` | boolean | true | CMA's options (Hansen's defaults when unset); CMA adapts a correlation. |
 | `cma_n_mu` | integer or null | | CMA's options (Hansen's defaults when unset); CMA adapts a correlation. |
 | `cov_factor` | number | 0.5 | As for EnOpt; `cov_factor` shrinks `theta` per resampling attempt. |
-| `epf` | | | External penalty options: `r` (required), `r_factor`, `tol_factor`, `conv_crit`, `max_epf_iter` (`EPF_DEFAULTS`). Needs a constrained objective. |
+| `epf` | | | External penalty options: `r` (required), `r_factor` (default 2), `tol_factor` (0.9), `conv_crit` (1e-5), `max_epf_iter` (10). Needs a constrained objective. |
 | `ftol` | number or null | | Relative change of the mean objective that counts as converged. |
 | `gtol` | number | 1e-05 | Infinity norm of the projected gradient that counts as converged. |
 | `marginal` | string | BetaMC | `BetaMC` (PET's default) or `TruncGaussian`: the marginals with a `theta` gradient. |
@@ -132,7 +132,7 @@ name = "line_search"
 |---|---|---|---|
 | `c1` | number | 0.0001 | Wolfe constants. |
 | `c2` | number | 0.9 | Wolfe constants. |
-| `epf` | | | External penalty options: `r` (required), `r_factor`, `tol_factor`, `conv_crit`, `max_epf_iter` (`EPF_DEFAULTS`). Needs a constrained objective. |
+| `epf` | | | External penalty options: `r` (required), `r_factor` (default 2), `tol_factor` (0.9), `conv_crit` (1e-5), `max_epf_iter` (10). Needs a constrained objective. |
 | `ftol` | number | 1e-05 | Relative change of the mean objective that counts as converged. |
 | `gtol` | number | 1e-05 | Infinity norm of the projected gradient that counts as converged. |
 | `lsmaxiter` | integer | 10 | Trial step lengths per line search. |
@@ -141,7 +141,7 @@ name = "line_search"
 | `method` | string | GD | Search direction: `GD` (steepest descent), `BFGS` or `Newton-CG`. |
 | `recompute_jac` | integer | 0 | Gradient re-evaluations (and retries) after a failed line search. |
 | `rho` | number | 0.5 | Backtracking factor. |
-| `step_size` | number or null | | First step length (default `0.25 / \|\|p\|\|_inf` at the first iteration). |
+| `step_size` | number or null | | First step length (default <code>0.25 / &#124;&#124;p&#124;&#124;&#95;inf</code> at the first iteration). |
 | `step_size_adapt` | integer | 1 | Later first trials: 0 keep `step_size`, 1 from the last decrease (`2 (f_k - f_k-1) / (g^T p)`), 2 from the slope ratio. |
 | `step_size_max` | number | 100000.0 | Largest step length. |
 | `transform` | boolean | false | Optimize in the unit cube of the bounds. |
@@ -326,7 +326,7 @@ name = "smcopt"
 | `alpha_maxiter` | integer | 5 | Backtracking trials per resampling attempt. |
 | `best_func` | number or null | | Best objective seen before this run (default: the initial objective). |
 | `cov_factor` | number | 0.5 | Covariance shrink factor per resampling attempt. |
-| `epf` | | | External penalty options: `r` (required), `r_factor`, `tol_factor`, `conv_crit`, `max_epf_iter` (`EPF_DEFAULTS`). Needs a constrained objective. |
+| `epf` | | | External penalty options: `r` (required), `r_factor` (default 2), `tol_factor` (0.9), `conv_crit` (1e-5), `max_epf_iter` (10). Needs a constrained objective. |
 | `ftol` | number or null | | Relative change of the mean objective that counts as converged. |
 | `gtol` | number | 1e-05 | Infinity norm of the projected gradient that counts as converged. |
 | `inflation_factor` | number | 1.0 | Initial tempering of the weights (it grows with the iteration). |
@@ -350,7 +350,7 @@ name = "trust_region"
 
 | option | type | default | description |
 |---|---|---|---|
-| `epf` | | | External penalty options: `r` (required), `r_factor`, `tol_factor`, `conv_crit`, `max_epf_iter` (`EPF_DEFAULTS`). Needs a constrained objective. |
+| `epf` | | | External penalty options: `r` (required), `r_factor` (default 2), `tol_factor` (0.9), `conv_crit` (1e-5), `max_epf_iter` (10). Needs a constrained objective. |
 | `eta1` | number | 0.05 | Ratios below which the radius shrinks by `gam1`, and above which (at the boundary) it grows by `gam2`. |
 | `eta2` | number | 0.5 | Ratios below which the radius shrinks by `gam1`, and above which (at the boundary) it grows by `gam2`. |
 | `ftol` | number | 1e-05 | Relative change of the mean objective that counts as converged. |

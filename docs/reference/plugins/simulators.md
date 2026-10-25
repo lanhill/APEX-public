@@ -20,8 +20,8 @@ name = "eclipse"
 
 | option | type | default | description |
 |---|---|---|---|
-| `case_dir` | string or string or null | | The folder `${case_dir}` names in the template (its `INCLUDE` paths), for every level; default the template's folder. |
-| `deck_template_file` | string or string | required | Mako template of the `.DATA` deck (as for `opm_flow`). |
+| `case_dir` | string or null | | The folder `${case_dir}` names in the template (its `INCLUDE` paths), for every level; default the template's folder. |
+| `deck_template_file` | string | required | Mako template of the `.DATA` deck (as for `opm_flow`). |
 | `eclrun_args` | array | | Extra `eclrun` arguments before the program, e.g. `["--version=2023.1"]` or `["--nocleanup"]` (PET's default). |
 | `executable` | string | eclrun | The `eclrun` command (default `eclrun`, looked up on `PATH`). |
 | `keep_files` | boolean | true | Keep the member's deck and outputs. `False` deletes everything but the log, the deck, the `.PRT`/`.ECLEND` reports and the summary files after reading. |
@@ -45,7 +45,7 @@ name = "ert"
 
 | option | type | default | description |
 |---|---|---|---|
-| `case_file` | string or string | required | The ERT configuration (`.ert`). |
+| `case_file` | string | required | The ERT configuration (`.ert`). |
 | `eclbase` | string | required | The case's `ECLBASE`: the simulator's case name in the run path (`<IENS>`, `<ITER>` are replaced). |
 | `fields` | object | required | `{state variable: {keyword, file}}`: each field's ERT name (its GRDECL keyword) and the output file the forward model reads in the run path. |
 | `parameter_step` | string or null | | The forward-model step that writes them (`APEX_WRITE_PARAMETERS(<CASE>=...)`), put before the case's first `FORWARD_MODEL`. |
@@ -72,7 +72,7 @@ name = "linear"
 | `fail_members` | array | | Member ids whose runs raise `SimulationError`, to exercise failure handling. |
 | `fields` | array | | `[time, datatype, size]` of each field output: `size` further rows of `G`, after the scalar ones, with keys `(time, datatype, 0..size-1)`. |
 | `flaky_members` | object or null | | Member id -> how many times its run fails transiently (a `TransientSimulationError`, as a licence checkout) before it succeeds; to test the executors' retries. Keys may be strings (TOML tables). |
-| `forward_file` | string or string or null | | `G` itself `(n_outputs, n_state)`, or an `.npz` holding it as `matrix`. |
+| `forward_file` | string or null | | `G` itself `(n_outputs, n_state)`, or an `.npz` holding it as `matrix`. |
 | `levels` | array or null | | Fidelity levels of a multilevel ensemble (the composition passes them): per level `first`, `size` and optionally its own `G` (`matrix` or `forward_file`), e.g. a biased coarse model; a level without one uses `G`. Grid upscaling does not apply to this model. |
 | `matrix` | ArrayLike or null | | `G` itself `(n_outputs, n_state)`, or an `.npz` holding it as `matrix`. |
 | `nonlinearity` | string | none | `"none"` or `"tanh"`. |
@@ -94,8 +94,8 @@ name = "opm_flow"
 
 | option | type | default | description |
 |---|---|---|---|
-| `case_dir` | string or string or null | | The folder `${case_dir}` names in the template (its `INCLUDE` paths), for every level; default the template's folder. A copied example sets it to its own folder, so that its data files are read while the template stays in the examples root. |
-| `deck_template_file` | string or string | required | Mako template of the `.DATA` deck. |
+| `case_dir` | string or null | | The folder `${case_dir}` names in the template (its `INCLUDE` paths), for every level; default the template's folder. A copied example sets it to its own folder, so that its data files are read while the template stays in the examples root. |
+| `deck_template_file` | string | required | Mako template of the `.DATA` deck. |
 | `executable` | string | flow | OPM Flow command (default `flow`, looked up on `PATH`). |
 | `flow_args` | array | | Extra command-line arguments, e.g. `["--threads-per-process=1"]`. |
 | `keep_files` | boolean | true | Keep the member's deck and outputs (`False` deletes everything but the log and the summary files after reading, to save disk space). |

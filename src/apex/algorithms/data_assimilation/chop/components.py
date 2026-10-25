@@ -336,7 +336,7 @@ class GainInflation(ChopComponent):
         ``high`` widened by their range, ``lower`` never below 0.
     threshold
         The hyper-update keeps a hyper-parameter's correlation with a datum only when
-        ``|corr| > threshold / sqrt(N)``, ``N`` the ensemble size (default 3).
+        ``abs(corr) > threshold / sqrt(N)``, ``N`` the ensemble size (default 3).
     """
 
     def __init__(
@@ -410,7 +410,7 @@ class DataWeights(ChopComponent):
         ``high`` widened by their range, ``lower`` never below 0.
     threshold
         The hyper-update keeps a hyper-parameter's correlation with a datum only when
-        ``|corr| > threshold / sqrt(N)``, ``N`` the ensemble size (default 3).
+        ``abs(corr) > threshold / sqrt(N)``, ``N`` the ensemble size (default 3).
     """
 
     def __init__(

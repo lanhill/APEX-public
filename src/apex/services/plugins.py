@@ -369,7 +369,8 @@ def plugin_info(registry: str, name: str) -> PluginInfo:
     doc = inspect.getdoc(factory) or ""
     # A name registered for a factory an earlier name already has is that plugin's alias.
     first = next(o for o in entries.registered() if entries.factory(o) is factory)
-    summary = doc.splitlines()[0] if doc else ""
+    # As the options' descriptions: Markdown's code spans, not reStructuredText's literals.
+    summary = _LITERAL.sub(r"`\1`", _ROLE.sub(r"`\1`", doc.splitlines()[0])) if doc else ""
     if first != name:
         summary = f"An alias of {first!r}. {summary}".rstrip()
     return PluginInfo(

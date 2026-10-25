@@ -1782,6 +1782,13 @@ def test_the_case_s_own_algorithm_changed_from_the_case_is_reported_unless_a_var
     assert "optimizer.options.ne 4 -> 6" in changed
     assert "optimizer.options.maxiter 3 -> 4" in changed
     assert "c | ga" not in changed  # another algorithm: its settings are its own
+    # #234: the case's values are the user's baseline, changed only on their word.
+    assert "ask the user before changing them" in changed
+    from apex.agents.chat import SYSTEM
+
+    assert "keep the case's own optimizer as the case configures it (the user's baseline" in (
+        SYSTEM
+    )
 
     varied = [_opt_cell("enopt", {"name": "enopt", "options": {"ne": 6, "maxiter": 3}}, "big"),
               _opt_cell("ga", {"name": "ga", "options": {}}, "big")]  # fmt: skip

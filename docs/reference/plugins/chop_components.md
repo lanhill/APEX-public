@@ -18,7 +18,7 @@ Per-member weights of the innovations in the gain: `dm_j = K diag(w_j) r_j`.
 | `low` | number | 0.5 | The range of the uniform prior each member's weights is drawn from (defaults 0.5 and 1.5). |
 | `lower` | number or null | | `logit`'s bounds, with `lower < low <= high < upper`; by default `low` and `high` widened by their range, `lower` never below 0. |
 | `mode` | string | datatype | `datatype` (default) gives each member one weight per data type, `datum` one per datum. |
-| `threshold` | number | 3.0 | The hyper-update keeps a hyper-parameter's correlation with a datum only when `\|corr\| > threshold / sqrt(N)`, `N` the ensemble size (default 3). |
+| `threshold` | number | 3.0 | The hyper-update keeps a hyper-parameter's correlation with a datum only when `abs(corr) > threshold / sqrt(N)`, `N` the ensemble size (default 3). |
 | `transform` | string | none | The scale the hyper-parameter update works on: `none` (natural values, floored at `floor`), `log` (needs `low > 0`) or `logit` (kept within `lower` and `upper`). |
 | `upper` | number or null | | `logit`'s bounds, with `lower < low <= high < upper`; by default `low` and `high` widened by their range, `lower` never below 0. |
 
@@ -33,7 +33,7 @@ Per-member multiplicative inflation of the gain: `dm_j = (D_j o K) r_j`.
 | `low` | number | 0.5 | The range of the uniform prior each member's inflation factors is drawn from (defaults 0.5 and 1.5). |
 | `lower` | number or null | | `logit`'s bounds, with `lower < low <= high < upper`; by default `low` and `high` widened by their range, `lower` never below 0. |
 | `mode` | string | variable | `variable` (default) gives each member one inflation factor per state variable, `scalar` one factor, `variable_datatype` one per state variable and data type. |
-| `threshold` | number | 3.0 | The hyper-update keeps a hyper-parameter's correlation with a datum only when `\|corr\| > threshold / sqrt(N)`, `N` the ensemble size (default 3). |
+| `threshold` | number | 3.0 | The hyper-update keeps a hyper-parameter's correlation with a datum only when `abs(corr) > threshold / sqrt(N)`, `N` the ensemble size (default 3). |
 | `transform` | string | none | The scale the hyper-parameter update works on: `none` (natural values, floored at `floor`), `log` (needs `low > 0`) or `logit` (kept within `lower` and `upper`). |
 | `upper` | number or null | | `logit`'s bounds, with `lower < low <= high < upper`; by default `low` and `high` widened by their range, `lower` never below 0. |
 

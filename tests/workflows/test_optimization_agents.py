@@ -801,3 +801,47 @@ def test_only_one_familys_operators_are_matched_and_one_optimizers_settings_neve
     options, _ = matched({"en": {"name": "enopt", "options": {"alpha": 0.3, "maxiter": 2}},
                           "smc": {"name": "smcopt", "options": {}}})  # fmt: skip
     assert options["smc"] == {"alpha": 0.3}
+
+
+def test_a_design_over_the_budget_is_refused_with_each_methods_least_cost(
+    tmp_path: Path,
+) -> None:
+    """A reported issue (#242): genopt against EnOpt within 4 simulator runs was refused four
+    times, at 20, 10, 8 and 192 runs, with no word of what the cheapest design costs. The
+    refusal now gives each method's least cost (one seed, one iteration, a two-member
+    ensemble, no backtracking), and says when no design of the methods fits; a population's
+    size is not cut, so then it says only that the size was kept (the review of the fix)."""
+    from apex.agents.optimization_advice import OptimizationPlanner
+    from apex.core.errors import ConfigError
+
+    case = _case(tmp_path)
+    planner = OptimizationPlanner(ApexService(tmp_path / "service"), None)
+
+    def refusal(methods: dict[str, Any], budget: int) -> str:
+        with pytest.raises(ConfigError) as refused:
+            planner.plan_given(case, "compare", {"methods": methods, "replicates": 1},
+                               budget=budget)  # fmt: skip
+        return str(refused.value)
+
+    genopt = {"name": "genopt", "options": {"ne": 4, "maxiter": 3, "cma": True}}
+    methods: dict[str, Any] = {
+        "enopt": {"name": "enopt", "options": {"ne": 4, "maxiter": 3}}, "genopt": genopt,
+    }  # fmt: skip
+    # One realization: the start, then one iteration's two members and one trial point.
+    message = refusal(methods, 4)
+    assert "computed by APEX, each method's least cost for one seed: enopt 5 (" in message
+    assert "genopt 5 (" in message
+    assert "together at least 10, so no design of these methods fits the budget of 4" in message
+    assert "no design" not in refusal(methods, 10)
+    # The least design itself plans within that budget, CMA included (ne = 1 would not run).
+    cheapest = {k: {"name": k, "options": {**m["options"], "ne": 2, "maxiter": 1,
+                                           "alpha_maxiter": 0}}
+                for k, m in methods.items()}  # fmt: skip
+    result = planner.plan_given(case, "compare", {"methods": cheapest, "replicates": 1},
+                                budget=10)  # fmt: skip
+    assert result.cost == 10
+    # A population optimizer's size is kept, so nothing is said about every design.
+    ga = refusal({"enopt": methods["enopt"],
+                  "ga": {"name": "ga", "options": {"pop_size": 20, "maxiter": 3}}}, 4)  # fmt: skip
+    assert "population 20 kept as proposed" in ga
+    assert "no design" not in ga

@@ -23,7 +23,7 @@ AdaMax: Adam with the infinity norm for the second moment.
 
 | option | type | default | description |
 |---|---|---|---|
-| `beta2` | number | 0.999 | `b2`, the decay of the running maximum of `\|g\|`, in `[0, 1)` (default 0.999). |
+| `beta2` | number | 0.999 | `b2`, the decay of the running maximum of <code>&#124;g&#124;</code>, in `[0, 1)` (default 0.999). |
 | `momentum` | number | 0.9 | `b1`, the decay of the gradient's running mean, in `[0, 1)` (0 uses the current gradient alone). Set from the optimizer's momentum `beta`, as PET's EnOpt and GenOpt do (EnOpt's default 0). |
 | `step_size` | number | 0.1 | `alpha`, the base step length in optimizer coordinates (default 0.1); each control moves by at most about this much per step, and backtracking shrinks it for a trial. |
 

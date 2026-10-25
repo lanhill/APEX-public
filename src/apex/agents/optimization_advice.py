@@ -20,6 +20,7 @@ confirmation), which takes optimization studies as any study.
 
 import inspect
 import json
+import logging
 import math
 import os
 import tomllib
@@ -61,6 +62,8 @@ from apex.storage import optimization_directory as layout
 
 if TYPE_CHECKING:
     from apex.services.workspace import Workspace
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------- diagnosis
 
@@ -755,6 +758,29 @@ _NO_OPTION_MODEL = (KeyError, ApexError, TypeError, PydanticUserError,
                     PydanticSchemaGenerationError)  # fmt: skip
 
 
+#: The least settings of the options that bound an optimizer's simulator runs, by option name
+#: (an optimizer without the option is left alone): one iteration (or batch), a two-member
+#: ensemble, no backtracking trials, resampling, gradient recomputation or radius cuts. Two
+#: members, not one: a one-member ensemble estimates no gradient, and genopt's CMA refuses it
+#: (n_mu = 0). A population's size is not cut here (its least size is the method's own
+#: question) and is reported as kept. A reported issue (#242): over a small budget the
+#: assistant could not learn a method's least cost and guessed designs one refusal at a time.
+CHEAPEST_OPTIONS: dict[str, int] = {
+    "maxiter": 1, "max_batches": 1, "ne": 2, "alpha_maxiter": 0, "resample": 0,
+    "lsmaxiter": 1, "recompute_jac": 0, "trust_radius_cuts": 0, "number_of_perturbations": 1,
+}  # fmt: skip
+
+
+@dataclass(frozen=True)
+class LeastCost:
+    """One method's least cost in simulator runs (``None``: not bounded, or ``error``)."""
+
+    cost: int | None
+    applied: dict[str, int]
+    population: int | None = None
+    error: str | None = None
+
+
 def _option_fields(name: str) -> dict[str, Any] | None:
     try:
         return dict(option_model("optimizers", name).model_fields)
@@ -1071,6 +1097,8 @@ class OptimizationPlanner:
         if cost is not None and cost > facts.budget_simulator_runs:
             errors.append(f"it costs {cost} simulator runs, over the budget of "
                           f"{facts.budget_simulator_runs}")  # fmt: skip
+            if (note := self.least_costs_note(facts, proposal)) is not None:
+                errors.append(note)
         if errors or spec is None or validation is None:
             raise ConfigError("; ".join(dict.fromkeys(errors)) or "not a valid study")
         trace = recorder.record_decision(
@@ -1082,6 +1110,73 @@ class OptimizationPlanner:
         return OptimizationPlanResult(facts, proposal, spec, validation, cost, True, "caller",
                                       "the caller's design, checked", trace,
                                       matched=tuple(matched))  # fmt: skip
+
+    def least_costs(
+        self, facts: OptimizationPlanFacts, proposal: OptimizationStudyProposal
+    ) -> dict[str, LeastCost]:
+        """Return each method's least cost: one seed of the case as configured.
+
+        The options the optimizer has among :data:`CHEAPEST_OPTIONS` take their least
+        values; a population's size is kept as proposed and reported.
+        """
+        optimizer = facts.optimizer
+        methods = proposal.methods or {str(optimizer["name"]): OptimizationMethod(
+            name=str(optimizer["name"]), options=dict(optimizer.get("options") or {}),
+        )}  # fmt: skip
+        base = OptimizationVariantProposal(name="base", patch={},
+                                           rationale="the case as configured")  # fmt: skip
+        n_obj = max(len(facts.objective_names), 1)
+        costs: dict[str, LeastCost] = {}
+        for label, method in methods.items():
+            fields = _option_fields(method.name) or {}
+            applied = {k: v for k, v in CHEAPEST_OPTIONS.items() if k in fields}
+            options = {**method.options, **applied}
+            arm = method.model_copy(update={"options": options})
+            alone = proposal.model_copy(
+                update={"methods": {label: arm}, "variants": [base], "replicates": 1}
+            )
+            _, _, cost, errors = self.check(facts, alone)
+            # The budget's own refusal is not a fault of the design.
+            faults = [e for e in errors if "budget" not in e]
+            costs[label] = LeastCost(
+                cost=cost,
+                applied=applied,
+                population=population(method.name, options, n_obj),
+                error="; ".join(faults) if cost is None and faults else None,
+            )
+        return costs
+
+    def least_costs_note(
+        self, facts: OptimizationPlanFacts, proposal: OptimizationStudyProposal
+    ) -> str | None:
+        """Say what the cheapest design of these methods costs, against the budget (#242).
+
+        ``None`` when it cannot be told: the refusal is then the budget's alone.
+        """
+        try:
+            costs = self.least_costs(facts, proposal)
+        except (ApexError, ValueError, TypeError) as error:
+            logger.warning("least_costs_failed", extra={"error": str(error)})
+            return None
+        parts = []
+        for label, least in costs.items():
+            settings = ", ".join(f"{k} = {v}" for k, v in least.applied.items()) or "as given"
+            if least.error is not None:
+                parts.append(f"{label}: not costed ({least.error})")
+                continue
+            kept = (f", population {least.population} kept as proposed"
+                    if least.population is not None else "")  # fmt: skip
+            shown = least.cost if least.cost is not None else "not bounded"
+            parts.append(f"{label} {shown} ({settings}{kept})")
+        note = "computed by APEX, each method's least cost for one seed: " + "; ".join(parts)
+        exact = all(c.cost is not None and c.error is None and c.population is None
+                    for c in costs.values())  # fmt: skip
+        least_total = sum(c.cost or 0 for c in costs.values())
+        if exact and least_total > facts.budget_simulator_runs:
+            note += (f"; together at least {least_total}, so no design of these methods fits "
+                     f"the budget of {facts.budget_simulator_runs}: tell the user, and ask "
+                     "for a larger budget or fewer methods")  # fmt: skip
+        return note
 
     def _fit(
         self, facts: OptimizationPlanFacts, proposal: OptimizationStudyProposal

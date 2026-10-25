@@ -24,7 +24,7 @@ The histogram of a variable equals a reference one: `counts(x) - counts_ref = 0`
 | `bins` | integer | 50 | Number of bins (MATLAB: 50). |
 | `counts` | array or null | | Or the target counts per bin. |
 | `range` | array | required | `[low, high]` of the bins. |
-| `reference_file` | string or string or null | | An `.npy`, or an `.npz` with the variable's array (e.g. the truth), whose histogram is the target. |
+| `reference_file` | string or null | | An `.npy`, or an `.npz` with the variable's array (e.g. the truth), whose histogram is the target. |
 | `variable` | string | required | The variable (state, or property with a parameterization). |
 
 ## `linear`
@@ -34,7 +34,7 @@ A linear system `A x - b` (equality `= 0` or inequality `<= 0`).
 | option | type | default | description |
 |---|---|---|---|
 | `kind` | string | equality | `equality` or `inequality`. |
-| `matrix_file` | string or string | required | An `.npz` with `matrix` `(n_c, n)` over the stacked `variables` and, optionally, `rhs` `(n_c,)` (default zeros). |
+| `matrix_file` | string | required | An `.npz` with `matrix` `(n_c, n)` over the stacked `variables` and, optionally, `rhs` `(n_c,)` (default zeros). |
 | `variables` | array or null | | The variables `A` acts on, stacked in this order; default all. |
 
 ## `tv`

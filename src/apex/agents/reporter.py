@@ -193,6 +193,8 @@ def run_setup(run_path: Path) -> dict[str, object]:
         ],
         "simulator": (config.get("simulator") or {}).get("name"),
         "case_kind": (config.get("case") or {}).get("kind"),
+        # A comparison says whether two runs drew the same random numbers (#237).
+        "seed": (config.get("run") or {}).get("seed"),
     }
     transforms = [t.get("name") for t in config.get("data_transforms") or []]
     if transforms:
@@ -354,6 +356,7 @@ def _setup_text(setup: dict[str, object]) -> str:
         "damping": "Damping", "ensemble_size": "Ensemble size", "prior": "Prior",
         "state_variables": "State variables", "data_transforms": "Data transforms",
         "simulator": "Simulator", "case_kind": "Case", "validation": "Cross validation",
+        "seed": "Seed",
     }  # fmt: skip
 
     def shown(value: object) -> str:
@@ -396,8 +399,9 @@ def _comparison_text(facts: RunReportFacts) -> str:
     """Return how the run compares with the other run: setup differences and final metrics."""
     other = facts.compared_with
     assert other is not None
+    # The seed has its own sentence: replicates differ only by it, and their setups agree.
     differs = sorted(k for k in {*facts.setup, *other.setup}
-                     if facts.setup.get(k) != other.setup.get(k))  # fmt: skip
+                     if k != "seed" and facts.setup.get(k) != other.setup.get(k))  # fmt: skip
     lines = [
         f"Compared with **{other.summary.name}** ({other.summary.method}, "
         f"{other.summary.members} members, {other.summary.simulator_runs} simulator runs)."
@@ -405,6 +409,17 @@ def _comparison_text(facts: RunReportFacts) -> str:
     lines.append(
         "Setup differences: " + ", ".join(differs) + "." if differs else "The setups agree."
     )
+    # From the snapshots, so that no answer has to say it did not check (#237).
+    ours, theirs = facts.setup.get("seed"), other.setup.get("seed")
+    if ours is not None and theirs is not None and ours != theirs:
+        lines.append(f"The seeds differ ({ours} here, {theirs} there).")
+    elif ours is not None and theirs is not None:
+        # The same root seed draws the same numbers only for the same draws (a review).
+        alike = all(facts.setup.get(k) == other.setup.get(k)
+                    for k in ("method", "ensemble_size", "prior"))  # fmt: skip
+        lines.append(f"Both runs used seed {ours}" + (
+            ", with the same method, ensemble size and prior: the same prior ensemble."
+            if alike else "."))  # fmt: skip
     for metric, by_label in facts.summary.posterior_metrics.items():
         theirs = other.summary.posterior_metrics.get(metric, {})
         for label, value in by_label.items():

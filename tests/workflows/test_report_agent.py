@@ -93,16 +93,23 @@ def test_a_run_report_opens_with_a_summary_and_gives_the_setup(
 
     text = next(s.text for s in compared.report.sections if s.heading == "Comparison")
     assert "The setups agree." in text
+    seed = config["run"]["seed"]
+    assert (
+        f"Both runs used seed {seed}, with the same method, ensemble size and prior: the "
+        "same prior ensemble."
+    ) in text  # #237
     assert "- **rmse**:" in text
 
     other = tmp_path / "other_run"
     shutil.copytree(run_dir, other)
     changed = json.loads((other / "config.json").read_text())
     changed["simulator"]["name"] = "another"
+    changed["run"]["seed"] = seed + 1
     (other / "config.json").write_text(json.dumps(changed))
     against = Reporter(ApexService(tmp_path / "service"), None).run_report(run_dir, other)
     text = next(s.text for s in against.report.sections if s.heading == "Comparison")
     assert "Setup differences: simulator." in text
+    assert f"The seeds differ ({seed} here, {seed + 1} there)." in text
 
 
 def test_a_run_setup_shows_no_server_paths_and_names_prior_groups(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ name = "ecalc_emissions"
 | option | type | default | description |
 |---|---|---|---|
 | `disc` | number | 0.0 | Discount rate per year (default 0: plain tonnes). |
-| `ecalc_model_file` | string or string | required | As `ecalc_npv`. |
+| `ecalc_model_file` | string | required | As `ecalc_npv`. |
 | `emission` | string | co2 | As `ecalc_npv`. |
 | `obj_scaling` | number | 1.0 | Divides the tonnes (e.g. 1000 for kilotonnes); positive, as emissions are minimised. |
 | `start` | string | required | As `ecalc_npv`. |
@@ -42,7 +42,7 @@ name = "ecalc_npv"
 | option | type | default | description |
 |---|---|---|---|
 | `disc` | number | 0.0 | As `npv`. |
-| `ecalc_model_file` | string or string | required | The eCalc model (YAML), whose START and END are `start` and the last time and whose time series reads `OIL_PROD`, `GAS_PROD` and `WATER_INJ` (per day). |
+| `ecalc_model_file` | string | required | The eCalc model (YAML), whose START and END are `start` and the last time and whose time series reads `OIL_PROD`, `GAS_PROD` and `WATER_INJ` (per day). |
 | `emission` | string | co2 | The emission priced at `wem` (its name in the model; default `co2`). |
 | `obj_scaling` | number | 1.0 | As `npv`. |
 | `start` | string | required | The simulation's start and the report dates (ISO), as `npv`. |
@@ -68,7 +68,7 @@ name = "ecalc_pareto_npv"
 | option | type | default | description |
 |---|---|---|---|
 | `disc` | number | 0.0 | Discount rate per year (e.g. 0.08 for 8 %), applied by the days since `start`; must be above -1, and the default 0 does not discount. |
-| `ecalc_model_file` | string or string | required | The eCalc model (YAML), whose START and END are `start` and the last of `times` and whose time series reads the step rates (per day). |
+| `ecalc_model_file` | string | required | The eCalc model (YAML), whose START and END are `start` and the last of `times` and whose time series reads the step rates (per day). |
 | `emission` | string | co2 | The emission priced at `wem`, by its name in the model's fuels and emitters (case-insensitive; default `co2`, PET's cases used `co2_fuel_gas`). |
 | `obj_scaling` | number | 1.0 | Divides the NPV (e.g. 1e6 for millions); any nonzero number, default 1. |
 | `start` | string | required | The simulation's start date (ISO, e.g. `2025-01-01`): the deck's START, checked against the summary's TIME; discounting counts the days from it. |
@@ -162,7 +162,7 @@ name = "ren_npv_co2"
 | option | type | default | description |
 |---|---|---|---|
 | `disc` | number | 0.0 | Discount rate per year (e.g. 0.08 for 8 %), applied by the days since `start`; must be above -1, and the default 0 does not discount. |
-| `ecalc_model_file` | string or string | required | The eCalc model (YAML), whose START and END are `start` and the last of `times` and whose time series reads the step rates (per day). |
+| `ecalc_model_file` | string | required | The eCalc model (YAML), whose START and END are `start` and the last of `times` and whose time series reads the step rates (per day). |
 | `emission` | string | co2 | The emission priced at `wem`, by its name in the model's fuels and emitters (case-insensitive; default `co2`, PET's cases used `co2_fuel_gas`). |
 | `injectors` | array | required | The injectors whose WTHP gives `THP_MAX`. |
 | `obj_scaling` | number | 1.0 | Divides the NPV (e.g. 1e6 for millions); any nonzero number, default 1. |
@@ -171,7 +171,7 @@ name = "ren_npv_co2"
 | `times` | array | required | The report dates (ISO), increasing and after `start`; each is the end of one step whose rates eCalc gets. |
 | `wem` | number | required | Cost per tonne of the emission eCalc computes. |
 | `wgp` | number | 0.0 | Gas price per unit of FGPT; default 0 leaves gas out of the value. |
-| `wind_power_file` | string or string | required | `.npy` of the wind power available in each report step `(n_steps,)`. |
+| `wind_power_file` | string | required | `.npy` of the wind power available in each report step `(n_steps,)`. |
 | `wop` | number | required | Oil price per unit of FOPT (PET's `wop`). |
 | `wwi` | number | 0.0 | Cost per unit of water injected (FWIT); default 0 makes it free. |
 | `wwp` | number | 0.0 | Cost per unit of water produced (FWPT); default 0 makes it free. |
