@@ -5,7 +5,7 @@ generated: reference
 
 # The assistant's tools: reference
 
-Every one of these 21 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 24 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `case_info`
 
@@ -17,6 +17,16 @@ Read a case: its configuration (method, state variables with their grids and bou
 Compare a study's methods and variants at each run's posterior.
 
 
+## `convert_case`
+
+Import a deck (OPM Flow, Eclipse) with its history as an APEX history-matching case: a run draft of this chat, validated and costed, with notes on every assumed value; then propose_action.
+
+
+## `create_case`
+
+Create a synthetic case from a description (grid, wells, schedule, property statistics; {} gives a five-spot): its deck, truth and prior as a draft of this chat. Its observations need one truth run, which only the user starts.
+
+
 ## `diagnose_run`
 
 Diagnose a run: causes (with evidence) and recommended changes, with validated patches.
@@ -25,6 +35,11 @@ Diagnose a run: causes (with evidence) and recommended changes, with validated p
 ## `draft_optimization`
 
 Draft an optimization from a history-matching case: its wells' controls over a forecast after the history, NPV, robust over a run's posterior; validated and costed. Ask the user for wop, wwp, wwi, disc and the producers' pressure bounds first; never invent them.
+
+
+## `draft_prior`
+
+Give a run draft of this chat a prior for its fields (the geomodeler's rules: Gaussian fields around the case's values), written beside it and checked on a drawn sample.
 
 
 ## `draft_run`
@@ -64,7 +79,7 @@ List methods, localizations, simulators and other plugins. Example: list_plugins
 
 ## `list_runs`
 
-List runs, optionally by annotation. Example: list_runs(annotations={"study": "loc"}).
+List runs, newest first (the first is the latest), optionally by annotation; next_offset gives the next page. Example: list_runs(annotations={"study": "loc"}).
 
 
 ## `monitor_run`

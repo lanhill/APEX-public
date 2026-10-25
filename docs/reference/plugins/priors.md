@@ -53,6 +53,7 @@ name = "gaussian_field"
 | option | type | default | description |
 |---|---|---|---|
 | `azimuth` | number or array | 0.0 | |
+| `conditioning` | object or null | | |
 | `exponent` | number or array | 1.0 | |
 | `grid` | array | required | |
 | `major_range` | number or array | 10.0 | |
@@ -75,6 +76,7 @@ name = "geostatspy_sgsim"
 | option | type | default | description |
 |---|---|---|---|
 | `azimuth` | number or array | 0.0 | |
+| `conditioning` | object or null | | |
 | `grid` | array | required | |
 | `major_range` | number or array | 10.0 | |
 | `max_neighbours` | integer | 20 | |

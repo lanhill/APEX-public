@@ -7,7 +7,7 @@ Status: early development.
 ## Quick start
 
 - [Using agents from the command line](docs/getting_started/agents_cli.md)
-- [Bringing your own case to APEX: one deck or one description](docs/getting_started/case_converter.md)
+- [Bringing your own case: a deck and its history as an APEX case](docs/getting_started/case_converter.md)
 - [Setting up your web UI with an AI assistant](docs/getting_started/web_ui.md)
 - [Writing and registering your own plugin](docs/getting_started/writing_a_plugin.md)
 
@@ -45,7 +45,7 @@ This creates `.venv/` inside the folder with APEX, its exact pinned dependencies
 
 ```bash
 uv run apex --help        # the command-line interface
-uv run apex plugins       # every method, simulator and other plugin; [parity], [validated], [stable], [experimental] tags show a status
+uv run apex plugins       # every plugin you can choose (methods, simulators, priors, the agents' skills, ...); [parity], [validated], [stable], [experimental] tags show a status
 uv run pytest -q -n 4     # the test suite, on 4 cores
 ```
 

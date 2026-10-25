@@ -5,7 +5,7 @@ generated: reference
 
 # The apex agent commands: reference
 
-Every one of these 8 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 17 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `apex agent ask`
 
@@ -26,6 +26,124 @@ apex agent ask QUESTION
 | `--tools` (on) / `--no-tools` (off) | true | Offer APEX's tools. |
 | `--max-turns` | 8 | Model calls at most. |
 | `--client` | agent | Client name for quotas and the call log. |
+
+## `apex agent convert create`
+
+Create a synthetic case: deck, truth, prior, and observations from one truth run.
+
+```bash
+apex agent convert create
+```
+
+| option | default | description |
+|---|---|---|
+| `--out` | | A new folder for the synthetic case. |
+| `--request` | | The case in words (default: a five-spot). |
+| `--name` | | The case's name. |
+| `--skill` | | The simulator's skill (default opm_flow). |
+| `--observe` (on) / `--no-observe` (off) | true | Run the truth once now to make the observations. |
+| `--yes` | false | Run the truth without asking. |
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+| `--no-llm` | false | Rules only: no model is asked. |
+| `--provider` | | Provider (default: [agents.llm] provider). |
+| `--model` | | Model (default: [agents.llm] model). |
+| `--base-url` | | Server address. |
+| `--api-key-env` | | Variable holding the key (never the key itself). |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
+
+## `apex agent convert from`
+
+Translate a case from a skill's format; nothing runs.
+
+```bash
+apex agent convert from SKILL SOURCE OUTPUT
+```
+
+| option | default | description |
+|---|---|---|
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+
+## `apex agent convert from-pet`
+
+Write a PET case as an APEX case (as apex pet-import); nothing runs.
+
+```bash
+apex agent convert from-pet PET_CONFIG OUTPUT
+```
+
+| option | default | description |
+|---|---|---|
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+
+## `apex agent convert import`
+
+Convert a case into an APEX history-matching case that validates; nothing runs.
+
+```bash
+apex agent convert import CASE
+```
+
+| option | default | description |
+|---|---|---|
+| `--out` | | A new folder for the APEX case. |
+| `--history` | | Observed data: a CSV (time,datatype,value) or a summary file (default: the deck's WCONHIST/WCONINJH). |
+| `--request` | | What to match and how, in words (for the model). |
+| `--name` | | The run's name (default: the case's). |
+| `--skill` | | The converter skill (default: the one that reads it). |
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+| `--no-llm` | false | Rules only: no model is asked. |
+| `--provider` | | Provider (default: [agents.llm] provider). |
+| `--model` | | Model (default: [agents.llm] model). |
+| `--base-url` | | Server address. |
+| `--api-key-env` | | Variable holding the key (never the key itself). |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
+| `--json` | false | Print the result as JSON. |
+
+## `apex agent convert observe`
+
+Run a created case's truth once, and write its observations.
+
+```bash
+apex agent convert observe CASE
+```
+
+| option | default | description |
+|---|---|---|
+| `--yes` | false | Run the truth without asking. |
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+
+## `apex agent convert skills`
+
+List the converter skills and what they can do.
+
+```bash
+apex agent convert skills
+```
+
+
+## `apex agent convert to`
+
+Translate a case into a skill's format (see `apex agent convert skills`); nothing runs.
+
+```bash
+apex agent convert to SKILL SOURCE OUTPUT
+```
+
+| option | default | description |
+|---|---|---|
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+
+## `apex agent convert to-pet`
+
+Write an APEX case as a PET case (pet.toml, data, runfile, prior); nothing runs.
+
+```bash
+apex agent convert to-pet CONFIG OUTPUT
+```
+
+| option | default | description |
+|---|---|---|
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 
 ## `apex agent diagnose`
 
@@ -73,6 +191,28 @@ apex agent draft-optimization CASE
 | `--out` | | The folder to write it in (default: beside the case). |
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 | `--json` | false | Print the result as JSON. |
+
+## `apex agent geomodel`
+
+Give a case's state variables a prior, checked on a drawn sample.
+
+```bash
+apex agent geomodel CONFIG
+```
+
+| option | default | description |
+|---|---|---|
+| `--out` | | The new configuration (default <config>_prior.toml). |
+| `--request` | | The prior you want, in words (for the model). |
+| `--reference` | | An .npz of reference fields in state space (e.g. the deck's values): the prior shares their mean, std and variogram, without reproducing them. |
+| `--data` | | Hard data to estimate from and condition to: a CSV of i,j,k,property,value (1-based cells; values in the deck's units; property facies: codes). |
+| `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
+| `--no-llm` | false | Rules only: no model is asked. |
+| `--provider` | | Provider (default: [agents.llm] provider). |
+| `--model` | | Model (default: [agents.llm] model). |
+| `--base-url` | | Server address. |
+| `--api-key-env` | | Variable holding the key (never the key itself). |
+| `--no-tool-calls` | false | The model has no native tool calling: prompt for JSON. |
 
 ## `apex agent monitor`
 

@@ -5,7 +5,22 @@ generated: reference
 
 # Configuring service: reference
 
-Every one of these 18 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 20 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+
+## `service:agents.case_converter`
+
+`[agents.case_converter]`: the case-converter's bounds and defaults.
+
+| option | type | default | description |
+|---|---|---|---|
+| `default_skill` | string | opm_flow | |
+| `ensemble_size` | integer | 100 | |
+| `floor_fraction` | number | 0.01 | |
+| `iterations` | integer | 10 | |
+| `max_candidates` | integer | 400 | |
+| `max_revisions` | integer | 3 | |
+| `relative_error` | number | 0.1 | |
+| `ui_max_cells` | integer | 200000 | |
 
 ## `service:agents.diagnosis`
 
@@ -18,6 +33,22 @@ Every one of these 18 items, with its options, as APEX's code defines them. Writ
 | `mahalanobis_limit` | number | 10.83 | |
 | `overcorrection_percent` | number | 10.0 | |
 | `recurring_failure_members` | integer | 3 | |
+
+## `service:agents.geomodeler`
+
+`[agents.geomodeler]`: the geomodeler's bounds and defaults.
+
+| option | type | default | description |
+|---|---|---|---|
+| `default_range_fraction` | number | 0.25 | |
+| `ensemble_size` | integer | 100 | |
+| `estimator` | string | wls | |
+| `max_revisions` | integer | 3 | |
+| `qc_facies_tolerance` | number | 0.15 | |
+| `qc_max_values` | integer | 5000000 | |
+| `qc_members` | integer | 20 | |
+| `qc_tolerance` | number | 0.5 | |
+| `ui_max_cells` | integer | 200000 | |
 
 ## `service:agents.llm`
 
@@ -103,15 +134,36 @@ written to a file or a log.
 | option | type | default | description |
 |---|---|---|---|
 | `context_turns` | integer | 20 | |
+| `default_model` | string or null | | |
 | `isolate_tools` | boolean | true | |
 | `llm` | LLMSection or null | | |
 | `max_history_mb` | number | 200.0 | |
 | `max_model_calls` | integer | 10 | |
 | `max_turns_per_chat` | integer | 500 | |
+| `models` | object | | |
 | `refusal_turns` | integer | 4 | |
 | `retention_days` | number | 92.0 | |
 | `stream` | boolean | true | |
 | `tool_timeout_s` | number | 120.0 | |
+
+**`ChatModelSection`**: `[chat.models.<name>]`: a model the web UI's assistant may answer with (rev. 5).
+
+The keys of `[agents.llm]`, plus the name the web UI shows.
+
+| option | type | default | description |
+|---|---|---|---|
+| `api_key_env` | string or null | | |
+| `base_url` | string or null | | |
+| `json_mode` | boolean or null | | |
+| `label` | string or null | | |
+| `max_context` | integer or null | | |
+| `max_tokens` | integer | 2048 | |
+| `model` | string or null | | |
+| `options` | object | | Further provider options (e.g. Ollama keep_alive). |
+| `provider` | string | openai_compatible | |
+| `temperature` | number | 0.0 | |
+| `timeout_s` | number | 120.0 | |
+| `tool_calls` | boolean or null | | Override the provider's native tool calling (false: JSON). |
 
 **`LLMSection`**: `[agents.llm]`: the model runtime agents use.
 

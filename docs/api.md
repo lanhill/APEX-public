@@ -55,7 +55,9 @@ A guest's token and the owner's web-UI token expire `[ui] token_days` after they
 
 ### 4. Validate, then submit
 
-| Method and path | Service call |
+The right column names the Python calls, `ApexService`'s and the clients' (`Client`, `RemoteClient`), not the tools of LLM clients. The tools (`apex tools`, the MCP server at `/mcp`) have one `validate` for every kind of configuration: runs, studies, predictions and optimizations; see [the tools](tools.md).
+
+| Method and path | Service and client call |
 |---|---|
 | `GET /v1/plugins`, `GET /v1/schemas/{kind}` | `plugins()`, `schema(kind)` |
 | `POST /v1/configs:validate` | `validate`, `validate_study` or `validate_optimization` |

@@ -17,7 +17,7 @@ Every one of these 1 items, with its options, as APEX's code defines them. Writt
 | `budget` | | | |
 | `cases` | object | required | Name -> history-matching configuration. |
 | `methods` | object | | Name -> algorithm, each complete; none: each case's own. |
-| `metrics` | array | | 'metric:label' to compare at each run's posterior (missing ones skipped). |
+| `metrics` | array | | 'metric:label' to compare at each run's posterior. An unknown metric, or a label none of the cases has (a state variable or data type; not checked where a case's labels are known only when it runs), is refused at validation. A metric a cell does not record (e.g. rmse in a real case) is left out of its comparison. |
 | `name` | string | required | |
 | `predictions` | array | | Prediction configurations without run_dir, run after each run. |
 | `replicates` | integer | 1 | Seeds per case and variant. |

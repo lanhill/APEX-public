@@ -20,6 +20,7 @@ from pydantic.errors import PydanticSchemaGenerationError, PydanticUserError
 
 import apex.services.composition  # noqa: F401  (registers every built-in plugin)
 from apex.algorithms.data_assimilation.registries import (
+    chop_components,
     damping_schemes,
     gmac_constraint_metrics,
     gmac_constraints,
@@ -77,6 +78,13 @@ REGISTRIES: dict[str, Registry[Any]] = {
     "avo_attributes": avo_attributes,
     # Phase 3: seafloor displacement's kernels.
     "displacement_kernels": displacement_kernels,
+    # CHOP's hyper-parameter components, `[method.options] components`.
+    "chop_components": chop_components,
+    # the case-converter's and the geomodeler's skills, and the variogram
+    # estimators the geomodeler fits hard data with (`[agents.geomodeler] estimator`).
+    "converter_skills": plugins.converter_skills,
+    "geomodeling_skills": plugins.geomodeling_skills,
+    "variogram_estimators": plugins.variogram_estimators,
 }
 
 #: The workflow each registry serves, for front ends that group plugins (the web UI).
@@ -97,8 +105,12 @@ WORKFLOWS: dict[str, str] = {
             "model_error_models",
             "metrics",
             "stopping_rules",
+            "chop_components",
         ),
         "history_matching",
+    ),
+    **dict.fromkeys(
+        ("converter_skills", "geomodeling_skills", "variogram_estimators"), "case_building"
     ),
     "forecast_scores": "prediction",
     **dict.fromkeys(

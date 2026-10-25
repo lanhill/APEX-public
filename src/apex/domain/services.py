@@ -31,12 +31,17 @@ class PluginInfo(_Document):
     registry: str
     name: str
     workflow: (
-        Literal["history_matching", "prediction", "optimization", "simulation", "reporting"] | None
+        Literal[
+            "history_matching", "prediction", "optimization", "simulation", "reporting",
+            "case_building",
+        ]
+        | None
     ) = Field(
         default=None,
         description="The workflow its registry serves (simulation: shared by all; "
-        "reporting: figures); None for any other.",
-    )
+        "reporting: figures; case_building: the case-converter's and the geomodeler's "
+        "skills and estimators); None for any other.",
+    )  # fmt: skip
     status: str | None = Field(
         default=None, description="'parity', 'validated' or 'experimental', where declared."
     )

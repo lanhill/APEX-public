@@ -5,13 +5,25 @@ generated: reference
 
 # APEX's agents: reference
 
-Every one of these 5 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 7 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+
+## `case-converter`
+
+Turns a simulator's case (an OPM Flow or Eclipse deck with its history) into an APEX history-matching case that validates, with its observations, data errors, state and prior.
+
+Run it with `apex agent convert import DECK`.
 
 ## `diagnosis`
 
 Explains what went wrong in a run (QA/QC of the posterior, failed members) and what to change, with validated configuration patches.
 
 Run it with `apex agent diagnose RUN`.
+
+## `geomodeler`
+
+Gives a case's property fields a prior: continuous Gaussian fields or facies by proportion, from your values or a reference field, each checked on a drawn sample.
+
+Run it with `apex agent geomodel CONFIG`.
 
 ## `monitor`
 

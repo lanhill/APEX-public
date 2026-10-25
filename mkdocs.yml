@@ -117,6 +117,10 @@ nav:
       - reference/plugins/model_error_models.md
       - reference/plugins/petro_elastic_models.md
       - reference/plugins/reflectivity.md
+      - reference/plugins/chop_components.md
+      - reference/plugins/converter_skills.md
+      - reference/plugins/geomodeling_skills.md
+      - reference/plugins/variogram_estimators.md
   - PET migration: migration/pet_parity.md
   - GMAC and the MATLAB scripts: migration/gmac.md
   - pymoo ports (GA, PSO, NSGA): migration/pymoo.md

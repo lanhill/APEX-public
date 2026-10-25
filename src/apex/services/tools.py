@@ -53,7 +53,8 @@ Registry = Literal[
     "parameterizations", "model_error_models", "simulators", "executors", "data_transforms",
     "metrics", "stopping_rules", "forecast_scores", "optimizers", "objectives",
     "response_objectives", "step_rules", "figures", "figure_presets", "petro_elastic_models",
-    "reflectivity", "avo_attributes", "displacement_kernels",
+    "reflectivity", "avo_attributes", "displacement_kernels", "chop_components",
+    "converter_skills", "geomodeling_skills", "variogram_estimators",
 ]  # fmt: skip
 
 

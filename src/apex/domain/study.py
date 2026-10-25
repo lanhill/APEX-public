@@ -213,7 +213,10 @@ class StudySection(_Strict):
             "rmse:all",
             "cv_normalized_data_mismatch:all",
         ],
-        description="'metric:label' to compare at each run's posterior (missing ones skipped).",
+        description="'metric:label' to compare at each run's posterior. An unknown metric, or "
+        "a label none of the cases has (a state variable or data type; not checked where a "
+        "case's labels are known only when it runs), is refused at validation. A metric a "
+        "cell does not record (e.g. rmse in a real case) is left out of its comparison.",
     )
     budget: BudgetSection = Field(default_factory=BudgetSection)
     annotations: dict[str, str] = Field(default_factory=dict)
