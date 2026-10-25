@@ -236,6 +236,19 @@ class AdaMax(Adam):
     r"""AdaMax: Adam with the infinity norm for the second moment.
 
     ``u = max(b2 u_old, |g|)``, ``x_new = x - alpha / (1 - b1^t) m / u``.
+
+    Parameters
+    ----------
+    step_size
+        ``alpha``, the base step length in optimizer coordinates (default 0.1); each
+        control moves by at most about this much per step, and backtracking shrinks it
+        for a trial.
+    momentum
+        ``b1``, the decay of the gradient's running mean, in ``[0, 1)`` (0 uses the
+        current gradient alone). Set from the optimizer's momentum ``beta``, as PET's EnOpt
+        and GenOpt do (EnOpt's default 0).
+    beta2
+        ``b2``, the decay of the running maximum of ``|g|``, in ``[0, 1)`` (default 0.999).
     """
 
     def apply_update(

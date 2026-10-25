@@ -44,7 +44,7 @@ name = "dtlz1"
 
 | option | type | default | description |
 |---|---|---|---|
-| `n_obj` | integer | 3 | |
+| `n_obj` | integer | 3 | Number of objectives, at least 2 (default 3). The controls must number at least `n_obj`: the first `n_obj - 1` place a point on the front and the rest set its distance from it. |
 
 ## `dtlz2`
 
@@ -59,7 +59,7 @@ name = "dtlz2"
 
 | option | type | default | description |
 |---|---|---|---|
-| `n_obj` | integer | 3 | |
+| `n_obj` | integer | 3 | Number of objectives, at least 2 (default 3). The controls must number at least `n_obj`: the first `n_obj - 1` place a point on the front and the rest set its distance from it. |
 
 ## `fon`
 

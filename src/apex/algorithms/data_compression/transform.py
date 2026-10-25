@@ -52,9 +52,33 @@ class WaveletCompression:
     ----------
     datatype
         Data type of the fields to compress.
-    grid, wavelet, level, order, noise, threshold_rule, threshold_multiplier,
-    thresholding, keep_approximation, min_noise
-        See :class:`~apex.algorithms.data_compression.wavelet.WaveletOptions`.
+    grid
+        Shape of the grid the fields live on, e.g. ``[nx, ny, nz]``: 1 to 3 positive sizes.
+    wavelet
+        A discrete PyWavelets wavelet name, e.g. ``"haar"`` or ``"db2"``.
+    level
+        Number of decomposition levels, at least 1.
+    order
+        Cell order of the flattened fields and mask: ``"F"`` (default; the Eclipse order,
+        i fastest) or ``"C"``.
+    noise
+        ``"white"`` (default): one noise level, estimated from the finest diagonal
+        sub-band, for every coefficient. ``"coloured"``: one noise level per sub-band.
+    threshold_rule
+        ``"universal"`` (default; ``sqrt(2 ln n)`` times the noise level) or
+        ``"bayesian"``, which needs ``noise = "coloured"``. Non-zero coefficients at least
+        as large as the threshold in magnitude are retained.
+    threshold_multiplier
+        Scales every threshold (PET's ``th_mult``), at least 0; the default 1 uses the
+        rule's threshold as is, and 0 keeps every non-zero coefficient.
+    thresholding
+        ``"hard"`` (default) keeps the retained coefficients as they are; ``"soft"``
+        shrinks them towards zero by the threshold.
+    keep_approximation
+        Keep every approximation coefficient, unthresholded (PET's ``keep_ca``); off by
+        default.
+    min_noise
+        Floor on the estimated noise standard deviations, positive (default 1e-9).
     times
         Only compress the fields at these times; default all.
     mask

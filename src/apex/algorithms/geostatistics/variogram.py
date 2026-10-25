@@ -323,7 +323,13 @@ def latent_variogram(indicator: ExperimentalVariogram, proportion: float) -> Exp
 
 @variogram_estimators.register("wls")
 class WeightedLeastSquares:
-    """Matheron's semivariogram fitted by Cressie's weighted least squares (see the module).
+    """Variograms from hard data: Matheron's semivariogram, fitted by weighted least squares.
+
+    The experimental semivariogram of the data, from pairs in the same layer, in eight
+    directions when there are enough pairs for an anisotropic fit (else one); then
+    spherical, exponential and gaussian models with a nugget, fitted by Cressie's weights
+    (pairs per lag over the model's value squared). The best-fitting model wins unless one
+    is fixed, giving the model, sill, nugget, ranges and azimuth.
 
     Parameters
     ----------
@@ -333,7 +339,7 @@ class WeightedLeastSquares:
         gaussian's flat start), which a coarse first class hides (on 20 exponential fields
         the right model won 9 times with 12 classes, 11 with 20).
     max_lag
-        The largest lag (cells); default: half the data's horizontal extent.
+        The largest lag, in cells; none (the default): half the data's horizontal extent.
     """
 
     name = "wls"

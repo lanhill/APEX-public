@@ -262,57 +262,62 @@ class DampingSchedule:
     The default of GIES; LM-EnRML may use it too. It ignores the data mismatch
     spreads.
 
-    Attributes
+    Parameters
     ----------
     initial
-        Damping for the first analysis (``lambda``, default 1); must be positive, since the
-        schedule only ever multiplies and divides it.
+        The damping of the first analysis (default 1); must be positive.
     factor
-        Multiply the damping by this after a rejected step (``lambda_factor``, default
-        2); with ``reduction = None``, also divide by it after an accepted one.
+        Multiply the damping by this after a rejected trial (greater than 1, default 2).
     reduction
-        Multiply the damping by this after an accepted step, in ``(0, 1]``: the MATLAB
-        RLM-MAC's ``lambda_reduction_factor`` (``RLM_average_cost.m``, with ``factor`` as
-        its ``lambda_increment_factor``), default 0.9 since 2026-10-13 (the user).
-        ``None`` divides by ``factor``, PET-fork's rule and the default
-        before; runs started before then resume with it. ``0.5`` with ``factor = 2`` is
-        the same rule (a power of two, so bit for bit), the way a configuration file
-        gives it.
+        Multiply the damping by this after an accepted trial, in ``(0, 1]`` (default 0.9);
+        leaving it unset divides by ``factor`` instead.
     minimum
-        Do not reduce the damping once it is at or below this (``lambda_min``; unset by
-        default).
+        The damping is not reduced once it is at or below this (unset by default: no
+        floor).
     data_mismatch_tolerance
-        Stop when ``|1 - data_mismatch / previous_data_mismatch|`` drops below this
-        (``data_misfit_tol``, default 0.01) on an improving trial.
+        The run has converged when an improving trial changes the mean data mismatch by a
+        relative amount below this (positive, default 0.01).
     converge_on_rejection
-        Also stop on a *worse* trial within the tolerance (PET-fork's
-        ``check_convergence``; default False). A worse trial is a rejection: stopping there
-        ended runs after one rejected trial that barely moved (a starved localized update,
-        5Spots_snesim 2026-10-04), whereas the MATLAB RLM-MAC tests the reduction on
-        accepted steps only and raises the damping.
+        Also stop on a worse trial within the tolerance (default false: it is rejected and
+        the damping raised).
     max_stalled_rejections
-        Stop after this many *consecutive* rejected trials within the tolerance (default
-        3): the damping only shortens a step that barely moves, so more trials would spend
-        forecasts without changing the iterate (the numerics review of 2026-10-04).
+        Stop after this many consecutive rejected trials within the tolerance (at least 1,
+        default 3).
     confirm_convergence
-        An improving trial within the tolerance stops the run only when the damping is at
-        its ``minimum`` or the previous accepted trial was within the tolerance too, with no
-        rejection between (default False). Otherwise it is accepted and the damping reduced
-        as after any accepted trial, and the loop judges the next, less damped trial.
+        A small improvement stops the run only when the damping is at its ``minimum`` or
+        the previous accepted trial was small too (default false: the first small
+        improvement stops it). Set true for a run that seems to stop too early.
 
-        Why False here and True in the ``lm`` scheme (the user, 2026-10-20): the ``lm``
-        scheme starts at PET's ``lambda = 100`` on an absolute scale, where a step can be
-        ``1/(1 + lambda)``, about 1 %, of a Gauss-Newton step, so its first trial improves
-        by less than the 1 % tolerance however far the minimum is (release-tester finding
-        34: LM-EnRML stopped at its prior). Here the damping starts at 1 and an accepted
-        trial lowers it. With RLM-MAC's relative damping (``gamma = lambda * mean(s^2)``)
-        the leading directions, which carry most of the data mismatch reduction, then
-        take a large fraction of a Gauss-Newton step; with an absolute strategy
-        (``approx``, ``1 + lambda + s^2``) lambda = 1 still leaves at least about half of
-        it. So a small improvement mostly does mean a flat objective; the risk is left to
-        runs whose damping rejections have raised. Keeping False also keeps GIES
-        bit for bit with PET-fork and the MATLAB RLM-MAC, and its existing runs and
-        studies unchanged; set True for a run that seems to stop too early.
+    Notes
+    -----
+    The names in PET are ``lambda`` (``initial``), ``lambda_factor`` (``factor``),
+    ``lambda_min`` (``minimum``) and ``data_misfit_tol`` (``data_mismatch_tolerance``).
+    ``reduction`` is the MATLAB RLM-MAC's ``lambda_reduction_factor``
+    (``RLM_average_cost.m``, with ``factor`` as its ``lambda_increment_factor``), default 0.9
+    since 2026-10-13 (the user). ``None`` divides by ``factor``,
+    PET-fork's rule and the default before; runs started before then resume with it.
+    ``0.5`` with ``factor = 2`` is the same rule (a power of two, so bit for bit), the way a
+    configuration file gives it.
+
+    ``converge_on_rejection`` is PET-fork's ``check_convergence``. A worse trial is a
+    rejection: stopping there ended runs after one rejected trial that barely moved (a
+    starved localized update, 5Spots_snesim 2026-10-04), whereas the MATLAB RLM-MAC tests
+    the reduction on accepted steps only and raises the damping. ``max_stalled_rejections``
+    exists because the damping only shortens a step that barely moves, so more trials would
+    spend forecasts without changing the iterate (the numerics review of 2026-10-04).
+
+    ``confirm_convergence``: why False here and True in the ``lm`` scheme (the user,
+    2026-10-20): the ``lm`` scheme starts at PET's ``lambda = 100`` on an absolute scale,
+    where a step can be ``1/(1 + lambda)``, about 1 %, of a Gauss-Newton step, so its first
+    trial improves by less than the 1 % tolerance however far the minimum is
+    (release-tester finding 34: LM-EnRML stopped at its prior). Here the damping starts at 1
+    and an accepted trial lowers it. With RLM-MAC's relative damping (``gamma = lambda *
+    mean(s^2)``) the leading directions, which carry most of the data mismatch reduction,
+    then take a large fraction of a Gauss-Newton step; with an absolute strategy
+    (``approx``, ``1 + lambda + s^2``) lambda = 1 still leaves at least about half of it. So
+    a small improvement mostly does mean a flat objective; the risk is left to runs whose
+    damping rejections have raised. Keeping False also keeps GIES bit for bit with
+    PET-fork and the MATLAB RLM-MAC, and its existing runs and studies unchanged.
     """
 
     initial: float = 1.0

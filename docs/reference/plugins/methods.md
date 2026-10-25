@@ -20,10 +20,10 @@ name = "chop"
 
 | option | type | default | description |
 |---|---|---|---|
-| `components` | array | [{"name": "length_scale", "mode": "data"}] | |
-| `hyper_localization` | string or object | same | |
+| `components` | array | [{"name": "length_scale", "mode": "data"}] | The estimated components: `[{name = "length_scale", mode = "data", ...}, ...]` (registry `chop_components`); default the paper's, one length scale per datum. |
+| `hyper_localization` | string or object | same | How the hyper-parameter update is localized: `"same"` (each component's own taper, the default), `"none"`, or a registered localization's name (or `{name = ..., options}`) applied to the hyper-parameter block. |
 | `inner` | string | gies | The wrapped method's name (its options follow). |
-| `max_batch_mb` | number | 256.0 | |
+| `max_batch_mb` | number | 256.0 | The memory of one row block of the model update's per-member tapers. |
 
 ## `es`
 
@@ -50,7 +50,7 @@ name = "esmda"
 
 | option | type | default | description |
 |---|---|---|---|
-| `inflation` | array | required | |
+| `inflation` | array | required | Inflation factors, one per step (PET `mda.inflation_param`). |
 
 ## `gies`
 
@@ -65,7 +65,7 @@ name = "gies"
 
 | option | type | default | description |
 |---|---|---|---|
-| `max_trials_per_iteration` | integer or null | | |
+| `max_trials_per_iteration` | integer or null | | Retry a rejected trial within the same iteration, from the same accepted iterate with the increased damping, up to this many trials. An accepted trial ends the iteration. When every trial is rejected, the damping is multiplied by `factor` once more, raised to at least a numeric `schedule.initial` (no floor for an `"auto"` start, which only the `lm` scheme has), and the iteration ends without an update. These are the inner retries of the author's MATLAB RLM-MAC (MATLAB `RLM_average_cost.m`: `maxInnerIter = 5` gives at most 4 trials). Unset (the default), every trial is an iteration, as in . Every trial keeps its own number in the results (`iter_<k>`/`trial_<k>`) either way. The convergence test is the schedule's in both modes: a rejected trial whose data mismatch changed by less than `data_mismatch_tolerance` stops the run only with `converge_on_rejection` (); by default it is rejected and retried with more damping, as the MATLAB RLM-MAC, which tests the minimum reduction on accepted steps only. An exhausted iteration adds no record; its extra damping shows in the next trial's record. |
 
 ## `gn_enrml`
 
@@ -80,7 +80,7 @@ name = "gn_enrml"
 
 | option | type | default | description |
 |---|---|---|---|
-| `max_inner_iterations` | integer | 10 | |
+| `max_inner_iterations` | integer | 10 | Rejected trials in a row after which the run stops (`max_inner_iter`, 10). |
 
 ## `lm_enrml`
 
@@ -95,7 +95,7 @@ name = "lm_enrml"
 
 | option | type | default | description |
 |---|---|---|---|
-| `max_inner_iterations` | integer | 10 | |
+| `max_inner_iterations` | integer | 10 | Rejected trials in a row after which the run stops (`max_inner_iter`, default 10); with the `lm` scheme `maximum` usually stops it first (`rlmmac` has none: then the tolerance, the iteration budget or these rejections do). |
 
 ## `multilevel_esmda`
 
@@ -110,8 +110,8 @@ name = "multilevel_esmda"
 
 | option | type | default | description |
 |---|---|---|---|
-| `inflation` | array | required | |
-| `levels` | array | required | |
+| `inflation` | array | required | The ES-MDA inflation factors `alpha_i` (sum of `1 / alpha_i` equal to 1). |
+| `levels` | array | required | One table per level (`Level`), coarsest first as PET's: `members` (`N_l`) and `weight` (`w_l`; normalised to sum 1, as PET). Other keys (`upscale`, `deck_template_file`) are for the simulator (the composition passes them). |
 
 **`Level`**: One fidelity level: its members and weight, and what its simulator runs.
 

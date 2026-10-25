@@ -221,6 +221,30 @@ class LengthScale(ChopComponent):
 
     The hyper-update taper is the same rule on the correlations of the length scales with
     the new forecast, column ``s`` scaled by ``l_j[s]`` (the code's ``update_hyper``).
+
+    Parameters
+    ----------
+    mode
+        ``data`` (default) gives each member one length scale per datum, ``scalar`` one
+        length scale for all data.
+    correlation
+        The correlations the taper is computed from: ``prior`` (default) those of the
+        initial ensemble, ``current`` those recomputed before each update.
+    factor
+        The multiplier of the length scales in the taper (positive; default 2, the
+        published code's; 1 is the paper's formula).
+    low, high
+        The range of the uniform prior each member's length scales is drawn from (defaults
+        0.23 and 0.43).
+    transform
+        The scale the hyper-parameter update works on: ``none`` (natural values, floored
+        at ``floor``), ``log`` (needs ``low > 0``) or ``logit`` (kept within ``lower`` and
+        ``upper``).
+    floor
+        The smallest value kept with ``transform = "none"`` (default 1e-6).
+    lower, upper
+        ``logit``'s bounds, with ``lower < low <= high < upper``; by default ``low`` and
+        ``high`` widened by their range, ``lower`` never below 0.
     """
 
     needs_correlation = True
@@ -292,6 +316,27 @@ class GainInflation(ChopComponent):
     vector inflation); ``"scalar"``: one per member; ``"variable_datatype"``: one per
     state variable and data type (a block matrix inflation, ``D_j[k, s] =
     delta_j[var(k), type(s)]``). A factor 1 leaves the gain as it is.
+
+    Parameters
+    ----------
+    mode
+        ``variable`` (default) gives each member one inflation factor per state variable,
+        ``scalar`` one factor, ``variable_datatype`` one per state variable and data type.
+    low, high
+        The range of the uniform prior each member's inflation factors is drawn from (defaults
+        0.5 and 1.5).
+    transform
+        The scale the hyper-parameter update works on: ``none`` (natural values, floored
+        at ``floor``), ``log`` (needs ``low > 0``) or ``logit`` (kept within ``lower`` and
+        ``upper``).
+    floor
+        The smallest value kept with ``transform = "none"`` (default 1e-6).
+    lower, upper
+        ``logit``'s bounds, with ``lower < low <= high < upper``; by default ``low`` and
+        ``high`` widened by their range, ``lower`` never below 0.
+    threshold
+        The hyper-update keeps a hyper-parameter's correlation with a datum only when
+        ``|corr| > threshold / sqrt(N)``, ``N`` the ensemble size (default 3).
     """
 
     def __init__(
@@ -345,6 +390,27 @@ class DataWeights(ChopComponent):
 
     A Schur factor ``1 w_j^T``, a data-error inflation within the gain only: ``mode =
     "datatype"`` has one weight per data type, ``"datum"`` one per datum.
+
+    Parameters
+    ----------
+    mode
+        ``datatype`` (default) gives each member one weight per data type, ``datum`` one
+        per datum.
+    low, high
+        The range of the uniform prior each member's weights is drawn from (defaults
+        0.5 and 1.5).
+    transform
+        The scale the hyper-parameter update works on: ``none`` (natural values, floored
+        at ``floor``), ``log`` (needs ``low > 0``) or ``logit`` (kept within ``lower`` and
+        ``upper``).
+    floor
+        The smallest value kept with ``transform = "none"`` (default 1e-6).
+    lower, upper
+        ``logit``'s bounds, with ``lower < low <= high < upper``; by default ``low`` and
+        ``high`` widened by their range, ``lower`` never below 0.
+    threshold
+        The hyper-update keeps a hyper-parameter's correlation with a datum only when
+        ``|corr| > threshold / sqrt(N)``, ``N`` the ensemble size (default 3).
     """
 
     def __init__(

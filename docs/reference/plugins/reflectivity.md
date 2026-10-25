@@ -13,7 +13,7 @@ Aki & Richards' (1980) linearised PP reflectivity, eq. 5.44.
 
 | option | type | default | description |
 |---|---|---|---|
-| `form` | string | textbook | |
+| `form` | string | textbook | `"textbook"` (the default; bruges' `akirichards`):: R = ½(1 - 4Vs_m²p²) Δrho/rho_m + ΔVp/(2Vp_m cos²θ̄) - 4Vs_m²p² ΔVs/Vs_m with `θ̄` the mean of the incidence and transmission angles and `p` the ray parameter. `"linear"` (PyLops' `akirichards` coefficients, linear in the contrasts, as its AVO modelling operator uses):: R = ΔVp/Vp_m / (2 cos²θ₁) - 4 r² sin²θ₁ ΔVs/Vs_m + (½ - 2 r² sin²θ₁) Δrho/rho_m, r = Vs_m/Vp_m Both agree to first order in the contrasts. |
 
 ## `approx_zoeppritz_pp`
 

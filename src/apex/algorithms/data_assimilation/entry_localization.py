@@ -44,16 +44,31 @@ _KERNELS = ("gaspari_cohn", "furrer_bengtsson", "region", "import")
 class Entry(TypedDict, total=False):
     """One localization entry (PET: one row of its entries CSV, or one dict of ``entries``).
 
-    ``data``, ``time`` and ``parameter`` name what it localizes (``"*"``: all, the default);
-    ``taper`` is the kernel. ``position`` ``[i, j, k]`` is the centre cell, 1-based as in
-    Eclipse decks; ``radius`` the kernel's length in cells; ``z_range`` ``"all"`` (PET
-    ``":"``, the default) puts the kernel in every layer, an integer ``r`` in layers
-    ``k - r .. k + r``; ``anisotropy`` is ``[ratio, angle in degrees]``: the rotated offset's
-    first (``j``) component is divided by the ratio, so a ratio of 2 doubles the reach along
-    ``j`` (PET's docstring says it halves it; its code divides, as here). The ``import``
-    kernel reads its taper from ``taper_file`` instead (``.npy``/``.npz``: one value per
-    grid cell, flat in Eclipse order or shaped ``(nx, ny, nz)``; relative to the
-    configuration's folder).
+    Parameters
+    ----------
+    data
+        The data type it localizes (``"*"``: all, the default).
+    time
+        The data time it localizes (``"*"``: all, the default).
+    parameter
+        The state variable it localizes (``"*"``: all, the default).
+    taper
+        The kernel: ``gaspari_cohn``, ``furrer_bengtsson``, ``region``, or ``import`` (read
+        from ``taper_file``).
+    position
+        The centre cell ``[i, j, k]``, 1-based as in Eclipse decks.
+    radius
+        The kernel's length, in cells.
+    z_range
+        ``"all"`` (PET ``":"``, the default) puts the kernel in every layer; an integer
+        ``r`` in layers ``k - r .. k + r``.
+    anisotropy
+        ``[ratio, angle in degrees]``: the rotated offset's first (``j``) component is
+        divided by the ratio, so a ratio of 2 doubles the reach along ``j`` (PET's docstring
+        says it halves it; its code divides, as here).
+    taper_file
+        The ``import`` kernel's taper (``.npy``/``.npz``: one value per grid cell, flat in
+        Eclipse order or shaped ``(nx, ny, nz)``), relative to the configuration's folder.
     """
 
     data: str

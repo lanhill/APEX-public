@@ -104,7 +104,7 @@ def latin_hypercube(
 
 
 class PopulationOptimizer(OptimizerBase):
-    """The loop of a population optimizer (see the module docstring).
+    """The loop of a population optimizer: generations of a population, evaluated together.
 
     Parameters
     ----------
@@ -118,9 +118,19 @@ class PopulationOptimizer(OptimizerBase):
         ``"feasibility"`` (Deb's rules) or ``"epf"`` (the external penalty, with ``epf``).
     eq_tolerance
         Equality constraints within it count as met (feasibility rules).
-    maxiter, ftol, xtol, transform, epf
-        See :class:`OptimizerBase`: ``maxiter`` generations; ``xtol`` the population's spread
-        (the largest standard deviation of a control, optimizer coordinates).
+    maxiter
+        Generations at most (per outer EPF iteration).
+    ftol
+        Relative improvement of the best objective a generation needs; ``stall`` generations
+        without it count as converged.
+    xtol
+        The population's spread (the largest standard deviation of a control, optimizer
+        coordinates) that counts as converged.
+    transform
+        Optimize in the unit cube of the bounds.
+    epf
+        External penalty options: ``r`` (required), ``r_factor``, ``tol_factor``,
+        ``conv_crit``, ``max_epf_iter``. Only with ``constraint_handling = "epf"``.
     """
 
     label: ClassVar[str] = "population"

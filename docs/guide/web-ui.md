@@ -1,6 +1,9 @@
 ---
 audience: public
 items:
+  - cli:apex approve
+  - cli:apex gc
+  - cli:apex optimize
   - cli:apex plugins
   - cli:apex predict
   - cli:apex report
@@ -8,8 +11,10 @@ items:
   - cli:apex run
   - cli:apex stop
   - cli:apex study compare
+  - cli:apex submit
   - cli:apex summary
   - cli:apex validate
+  - config:optimization:objectives
   - webui:agents
   - webui:editor
   - webui:examples
@@ -33,9 +38,9 @@ By the end of this lesson you will know what each page of the APEX web UI shows,
 ## Prerequisites
 
 - A running APEX web UI that you can open in your browser.
-- Optionally, a terminal where the `apex` command is available, for the optional command-line steps. Check with `apex --help`. If the command is not found, ask whoever set up APEX for you.
-- Work is started from the web UI itself (the `editor` page's *submit*). The web UI shows only what was submitted through it: a run started in a terminal with `apex run` is not a job, and runs outside your own web-UI folder are not shown.
-- Nothing else. The `examples` page gives you a first configuration to work with.
+- Nothing else is needed for the main path: the worked example below is done entirely in the browser. The `examples` page gives you a first configuration.
+- Optionally, a terminal where the `apex` command is available. It is only for the steps marked optional, which you can skip on a first read. Check with `apex --help`. If the command is not found, ask whoever set up APEX for you.
+- Work is started from the web UI itself (the `editor` page's *submit*). The web UI shows only what was submitted through it. A run started in a terminal with `apex run` is not a job, and `apex submit` from a terminal is not listed either, because the `jobs` page lists only jobs you submitted from the web UI.
 
 The pages `jobs`, `runs`, `optimizations` and `studies` list only what you submitted or can see, so they are empty until work has been submitted.
 
@@ -44,16 +49,16 @@ The pages `jobs`, `runs`, `optimizations` and `studies` list only what you submi
 - **Services root**: the folder where APEX keeps its service data, including the record of your jobs. The default is `$APEX_HOME` if that variable is set, else `~/.apex/service`.
   - To see what your terminal uses, run `echo "$APEX_HOME"`. If it prints a path, that path is the root. If it prints nothing (an empty line), the variable is unset and the default applies.
   - The web UI's root is chosen by whoever set it up. Ask them for it, and make sure `APEX_HOME` has the same value in your terminal (or is unset in both).
-  - Most commands that use a services root (`apex submit`, `apex jobs`, `apex runs`, `apex validate`, `apex study`, `apex approve`, `apex grant`, `apex agent`, `apex service`, `apex gc`) accept `--root` to name it; without it they take `$APEX_HOME`, else the default.
+  - The commands `apex submit`, `apex validate`, `apex study compare`, `apex approve` and `apex gc` accept `--root` to name the root; without it they take `$APEX_HOME`, else the default.
 - **Workspace folder**: the folder that holds your configurations. The `editor` page lists the configurations in it, and `examples` copies files into it. To run terminal commands on a saved file you need the file's path on disk. If you do not know where the workspace folder is, ask whoever set up the web UI.
 - **Workflow**: the kind of work a configuration is for, for example a history-matching run or a prediction. The `examples` page groups its catalogue by workflow, so the heading you find an example under is its workflow. The `plugins` page also groups plugins by workflow.
-- **Registry**: a named group of plugins within a workflow, as the `plugins` page shows them. Plugins are listed under their workflow and then their registry, so to find a plugin from your example, look in your example's workflow and scan its registries for the name.
-- **History-matching run**: a run that adjusts an ensemble of models so that it matches observed data. It proceeds in **analysis steps**. `apex run` starts one.
+- **Registry**: a named group of plugins within a workflow, as the `plugins` page shows them. To find a plugin from your example, look in your example's workflow and scan its registries for the name.
+- **History-matching run**: a run that adjusts an ensemble of models so that it matches observed data. It proceeds in **analysis steps**. `apex run` starts one in your terminal.
 - **Data mismatch**: how far the simulated results are from the observed data. A run is doing its job when the mismatch goes down from step to step.
 - **Checkpoint**: a point where a run can be stopped and later continued.
-- **Run directory**: the directory of one run. The commands `apex stop`, `apex resume` and `apex report` take it as an argument. `apex summary` also accepts a folder that holds runs, and searches that folder. Every step below that needs one has a web UI alternative or is marked optional.
+- **Run directory**: the directory of one run. The commands `apex stop`, `apex resume` and `apex report` take it as an argument. `apex summary` also accepts a folder that holds runs, and searches that folder. The web UI does not need you to know it. If you want to use the terminal commands, ask whoever set up the web UI which folder holds your runs; otherwise skip the optional steps.
 - **Prediction**: a forecast of the ensembles of a history-matching run beyond the history. `apex predict` makes one.
-- **Optimization**: work that improves an objective over several steps. The `optimization` page shows the objective over its steps, and its front when there are several objectives.
+- **Optimization**: work that improves an objective over several steps. `apex optimize` runs one in a terminal. An optimization configuration can list several objectives in its `optimization:objectives` entry, each a plugin with options and an optional label. The `optimization` page shows the objective over its steps, and its front when there are several objectives.
 - **Study**: a set of variants that you compare. `apex study compare NAME` compares a study's variants at each run's posterior. The `studies` page lists your studies and their state. `apex validate` accepts a study configuration.
 - **Job**: a unit of submitted work. It has a kind, a state and progress.
 
@@ -121,8 +126,8 @@ The `optimization` route looks different from the others: it ends in `?path={opt
 1. Open the web UI in your browser and start at `examples` if you are new, or at `jobs` if you already have work going.
 2. To configure something, use `examples` to copy a configuration into your workspace folder. The copy is then among the workspace's configurations that you can open in `editor`.
 3. While editing, look up plugin names, options and defaults in `plugins` instead of guessing them. The same list is available on the command line with `apex plugins` (add `--json` for full descriptions as JSON).
-4. Validate the file before you rely on it. The `editor` page lets you validate a TOML file. You can also check a saved file from the command line with `apex validate config.toml`. It validates a run, prediction or study configuration, reports any problem it finds, and plans the cost without simulating anything. Add `--json` to get the result as JSON.
-5. Start the work from the `editor`: save the file, then press *submit*. The service runs it as a job, whatever its kind (a history-matching run, a prediction, a study or an optimization). Above the service's approval limits, the editor shows an `apex approve TOKEN` command that someone runs on the service's machine; then submit again. (In a terminal, `apex run config.toml` runs a history match in that terminal, without a job, so it does not appear in the web UI; use it for work you follow from the terminal.)
+4. Validate the file before you rely on it. The `editor` page lets you validate a TOML file. You can also check a saved file from the command line: first `cd` to the workspace folder (or use the file's full path), then run `apex validate config.toml`. It validates a run, prediction, optimization or study configuration, reports any problem it finds, and plans the cost without simulating anything. Add `--json` to get the result as JSON.
+5. Start the work from the `editor`: save the file, then press *submit*. The service runs it as a job, whatever its kind (a history-matching run, a prediction, a study or an optimization). Above the service's approval limits, the editor shows an `apex approve TOKEN` command. It is meant for the person who runs the service, on the service's machine: send them the command the editor shows. Once it has been approved, submit again. (In a terminal, `apex run config.toml` runs a history match in that terminal, without a job, and `apex submit config.toml` hands a configuration to the job service in the background. Neither appears in the web UI; use them for work you follow from the terminal.)
 6. Find your work in `jobs` and open it to reach `job`, where you can watch live events and progress.
 7. From `job`, follow the links to its runs, then open a run in `run` to see its charts.
 8. For other kinds of results, use `optimizations` (then `optimization`), `studies` and `prediction`.
@@ -131,7 +136,7 @@ The `optimization` route looks different from the others: it ends in `?path={opt
 
 ## Worked example: from an example to a result
 
-This example takes you from the catalogue to the charts of a history-matching run, all in the browser: `examples` (copy) → `editor` (edit, validate, save, submit) → `jobs` → `job` → `run`. Work started from a terminal (`apex run`, `apex optimize`) does not appear in the web UI, so submit from the editor. Only the optional last steps use a terminal.
+This example takes you from the catalogue to the charts of a history-matching run, all in the browser: `examples` (copy) → `editor` (edit, validate, save, submit) → `jobs` → `job` → `run`. Only the optional last steps use a terminal.
 
 1. Go to `#/examples` and pick an example under a **history-matching** workflow. Do not choose a prediction or a study example: the later steps follow a history-matching run, and would not match. Note the workflow heading you found it under. Copy the example into your workspace folder.
 2. Go to `#/editor` and open the copied file. Choose one option to change:
@@ -140,22 +145,29 @@ This example takes you from the catalogue to the charts of a history-matching ru
    - Pick one option of that plugin and note its exact name, its type and its default.
    - Back in the file, find the part that sets that plugin's options, where the plugin name and its option lines appear together. A TOML option line has the form `option_name = value`. If your option is already there, change its value. If not, add a line for it in that same part. Use a value different from the default and of the same type (a number where the default is a number, for example). The exact plugin and option depend on the example you copied, so copy the spelling from the `plugins` page.
 3. Validate the file in the editor and fix anything it reports. Save the file when it validates.
-4. With the saved file open in the editor, press *submit*. If the editor reports an error, fix the file, save it and submit again. If it shows an `apex approve TOKEN` command, the submission needs approval: someone runs that command on the service's machine, and then you submit again. A submission that was refused will not appear in `jobs`.
-5. Go to `#/jobs`. Each row shows a job's kind, state, progress and when it ran. To avoid mixing your job up with others, start one piece of work at a time and open `jobs` right after submitting it. Pick the row whose kind matches what you submitted (a run) and whose state shows it queued or in progress. Open it and read its live events: they should refer to the work you submitted. If the row is not yours, go back and open another row of the same kind. If the list is empty, look at the editor for an error from the previous step.
-6. On the `job` page, watch the live events and the progress. Leave the run going for now: stopping is an optional side trip, and the next step needs a run that is working or finished.
+4. With the saved file open in the editor, press *submit*. If the editor reports an error, fix the file, save it and submit again. If it shows an `apex approve TOKEN` command, the submission needs approval: send that command to the person who runs the service, and submit again once they have approved it. A submission that was refused will not appear in `jobs`.
+5. Go to `#/jobs`. Each row shows a job's kind, state, progress and when it ran. To avoid mixing your job up with others, start one piece of work at a time and open `jobs` right after submitting it. Look for a row of the kind run that is queued or in progress, and compare its time with when you pressed *submit*. Open it and read its live events: they should refer to the work you submitted. If the row is not yours, go back and open another row of the same kind. If the list is empty, look at the editor for an error from the previous step.
+6. On the `job` page, watch the live events and the progress. The live events are the messages the job reports as it works, and the progress shows how far it has come. Leave the run going for now: stopping is an optional side trip, and the next step needs a run that is working or finished.
 7. Optional: try Stop and Resume. Stop does not act at once: it asks the run to stop at its next checkpoint, so keep watching the state on the `job` page (or in `jobs`) until it shows the job has stopped. How long that takes depends on the run. Once it has stopped, press Resume to continue it from its last checkpoint, and wait until the job is running again before you go on. Use the buttons rather than `apex stop` and `apex resume` in a terminal: a run resumed from a terminal runs there, outside the job, and the web UI no longer follows it.
-8. Follow the links from the job to a `run` page. The links may not be there at the start. If the live events keep moving and the progress advances, the job is working, so wait and check the links again after some analysis steps have finished. If the job has stopped or failed and still shows no run links, read the last live events and the error on the `job` page for the cause. The charts show the run's performance metrics at every step.
+8. Follow the links from the job to a `run` page. The links may not be there at the start. If the live events keep moving and the progress advances, the job is working, so wait and check the links again after some analysis steps have finished. If the job has stopped or failed and still shows no run links, read the last live events and the error on the `job` page for the cause. The charts show the run's performance metrics at every step. For a finished run you should see them covering all its analysis steps, and the data mismatch should have gone down from the first step to the last.
 9. To see all the runs you can see, go to `#/runs`. The list shows each run's method and state. Open an entry to reach its `run` page.
-10. Optional, once you know your run directories: for a written overview, run `apex summary PATH`. `PATH` can be run directories or a folder that holds runs, which `apex summary` searches. It reports every metric at every step. Use `--output` to write the Markdown to a file (the CSV is written next to it) and `--title` to set the report title.
-11. Optional, once you know the run directory: `apex report RUN_DIR` prints the data mismatch history and performance metrics of a run. It needs the directory of one run, or of a prediction, and does not search folders. Add `--plots` to also write the result figures as PNG and PDF, into `RUN_DIR/report` unless you give `--output`. Use `--font-size` to change the font size of the figures. Without the run directory, the charts on the `run` page show the same kind of information.
+10. Optional, in a terminal, once you know where your runs are kept (see *Run directory* above): for a written overview, run for example:
+
+    ```bash
+    apex summary RUN_DIR --output report.md --title "My run"
+    ```
+
+    `RUN_DIR` can be one or more run directories, or a folder that holds runs, which `apex summary` searches. It reports every metric at every step. The Markdown goes to `report.md` and a CSV file is written next to it, in the same folder. Without `--output` the Markdown is printed to the terminal; without `--title` the title is "Results summary".
+11. Optional, in a terminal, once you know the run directory: `apex report RUN_DIR` prints the data mismatch history and performance metrics of a run. It needs the directory of one run, or of a prediction, and does not search folders. Add `--plots` to also write the result figures as PNG and PDF, into `RUN_DIR/report` unless you give `--output`. Use `--font-size` to change the font size of the figures. The charts on the `run` page show the same kind of information without a terminal.
 
 ## Pitfalls
 
-- **Empty lists.** `jobs`, `runs`, `optimizations` and `studies` only show what you submitted through the web UI or can see. An empty list usually means nothing has been submitted yet, or the submission was refused. Work started in a terminal (`apex run`, `apex optimize`) is not shown.
+- **Empty lists.** `jobs`, `runs`, `optimizations` and `studies` only show what you submitted through the web UI or can see. An empty list usually means nothing has been submitted yet, or the submission was refused. Work started in a terminal (`apex run`, `apex optimize`, `apex submit`) is not shown in `jobs`.
+- **Runs that disappear.** `apex gc` forgets runs whose folder is gone and prunes what the service keeps. Its `--dry-run` switch only has an effect together with `--code`, where it lists what would go and removes nothing. Ask whoever runs the service before using `apex gc` yourself.
 - **Starting work from a terminal.** `apex run` runs in the terminal, not as a job of the service, so the web UI never shows it. Submit from the `editor` to follow work in the web UI.
 - **Pages that need an item.** `job`, `run` and `optimization` describe a single item, so open them from their list page instead of typing a route by hand.
 - **Wrong example type.** The worked example follows a history-matching run. A prediction or study example gives another kind of job.
-- **Wrong folder in the terminal.** A relative path to your configuration only works from the folder that holds it.
+- **Wrong folder in the terminal.** When you run `apex validate config.toml`, the relative path only works from the folder that holds the file. Use `cd` to go to the workspace folder first, or give the full path.
 - **Saving without validating.** Validate before you submit anything, so mistakes show up early.
 - **Guessing option names.** Check `plugins` for the exact names, types and defaults.
 - **Examples are copies.** `examples` copies a configuration into your workspace folder. Edit your copy, not the catalogue.

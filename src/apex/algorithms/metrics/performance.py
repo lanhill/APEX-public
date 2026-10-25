@@ -259,6 +259,14 @@ class FaciesBrier(_FaciesScore):
     ``2 x`` the fraction of cells that are not ``k``) and ``<variable>:proportions`` (the
     ensemble's overall proportions in every cell); and ``<variable>:skill``, the Brier skill
     score ``1 - score / proportions`` (positive: better than knowing only the proportions).
+
+    Parameters
+    ----------
+    variables
+        Facies variables to score (integer codes from 0); default ``facies``.
+    actnum
+        Active-cell indicator (non-zero = active); default all cells. Only active cells
+        are scored, for variables with as many values. Configurations give ``actnum_file``.
     """
 
     def _score(self, probabilities: NDArray[np.float64], truth: NDArray[np.int64]) -> float:
@@ -283,6 +291,14 @@ class FaciesLogScore(_FaciesScore):
     scores finitely: lower is better. Labels and baselines as :class:`FaciesBrier` (the
     one-facies baselines are smoothed with N = 1, i.e. probabilities 0.5/(1 + 0.5 K) and
     1.5/(1 + 0.5 K)).
+
+    Parameters
+    ----------
+    variables
+        Facies variables to score (integer codes from 0); default ``facies``.
+    actnum
+        Active-cell indicator (non-zero = active); default all cells. Only active cells
+        are scored, for variables with as many values. Configurations give ``actnum_file``.
     """
 
     #: Jeffreys' additive smoothing: half a member per facies.

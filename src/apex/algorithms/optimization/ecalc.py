@@ -400,9 +400,36 @@ class EcalcParetoNetPresentValue(_EcalcEconomics):
 
     Parameters
     ----------
-    start, times, ecalc_model_file, time_series, emission, wop, wgp, wwp, wwi, wem, disc,
+    start
+        The simulation's start date (ISO, e.g. ``2025-01-01``): the deck's START, checked
+        against the summary's TIME; discounting counts the days from it.
+    times
+        The report dates (ISO), increasing and after ``start``; each is the end of one
+        step whose rates eCalc gets.
+    ecalc_model_file
+        The eCalc model (YAML), whose START and END are ``start`` and the last of
+        ``times`` and whose time series reads the step rates (per day).
+    time_series
+        The name of the model's time series that the simulated rates replace; by default
+        the model's only one (required when it has several).
+    emission
+        The emission priced at ``wem``, by its name in the model's fuels and emitters
+        (case-insensitive; default ``co2``, PET's cases used ``co2_fuel_gas``).
+    wop
+        Oil price per unit of FOPT (PET's ``wop``).
+    wgp
+        Gas price per unit of FGPT; default 0 leaves gas out of the value.
+    wwp
+        Cost per unit of water produced (FWPT); default 0 makes it free.
+    wwi
+        Cost per unit of water injected (FWIT); default 0 makes it free.
+    wem
+        Cost per tonne of the emission eCalc computes.
+    disc
+        Discount rate per year (e.g. 0.08 for 8 %), applied by the days since ``start``;
+        must be above -1, and the default 0 does not discount.
     obj_scaling
-        As ``ecalc_npv``.
+        Divides the NPV (e.g. 1e6 for millions); any nonzero number, default 1.
     wemc
         The CO2 cost correction per tonne (one of ``wemc`` and ``w``).
     w
@@ -468,9 +495,36 @@ class RenewableCO2NetPresentValue(_EcalcEconomics):
 
     Parameters
     ----------
-    start, times, ecalc_model_file, time_series, emission, wop, wgp, wwp, wwi, wem, disc,
+    start
+        The simulation's start date (ISO, e.g. ``2025-01-01``): the deck's START, checked
+        against the summary's TIME; discounting counts the days from it.
+    times
+        The report dates (ISO), increasing and after ``start``; each is the end of one
+        step whose rates eCalc gets.
+    ecalc_model_file
+        The eCalc model (YAML), whose START and END are ``start`` and the last of
+        ``times`` and whose time series reads the step rates (per day).
+    time_series
+        The name of the model's time series that the simulated rates replace; by default
+        the model's only one (required when it has several).
+    emission
+        The emission priced at ``wem``, by its name in the model's fuels and emitters
+        (case-insensitive; default ``co2``, PET's cases used ``co2_fuel_gas``).
+    wop
+        Oil price per unit of FOPT (PET's ``wop``).
+    wgp
+        Gas price per unit of FGPT; default 0 leaves gas out of the value.
+    wwp
+        Cost per unit of water produced (FWPT); default 0 makes it free.
+    wwi
+        Cost per unit of water injected (FWIT); default 0 makes it free.
+    wem
+        Cost per tonne of the emission eCalc computes.
+    disc
+        Discount rate per year (e.g. 0.08 for 8 %), applied by the days since ``start``;
+        must be above -1, and the default 0 does not discount.
     obj_scaling
-        As ``ecalc_npv``.
+        Divides the NPV (e.g. 1e6 for millions); any nonzero number, default 1.
     injectors
         The injectors whose WTHP gives ``THP_MAX``.
     wind_power_file

@@ -5,7 +5,7 @@ generated: reference
 
 # Configuring optimization study: reference
 
-Every one of these 1 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+This item, with its options, as APEX's code defines it. Written from the code; the user guide teaches their use.
 
 ## `optimization_study:study`
 

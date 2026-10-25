@@ -23,6 +23,6 @@ Every one of these 3 items, with its options, as APEX's code defines them. Writt
 
 | option | type | default | description |
 |---|---|---|---|
-| `floor` | number | 1e-06 | |
-| `p` | number | 2.0 | |
-| `q` | number | 2.0 | |
+| `floor` | number | 1e-06 | For `1 < p < 2`, `\|x\|^{p-2}` is taken at `max(\|x\|, floor · max\|x\|)` (it is infinite at 0). |
+| `p` | number | 2.0 | At least 1. `p = q = 1` (`‖x‖₁`) is refused: its Hessian is 0 almost everywhere, so it adds nothing. |
+| `q` | number | 2.0 | At least 1. `p = q = 1` (`‖x‖₁`) is refused: its Hessian is 0 almost everywhere, so it adds nothing. |

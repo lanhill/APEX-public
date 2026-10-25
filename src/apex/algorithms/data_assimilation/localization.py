@@ -646,8 +646,28 @@ class PriorAdaptiveLocalization(_AdaptiveBase, _GainTaper):
     ``"adaptive_per_update"`` (:class:`AdaptiveLocalization`).
 
     ``T`` ``(n_state, n_data)`` tapers the prior's state-data correlations against their
-    noise level; every update applies ``(T o (dX X)) r``. Same parameters as
-    :class:`AdaptiveLocalization`.
+    noise level; every update applies ``(T o (dX X)) r``.
+
+    Parameters
+    ----------
+    block_sizes
+        Sizes of the state variables (set from the state layout).
+    threshold_scale
+        Multiplier of the universal threshold (positive, default 1); larger keeps fewer
+        correlations. Not with ``threshold = "fixed"``.
+    taper
+        How correlations are kept: ``"hard"`` (default) keeps those above the threshold
+        and drops the rest, ``"soft"`` scales them down smoothly with Gaspari-Cohn, and
+        ``"sigmoid"`` uses a steep logistic step.
+    threshold
+        ``"universal"`` (default): a threshold per state variable and datum, estimated
+        from correlations with a shuffled ensemble and growing with the variable's size;
+        ``"fixed"``: ``cutoff`` everywhere. With many cells and few members the universal
+        threshold can keep almost nothing; a fixed one does not.
+    cutoff
+        The fixed threshold on ``|correlation|``, in ``(0, 1)``; by default ``3/sqrt(N)``
+        for ``N`` members (0.3 at 100), three standard deviations of a sample correlation
+        where there is none. Only with ``threshold = "fixed"``.
 
     Differences from PET: PET-fork's ``ini_only`` branch multiplies the taper with gain
     built from state anomalies divided by the prior standard deviation and never scales
@@ -701,6 +721,10 @@ class DistanceLocalization(_GainTaper):
         correlation ``rho`` turned into ``N rho^2 / ((N + 1) rho^2 + 1)``).
     anisotropy
         ``[ratio, angle in degrees]``; ``[1, 0]`` is isotropic.
+    unlisted
+        What to do with data of wells missing from ``positions``: ``"error"`` (default)
+        refuses the run, so a misspelt well cannot silently drop its data; ``"zero"``
+        leaves the state untouched by them.
     block_sizes
         Sizes of the state variables (set from the state layout).
 

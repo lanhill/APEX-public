@@ -256,6 +256,21 @@ class LocalRLMMACUpdate(LocalAnalysisUpdate):
     spectrum (numerically null singular values dropped), as
     :class:`~apex.algorithms.data_assimilation.gies.RLMMACUpdate` does globally. GIES's
     default ``energy`` 0.95 applies.
+
+    Parameters
+    ----------
+    energy
+        Fraction of the singular-value sum of each group's whitened data anomalies kept,
+        in ``(0, 1]`` (default 0.95, as GIES's).
+    localization
+        The data selection: a localization with a fixed taper from the prior
+        (``adaptive_prior``/``adaptive``, ``distance``), from ``[method.localization]``.
+        Without one, ``adaptive_prior`` with a hard taper over ``block_sizes``.
+    block_sizes
+        State variable sizes (set from the state layout), for the default selection.
+    weight
+        Also multiply each local increment by the selection's taper (default false: the
+        taper only decides which data each group uses).
     """
 
     #: RLM-MAC centres on the forecast of the ensemble-mean state.

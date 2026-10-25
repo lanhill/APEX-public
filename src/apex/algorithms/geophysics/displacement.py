@@ -199,8 +199,10 @@ class VanOpstal:
     ----------
     basement_depth
         Depth of the rigid basement (m, positive down, from z = 0), below every cell.
-    poisson, free_surface
-        As :class:`Geertsma`: with ``"stations"`` each station is on the free surface and
+    poisson
+        Poisson's ratio of the rock, as :class:`Geertsma`'s.
+    free_surface
+        As :class:`Geertsma`'s: with ``"stations"`` each station is on the free surface and
         the basement's depth counts from the station too.
     """
 

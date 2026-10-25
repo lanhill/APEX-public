@@ -82,35 +82,43 @@ class LMDampingSchedule:
     The default of LM-EnRML; GIES may use it too. ``lambda`` is relaxed only
     when the data mismatch spread falls as well.
 
-    Attributes
+    Parameters
     ----------
     initial
-        ``lambda`` of the first analysis (``lambda``, default 100). ``"auto"`` sets it to
-        half the prior's mean data mismatch per datum, ``0.5 * mean(Phi_prior) / n_data``.
+        The damping ``lambda`` of the first analysis (positive, default 100), or ``"auto"``
+        for half the prior's mean data mismatch per datum.
     factor
-        Divide ``lambda`` by this after an accepted trial whose data mismatch spread also fell,
-        and multiply by it after a rejected one (``lambda_factor``, default 5).
+        Divide ``lambda`` by this after an accepted trial whose data mismatch spread also
+        fell, and multiply by it after a rejected one (greater than 1, default 5).
     minimum
-        Do not reduce ``lambda`` once it is at or below this (``lambda_min``, 0.01).
+        ``lambda`` is not reduced once it is at or below this (default 0.01).
     maximum
-        Stop once the trial's ``lambda`` reaches this (``lambda_max``, 1e10).
+        Stop once a trial's ``lambda`` reaches this (above ``minimum``, default 1e10).
     data_mismatch_tolerance
-        Stop when ``|1 - data_mismatch / previous_data_mismatch|`` drops below this
-        (``data_misfit_tol``,
-        0.01).
+        The run has converged when an improving trial changes the mean data mismatch by a
+        relative amount below this (positive, default 0.01).
     converge_on_rejection
-        Also stop on a *worse* trial within the tolerance (PET's ``score_and_commit``;
-        default False: it is rejected, as GIES's ``rlmmac``).
+        Also stop on a worse trial within the tolerance (default false: it is rejected and
+        ``lambda`` raised).
     max_stalled_rejections
-        Stop after this many consecutive rejected trials within the tolerance (default 3).
+        Stop after this many consecutive rejected trials within the tolerance (at least 1,
+        default 3).
     confirm_convergence
-        An improving trial within the tolerance stops the run only when ``lambda`` is at its
-        ``minimum`` or the previous accepted trial was within the tolerance too (default
-        True). Otherwise it is accepted and ``lambda`` relaxed: a heavily damped step can be
-        small without the data mismatch being near a minimum (the subspace update's step is
-        ``(1 + lambda)^-1`` of a Gauss-Newton step, 1 % of it at the default ``lambda`` of
-        100). False is PET's rule: the first small trial stops the run. GIES's ``rlmmac``
-        scheme has the option too, False by default (its docstring says why).
+        A small improvement stops the run only when ``lambda`` is at its ``minimum`` or the
+        previous accepted trial was small too (default true; otherwise the trial is
+        accepted and ``lambda`` relaxed). False stops at the first small improvement.
+
+    Notes
+    -----
+    The names in PET (``[dataassim.iteration]``) are ``lambda``, ``lambda_factor``,
+    ``lambda_min``, ``lambda_max`` and ``data_misfit_tol``. ``"auto"`` is ``0.5 *
+    mean(Phi_prior) / n_data``. ``converge_on_rejection`` is PET's ``score_and_commit``
+    rule; by default a worse trial is rejected, as in GIES's ``rlmmac``.
+    ``confirm_convergence`` is true because a heavily damped step can be small
+    without the data mismatch being near a minimum (the subspace update's step is ``(1 +
+    lambda)^-1`` of a Gauss-Newton step, 1 % of it at the default ``lambda`` of 100); false
+    is PET's rule. GIES's ``rlmmac`` scheme has the option too, false by default (its
+    docstring says why).
     """
 
     initial: float | Literal["auto"] = 100.0

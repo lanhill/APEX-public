@@ -20,7 +20,7 @@ name = "patience"
 
 | option | type | default | description |
 |---|---|---|---|
-| `patience` | integer | 2 | |
+| `patience` | integer | 2 | Accepted iterates to wait after the last minimum (at least 1), so that a local minimum is recognised before stopping. |
 
 ## `select`
 

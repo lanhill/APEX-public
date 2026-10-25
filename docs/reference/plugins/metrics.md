@@ -20,8 +20,8 @@ name = "constraint_cost"
 
 | option | type | default | description |
 |---|---|---|---|
-| `function` | object | required | |
-| `metric` | object or null | | |
+| `function` | object | required | `{name, options}` of `gmac_constraints` (e.g. `box`, `histogram`). |
+| `metric` | object or null | | `{name, options}` of `gmac_constraint_metrics`; default `log_barrier` for inequalities, `log_channel` for equalities. |
 
 ## `facies_brier`
 
@@ -36,8 +36,8 @@ name = "facies_brier"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum` | ArrayLike or null | | |
-| `variables` | array or null | | |
+| `actnum` | ArrayLike or null | | Active-cell indicator (non-zero = active); default all cells. Only active cells are scored, for variables with as many values. Configurations give `actnum_file`. |
+| `variables` | array or null | | Facies variables to score (integer codes from 0); default `facies`. |
 
 ## `facies_log_score`
 
@@ -52,8 +52,8 @@ name = "facies_log_score"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum` | ArrayLike or null | | |
-| `variables` | array or null | | |
+| `actnum` | ArrayLike or null | | Active-cell indicator (non-zero = active); default all cells. Only active cells are scored, for variables with as many values. Configurations give `actnum_file`. |
+| `variables` | array or null | | Facies variables to score (integer codes from 0); default `facies`. |
 
 ## `facies_mismatch`
 
@@ -68,8 +68,8 @@ name = "facies_mismatch"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum` | ArrayLike or null | | |
-| `variables` | array or null | | |
+| `actnum` | ArrayLike or null | | Active-cell indicator (non-zero = active); default all cells. Configurations give `actnum_file`. |
+| `variables` | array or null | | Facies properties to score; default `["facies"]`. |
 
 ## `model_change`
 
@@ -84,8 +84,8 @@ name = "model_change"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum` | ArrayLike or null | | |
-| `variables` | array or null | | |
+| `actnum` | ArrayLike or null | | Active-cell indicator (non-zero = active), as for `ModelRMSE`. |
+| `variables` | array or null | | State variables to score; default all. |
 
 ## `normalized_data_mismatch`
 
@@ -112,8 +112,8 @@ name = "rmse"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum` | ArrayLike or null | | |
-| `variables` | array or null | | |
+| `actnum` | ArrayLike or null | | Active-cell indicator (non-zero = active); default all cells. It applies to the variables with as many values (e.g. the grid fields, not scalar parameters); named `variables` must all match it. Configurations give `actnum_file`. |
+| `variables` | array or null | | State variables to score; default all. |
 
 ## `ssim`
 
@@ -128,10 +128,10 @@ name = "ssim"
 
 | option | type | default | description |
 |---|---|---|---|
-| `actnum` | ArrayLike or null | | |
-| `data_range` | number or null | | |
-| `grid` | array or null | | |
-| `order` | string | F | |
-| `per_layer` | boolean | false | |
-| `variables` | array or null | | |
-| `win_size` | integer | 7 | |
+| `actnum` | ArrayLike or null | | Active-cell indicator over the grid; inactive cells are filled with the active mean. Configurations give `actnum_file`. |
+| `data_range` | number or null | | Fixed value range; default the range of the truth and the ensemble together. |
+| `grid` | array or null | | Field shape `[nx, ny, nz]` (or 1-2 dimensions), including inactive cells; default each variable's own `grid` (`[[state.variables]]`). |
+| `order` | string | F | Cell order of the state vectors, `"F"` (Eclipse, x fastest; default) or `"C"`. |
+| `per_layer` | boolean | false | Average 2-D SSIMs over the layers (last grid axis) instead of one 3-D SSIM. |
+| `variables` | array or null | | State variables to score; default every variable with a grid (or, with `grid`, every variable with `prod(grid)` values). |
+| `win_size` | integer | 7 | Odd SSIM window (>= 3), at most every (per-layer: every horizontal) grid dimension. |

@@ -298,7 +298,24 @@ class NSGA3(NSGA2):
         Children per generation (default ``pop_size``).
     eta_c, crossover_prob
         SBX's distribution index and probability (pymoo's NSGA-III: 30 and 1).
-    crossover_prob_var, mutation_prob, mutation_prob_var, eta_m, eliminate_duplicates, ref_point,
+    crossover_prob_var
+        SBX's probability of exchanging each variable within a crossed pair, in ``[0, 1]``
+        (pymoo's ``prob_var``, default 0.5).
+    mutation_prob
+        Probability that a child is mutated at all, in ``[0, 1]`` (default 0.9).
+    mutation_prob_var
+        Probability that each variable of a mutated child changes, in ``[0, 1]``; by
+        default ``min(0.5, 1/n_x)`` for ``n_x`` controls, as pymoo.
+    eta_m
+        Polynomial mutation's distribution index (default 20): larger values keep the
+        mutated variables closer to the parent's.
+    eliminate_duplicates
+        Redraw children that equal a member or each other, so no evaluation is spent twice
+        on the same controls (default on).
+    ref_point
+        The reference point of the reported hypervolume, one value per objective (as
+        minimised); by default the first feasible members' nadir plus 10 % of each
+        objective's range, fixed for the run so its hypervolumes compare.
     stall, ftol, init, constraint_handling, eq_tolerance, maxiter, xtol, transform, epf
         As ``nsga2``.
     """

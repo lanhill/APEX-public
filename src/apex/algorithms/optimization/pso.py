@@ -129,9 +129,36 @@ class ParticleSwarm(PopulationOptimizer):
         ``"random"`` (uniform in ``[0, v_max]``, pymoo's) or ``"zero"``.
     bounds_handling
         ``"reflect"`` or ``"clip"`` (see :func:`keep_in_bounds`).
-    pop_size, stall, init, constraint_handling, eq_tolerance, maxiter, ftol, xtol,
-    transform, epf
-        See :class:`~apex.algorithms.optimization.population.PopulationOptimizer`.
+    pop_size
+        Members of the population, ``x0`` included (at least 2, default 20); each
+        generation evaluates ``pop_size`` new members on every realization.
+    stall
+        Generations in a row without the best member improving by more than ``ftol``
+        (relative) after which the run counts as converged (default 20).
+    init
+        How the start population besides ``x0`` is drawn within the bounds:
+        ``"uniform"`` (pymoo's random sampling) or ``"lhs"`` (Latin hypercube).
+    constraint_handling
+        ``"feasibility"`` (Deb's rules, as pymoo: a smaller constraint violation ranks
+        first, then a smaller objective) or ``"epf"`` (the external penalty, which needs
+        ``epf``). Matters only with a constrained objective.
+    eq_tolerance
+        Equality constraints within this absolute distance of zero count as met under the
+        feasibility rules (default 1e-4).
+    maxiter
+        Generations at most (per outer EPF iteration with ``"epf"``; default 100).
+    ftol
+        Relative improvement of the best member's objective that resets the ``stall``
+        count (default 1e-6).
+    xtol
+        The run counts as converged when the population's spread, the largest standard
+        deviation of a control (in optimizer coordinates), falls below it (default 1e-8).
+    transform
+        Optimize in the unit cube of the bounds instead of the controls' own units
+        (default off).
+    epf
+        External penalty options with ``constraint_handling = "epf"``: ``r`` (required),
+        ``r_factor``, ``tol_factor``, ``conv_crit``, ``max_epf_iter``.
     """
 
     status: ClassVar[Status] = "experimental"

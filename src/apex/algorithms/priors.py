@@ -347,10 +347,6 @@ class GeostatsPySgsimPrior:
 
     Each layer is simulated independently with ``geostats.sgsim`` (GSLIB's SGSIM),
     standardised (``itrans = 0``), then scaled to ``mean + sqrt(variance) * field``.
-    Parameters are as for :class:`GaussianFieldPrior`, with ``variogram`` one of
-    ``spherical``, ``exponential``, ``gaussian``, ranges positive with
-    ``major_range >= minor_range`` (GSLIB's convention), and ``max_neighbours`` the number
-    of previously simulated nodes SGSIM conditions on (search radius: the major range).
 
     Randomness: GeostatsPy seeds NumPy's global generator from its ``seed`` argument. Each
     layer's seed is drawn from the run's prior stream, and the global generator's state is
@@ -358,11 +354,36 @@ class GeostatsPySgsimPrior:
     GeostatsPy's progress output is suppressed. Unconditional simulation uses a single
     dummy datum far outside the grid, because GeostatsPy needs at least one datum.
 
-    ``conditioning`` is :class:`GaussianFieldPrior`'s: the realisations are conditioned by
-    kriging their residuals with the variogram, not by SGSIM's own search, so that both
-    generators honour data alike. SGSIM's fields have that covariance only approximately
-    (its search neighbourhood), so the conditioning is approximate away from the data;
-    at the data's cells the values are honoured exactly (``error_std = 0``).
+    Parameters
+    ----------
+    grid
+        ``[nx, ny, nz]``, all positive; ``nx * ny * nz`` must equal the variable's size.
+    mean
+        Scalar, or one value per cell in Eclipse order (e.g. loaded from ``mean_file``).
+    variance
+        Sill of the field, scalar or per layer; the standardised SGSIM field is scaled by
+        its square root.
+    major_range, minor_range
+        Ranges in cells along and across the major axis, scalar or per layer; both must be
+        positive with ``major_range >= minor_range`` (GSLIB's convention).
+        ``minor_range`` defaults to ``major_range`` (an isotropic field).
+    azimuth
+        Direction of the major axis, degrees counter-clockwise from the i-axis, scalar or
+        per layer.
+    variogram
+        One of ``spherical`` (default), ``exponential``, ``gaussian``, scalar or per layer.
+    max_neighbours
+        Number of previously simulated nodes SGSIM conditions each node on (at least 1,
+        default 20), searched within the major range. More neighbours reproduce the
+        variogram more closely at a higher cost.
+    conditioning
+        Hard data, ``{cells = [[i, j, k], ...], values = [...], error_std = 0}``: 1-based
+        Eclipse cells and the values there, in the state's space. The realisations are
+        conditioned by kriging their residuals with the variogram, not by SGSIM's own
+        search, so that this generator and ``gaussian_field`` honour data alike. SGSIM's
+        fields have that covariance only approximately (its search neighbourhood), so the
+        conditioning is approximate away from the data; at the data's cells the values
+        are honoured exactly (``error_std = 0``), or drawn around them with a positive one.
     """
 
     def __init__(

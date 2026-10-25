@@ -199,6 +199,13 @@ class Dtlz1(_Dtlz):
     ``g = 100 (k + sum_{M-th on} ((x_i - 0.5)^2 - cos(20 pi (x_i - 0.5))))``;
     ``f_i = 0.5 (1+g) prod_{j < M-i} x_j (1 - x_{M-i})`` (no last factor for ``i = 1``).
     pymoo's default: 7 variables for 3 objectives (``k = 5``).
+
+    Parameters
+    ----------
+    n_obj
+        Number of objectives, at least 2 (default 3). The controls must number at least
+        ``n_obj``: the first ``n_obj - 1`` place a point on the front and the rest set its
+        distance from it.
     """
 
     def __call__(self, controls: FloatArray, realizations: IntArray) -> FloatArray:
@@ -227,6 +234,13 @@ class Dtlz2(_Dtlz):
     sin(x_{M-i} pi/2)`` (no sine for ``i = 1``). For three objectives:
     ``f1 = (1+g) cos(x1 pi/2) cos(x2 pi/2)``, ``f2 = (1+g) cos(x1 pi/2) sin(x2 pi/2)``,
     ``f3 = (1+g) sin(x1 pi/2)``.
+
+    Parameters
+    ----------
+    n_obj
+        Number of objectives, at least 2 (default 3). The controls must number at least
+        ``n_obj``: the first ``n_obj - 1`` place a point on the front and the rest set its
+        distance from it.
     """
 
     def __call__(self, controls: FloatArray, realizations: IntArray) -> FloatArray:

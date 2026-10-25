@@ -191,8 +191,11 @@ class RenewableNetPresentValue:
         Wells whose injected water (WWIT) costs ``wwi``.
     renewable_injectors
         Wells whose injected water costs ``wrenwi`` (powered by renewable energy).
-    wwi, wrenwi
-        Costs per unit of injected water.
+    wwi
+        Cost per unit of water injected by ``injectors``.
+    wrenwi
+        Cost per unit of water injected by ``renewable_injectors`` (powered by renewable
+        energy).
     """
 
     status = "parity"

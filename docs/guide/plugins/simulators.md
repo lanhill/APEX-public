@@ -1,8 +1,12 @@
 ---
 audience: public
 items:
+  - cli:apex ert history-match
   - cli:apex plugins
+  - cli:apex report
+  - cli:apex resume
   - cli:apex run
+  - cli:apex stop
   - cli:apex summary
   - cli:apex validate
   - plugin:simulators:eclipse
@@ -14,7 +18,7 @@ items:
 
 # Simulators
 
-A simulator plugin turns the inputs of one member (one realization of the ensemble) into outputs. This page lists the five simulator plugins, their options and defaults, and how to configure one.
+A simulator plugin turns the inputs of one member (one realization of the ensemble) into outputs. This page covers the five simulator plugins, their options and defaults, and how to configure one.
 
 ## Goal
 
@@ -29,12 +33,12 @@ By the end of this page you will be able to:
 - An APEX run configuration (TOML) in which you can add a simulator section.
 - For `eclipse`: Eclipse (E100 or E300) and its `eclrun` launcher installed.
 - For `opm_flow`: OPM Flow installed (the executable is called `flow` by default).
-- For `ert`: an ERT case file.
-- For `eclipse` and `opm_flow`: a deck template file, that is, your simulator input deck stored as a template. Values you want APEX to fill in are passed through `template_values`.
+- For `ert`: an ERT case file (`.ert`).
+- For `eclipse` and `opm_flow`: a deck template file, that is, your simulator input deck stored as a template. Values you want APEX to fill in are passed through `template_values`, a table of values.
 
 ## The plugins at a glance
 
-Run `apex plugins` to list every plugin with its status and options. Add `--json` for the full descriptions as JSON.
+Run `apex plugins` to list every plugin with its options. Add `--json` for the full descriptions as JSON.
 
 | Plugin | What it does |
 | --- | --- |
@@ -44,7 +48,7 @@ Run `apex plugins` to list every plugin with its status and options. Add `--json
 | `opm_flow` | Runs OPM Flow for one member in its work directory. |
 | `toy_reservoir` | Returns field totals of a toy waterflood, for optimization tests and demos. Its status is `validated`. |
 
-Only `toy_reservoir` reports a status in `apex plugins`; the other four report none.
+Only `toy_reservoir` reports a status; the other four report none.
 
 ## Steps
 
@@ -52,8 +56,19 @@ Only `toy_reservoir` reports a status in `apex plugins`; the other four report n
 2. Add a `[simulator]` section to your configuration. Its `name` is the plugin name, and its settings go in a `[simulator.options]` table.
 3. Set every required option for that plugin (listed below). Leave the others at their defaults unless you need to change them.
 4. Use only the options listed for that plugin. Each plugin rejects options it does not define.
-5. Check the file with `apex validate your-config.toml`. This validates the configuration and plans its cost; nothing is simulated.
-6. Start the run with `apex run your-config.toml`. Use `--max-steps N` to stop after N analysis steps; you can continue later with `apex resume`.
+5. Check the file with `apex validate your-config.toml`. This validates the configuration and plans its cost; nothing is simulated. Add `--json` to get the validation as JSON, or `--root` to choose the services root (default: `$APEX_HOME`, else `~/.apex/service`).
+6. Start the run with `apex run your-config.toml`.
+
+### Stopping and continuing a run
+
+A run proceeds in analysis steps, the steps at which the history-matching run works through your data and writes a checkpoint.
+
+- `apex run your-config.toml --max-steps 3` stops after 3 analysis steps.
+- `apex stop RUN_DIR` asks a running run to stop at its next checkpoint.
+- `apex resume RUN_DIR` continues a stopped or interrupted run from its last checkpoint. `RUN_DIR` is the run's directory. `apex resume` also accepts `--max-steps`.
+- `--no-progress` turns off the progress display on standard error (it is on by default) for `apex run` and `apex resume`.
+
+To look at results, use `apex report RUN_DIR` (data mismatch history and performance metrics; add `--plots` to also write figures) or `apex summary RUN_DIR` (every metric at every step).
 
 ## Options
 
@@ -106,7 +121,29 @@ Required: `case_file`, `fields`, `eclbase`.
 | `parameter_step` | string or none | none |
 | `skip_forward_steps` | integer | `0` |
 
-`case_file` points to your ERT case (`.ert`). `fields` maps each state variable to a table with its ERT name (`keyword`, its GRDECL keyword) and the output `file` the forward model reads in the run path, for example `fields = { poro = { keyword = "PORO", file = "poro.grdecl" } }`. `eclbase` is the case's `ECLBASE`, the simulator's case name in the run path (`<IENS>` and `<ITER>` are replaced). `step_parameters` maps state variables to the ERT names of parameters that ERT's own writers put in the run path (`GEN_KW` groups, surfaces, transformed fields), and `parameter_step` is the forward-model step that writes them. `skip_forward_steps` leaves the case's first forward-model steps (those that make `FORWARD_INIT` parameters) out of every batch. `apex ert history-match` sets all of these from the case for you.
+Some terms first. The run path is the directory in which ERT runs one member's forward model. A state variable is a quantity APEX updates, such as porosity. The forward model is the list of steps ERT runs for each member.
+
+- `case_file` points to your ERT case (`.ert`).
+- `fields` maps each state variable to a table with its ERT name (`keyword`, its GRDECL keyword) and the output `file` the forward model reads in the run path, for example `fields = { poro = { keyword = "PORO", file = "poro.grdecl" } }`.
+- `eclbase` is the case's `ECLBASE`, the simulator's case name in the run path (`<IENS>` and `<ITER>` are replaced).
+- `step_parameters` and `parameter_step` are for state variables that ERT's own writers (for example `GEN_KW` groups, surfaces or transformed fields) put in the run path, rather than APEX writing them through `fields`. `step_parameters` maps those state variables to the ERT parameter names, and `parameter_step` is the forward-model step that writes them. Leave both at none if all your state variables go through `fields`.
+- `skip_forward_steps` leaves the case's first forward-model steps (those that make `FORWARD_INIT` parameters) out of every batch.
+- `responses` chooses where results are read from: `summary` or `storage`.
+
+#### Letting APEX read the case
+
+Instead of writing the `ert` options yourself, you can run:
+
+```bash
+apex ert history-match my_case.ert
+```
+
+This history-matches the ERT case with APEX's methods; ERT runs the forward model. APEX takes the fields, observations and steps from the case, and your APEX choices come from `apex.toml` next to the case (or the file you pass as a second argument). Further flags:
+
+- `--methods a,b` runs only the listed `[methods.<label>]` (default: all).
+- `--max-steps N` stops after N analysis steps; run the same command again to resume.
+- `--no-progress` hides progress output.
+- `--no-write-back` stops APEX adding the iterates to the case's ERT storage (by default they are added, so you can see them in ERT's GUI).
 
 ### `linear`
 
@@ -128,7 +165,9 @@ Required: `outputs`, `variables`.
 | `levels` | list of tables or none | none |
 | `write_files` | boolean | `false` |
 
-The plugin computes `y = f(G x)`. `variables` names the inputs `x`, `outputs` names the results `y`, and `nonlinearity` chooses `f` (`none` is the identity). The matrix `G` is given either inline with `matrix` or from a file with `forward_file`; both default to none. `fail_members`, `fail_above`, `flaky_members` and `delay_s` have names that suggest they are for testing failure handling and slow runs, but their exact behaviour is not described here. Check `apex plugins --json`.
+The plugin computes `y = f(G x)`. `variables` names the inputs `x`, `outputs` names the results `y`, and `nonlinearity` chooses `f` (`none` is the identity, `tanh` applies tanh). The matrix `G` is supplied either inline with `matrix` or from a file with `forward_file`; both default to none, and neither is marked required, so give `G` with one of them. The exact array or file format is not spelled out in the plugin's description; run `apex plugins --json` to see it.
+
+`fail_members` (a list of integers), `fail_above` (a number), `flaky_members` (a table whose values are integers) and `delay_s` (seconds, a number) are test aids for failure handling and slow runs. Their defaults leave them switched off. Leave them at the defaults for normal use.
 
 ### `toy_reservoir`
 
@@ -141,17 +180,17 @@ No required options. All have defaults.
 | `oil_rate` | number | `20.0` |
 | `water_rate` | number | `1.0` |
 
-`start` is a date string, `oil_rate` and `water_rate` are numbers, and `control` is a string naming the control.
+`start` is a date string, and `oil_rate` and `water_rate` are numbers. `control` is a string that names the control; its default is `inj`. Other control names are not listed in the plugin's description, so keep the default unless you know your setup needs another.
 
 ### Optional settings shared by the deck-based plugins
 
 - `timeout_s`: a number of seconds, default `3600.0`.
 - `keep_files`: `true` by default, so member files are kept.
-- `template_values`: a table of values for your deck template.
+- `template_values`: a table of values for your deck template. The placeholder syntax of the template is not described in the plugin's facts, so check it with your APEX installation before relying on it.
 - `transient_patterns`: a list of strings, empty by default. Each is a case-insensitive regular expression: a failed run whose log matches one counts as transient and is retried by the executor, on top of the built-in licence and file-system patterns.
-- `levels`: a list of tables.
-- `case_dir`: a path.
-- `licenses` (`eclipse` only): an integer.
+- `levels`: a list of tables (also available in `linear`). The keys each table takes are not described in the plugin's facts; see `apex plugins --json`.
+- `case_dir`: a path (string), none by default.
+- `licenses` (`eclipse` only): an integer, none by default.
 - `eclrun_args` (`eclipse`) and `flow_args` (`opm_flow`): lists of extra command-line arguments for the launcher.
 
 ## Worked example
@@ -193,7 +232,19 @@ timeout_s = 7200.0
 keep_files = false
 ```
 
-These examples show only the simulator section. The rest of your run configuration goes in the same file. After editing, run `apex validate your-config.toml` to confirm the section is accepted, for example to catch a wrong path or a misspelled option.
+An `ert` section sets its three required options:
+
+```toml
+[simulator]
+name = "ert"
+
+[simulator.options]
+case_file = "my_case.ert"
+eclbase = "MODEL"
+fields = { poro = { keyword = "PORO", file = "poro.grdecl" } }
+```
+
+These examples show only the simulator section. The rest of your run configuration goes in the same file. After editing, run `apex validate your-config.toml` to confirm the section is accepted, for example to catch a misspelled option. Then start with `apex run your-config.toml`.
 
 ## Pitfalls
 
@@ -209,5 +260,5 @@ These examples show only the simulator section. The rest of your run configurati
 ## What to read next
 
 - Run `apex plugins --json` for the full description of every option.
-- Use `apex validate` on your configuration, then `apex run`, and inspect results with `apex summary` on the run directory.
+- Use `apex validate` on your configuration, then `apex run`, and inspect results with `apex report` or `apex summary` on the run directory.
 - The other plugin pages in this guide, for the components that use a simulator's outputs.

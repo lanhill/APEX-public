@@ -72,6 +72,11 @@ class OPMFlowSimulator:
         Extra case-insensitive regular expressions: a failed run whose log matches one is
         transient, and the executor retries it (on top of the built-in licence and file-system
         patterns, ``apex.simulation.deck.TRANSIENT_PATTERNS``).
+    levels
+        Fidelity levels of a multilevel ensemble, filled in from ``[method] levels``
+        (``multilevel_esmda``) rather than set here: one table per level, coarsest first,
+        with its first member and size, and optionally its own ``deck_template_file``.
+        OPM Flow has no ``COARSEN``, so a coarse level needs its own deck, not ``upscale``.
 
     Raises
     ------

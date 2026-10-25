@@ -149,9 +149,8 @@ class MpslibSnesim:
     cell_size
         ``[dx, dy, dz]``, for the hard data's coordinates and the distances.
     distance_band
-        Clip the signed distances to ``[-band, band]`` (default: unclipped, a facies absent
-        from a layer at minus the layer's diagonal; see
-        :func:`~apex.algorithms.facies.distance.signed_distances`).
+        Clip the signed distances to ``[-band, band]``, in the units of ``cell_size``
+        (default: unclipped; a facies absent from a layer is at minus the layer's diagonal).
     program
         MPSlib's ``mps_snesim_tree`` (default: the one installed with ``scikit-mps``).
     timeout_s

@@ -445,7 +445,10 @@ class LogChannel:
     b, epsilon
         The offsets (the paper's scripts: 0.1, 0.001; ``epsilon`` is used by ``paper``).
     curvature
-        See above.
+        The metric: ``absolute_hessian`` (default), the Hessian's absolute value with a
+        positive weight; ``absolute_trace``, the negative Hessian with a positive weight
+        (it may become indefinite); or ``paper``, the negative Hessian with the paper's
+        negative trace weight.
     """
 
     constant = False

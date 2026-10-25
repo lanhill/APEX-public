@@ -11,6 +11,7 @@ options the composition reads itself before it builds the plugin (:data:`COMPOSE
 """
 
 import inspect
+import re
 import typing
 from collections.abc import Callable, Mapping
 from typing import Annotated, Any
@@ -230,6 +231,136 @@ def _schema(model: type[BaseModel]) -> dict[str, Any]:
         return {"type": "object", "properties": properties, "additionalProperties": False}
 
 
+#: A NumPy docstring's section heading: a title line underlined with dashes.
+_HEADING = re.compile(r"^-{3,}\s*$")
+#: Sphinx roles (``:class:`~a.b.C```) and literals (````x````) as Markdown code.
+_ROLE = re.compile(r":[a-z]+:`~?(?:[\w.]+\.)?([^`]+)`")
+_LITERAL = re.compile(r"``([^`]+)``")
+
+
+#: An entry that only points at another class's: "See `OptimizerBase`."
+_POINTER = re.compile(r"^See `(\w+)`\.?$")
+#: A pointer into the code, dropped from a description: "(see `Entry`)", or its clause in
+#: a parenthesis: "(m; see `Burden`)" becomes "(m)".
+_ASIDE = re.compile(r" \(see `\w+`\)|; see `\w+`(?=\))")
+
+
+def option_docs(factory: Callable[..., object]) -> dict[str, str]:
+    """Return each option's description from the factory's NumPy "Parameters" sections.
+
+    The docstrings of the class's bases, then the class's and its ``__init__``'s are read
+    (later ones win); an entry may name several options (``a, b``, also over several lines,
+    each but the last ending in a comma) and give a type after `` : ``. A description's
+    lines, paragraphs, lists and literal blocks alike, are joined into one line, with
+    Sphinx roles and literals as Markdown code. An entry that only says "See `Other`." takes
+    ``Other``'s entry (a base class or a class of the plugin's module), and asides like
+    "(see `Entry`)" are dropped: users read these, not the code.
+    """
+    found = _own_docs(factory)
+    module = inspect.getmodule(factory)
+    for option, text in list(found.items()):
+        pointer = _POINTER.match(text)
+        if pointer is None:
+            found[option] = _ASIDE.sub("", text)
+            continue
+        target = getattr(module, pointer.group(1), None)
+        resolved = _own_docs(target).get(option) if inspect.isclass(target) else None
+        if resolved and not _POINTER.match(resolved):
+            found[option] = _ASIDE.sub("", resolved)
+        else:
+            del found[option]  # no description beats a pointer into the code
+    return found
+
+
+def _own_docs(factory: object) -> dict[str, str]:
+    """Return the "Parameters" entries of a class (with its bases') or a function."""
+    sources: list[object] = [factory]
+    if inspect.isclass(factory):
+        sources = [c for c in reversed(inspect.getmro(factory)) if c is not object]
+    found: dict[str, str] = {}
+    for each in sources:
+        found.update(_parameter_section(inspect.getdoc(each) or ""))
+        init = vars(each).get("__init__") if inspect.isclass(each) else None
+        if init is not None:
+            found.update(_parameter_section(inspect.getdoc(init) or ""))
+    return found
+
+
+def _parameter_section(doc: str) -> dict[str, str]:
+    lines = doc.splitlines()
+    found: dict[str, str] = {}
+    try:
+        start = next(
+            i for i in range(len(lines) - 1)
+            if lines[i].strip() == "Parameters" and _HEADING.match(lines[i + 1])
+        )  # fmt: skip
+    except StopIteration:
+        return found
+    names: list[str] = []
+    text: list[str] = []
+    #: The entry's head goes on (it ended in a comma): the next line names more options.
+    continued = False
+
+    def flush() -> None:
+        if names and text:
+            description = " ".join(" ".join(text).split())
+            description = _LITERAL.sub(r"`\1`", _ROLE.sub(r"`\1`", description))
+            for each in names:
+                found[each] = description
+
+    for index in range(start + 2, len(lines)):
+        line = lines[index]
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if line.strip() and _HEADING.match(following):
+            break  # the next section
+        if line and not line[0].isspace():
+            head = line.split(" : ", 1)[0]
+            parts = [n.strip() for n in head.split(",") if n.strip()]
+            if continued and not text and parts and all(n.isidentifier() for n in parts):
+                names += parts  # a list of names wrapped onto the next line
+                continued = head.rstrip().endswith(",")
+                continue
+            flush()
+            # A head is names only: a prose paragraph in the section ("Labels: ...") is
+            # no entry, and the text under it is dropped.
+            names = parts if parts and all(n.isidentifier() for n in parts) else []
+            continued = bool(names) and head.rstrip().endswith(",")
+            text = []
+        elif line.strip():
+            more = [n.strip() for n in line.split(" : ", 1)[0].split(",") if n.strip()]
+            if continued and more and all(n.isidentifier() for n in more):
+                names += more  # a wrapped list of names
+                continued = line.rstrip().endswith(",")
+            else:
+                continued = False
+                text.append(line.strip())
+    flush()
+    return found
+
+
+def _described(
+    schema: dict[str, Any], docs: dict[str, str], factory: Callable[..., object]
+) -> dict[str, Any]:
+    """Return the schema with each option's docstring description where it has none.
+
+    Nested types (``$defs``, e.g. a localization's entries) are described from the
+    "Parameters" section of the class of that name in the plugin's module.
+    """
+    _fill(schema, docs)
+    module = inspect.getmodule(factory)
+    for name, nested in schema.get("$defs", {}).items():
+        found = getattr(module, name, None)
+        if isinstance(nested, dict) and inspect.isclass(found):
+            _fill(nested, option_docs(found))
+    return schema
+
+
+def _fill(schema: dict[str, Any], docs: dict[str, str]) -> None:
+    for option, prop in schema.get("properties", {}).items():
+        if isinstance(prop, dict) and not prop.get("description") and option in docs:
+            prop["description"] = docs[option]
+
+
 def plugin_info(registry: str, name: str) -> PluginInfo:
     """Describe one plugin."""
     entries = REGISTRIES[registry]
@@ -247,7 +378,7 @@ def plugin_info(registry: str, name: str) -> PluginInfo:
         workflow=PLUGIN_WORKFLOWS.get((registry, name), WORKFLOWS.get(registry)),  # type: ignore[arg-type]
         status=status if isinstance(status, str) else None,
         summary=summary,
-        options=_schema(option_model(registry, name)),
+        options=_described(_schema(option_model(registry, name)), option_docs(factory), factory),
         supplied=sorted(
             p.name for p in _parameters(factory) if p.name in SUPPLIED.get(registry, frozenset())
         ),
