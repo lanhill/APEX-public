@@ -62,14 +62,19 @@ The model's choices are checked against the deck: it can name only properties se
 
 ## Step 3: give it a better prior (optional)
 
-The geomodeler writes a new configuration beside the case, with a prior for its fields, and checks it on a drawn sample:
+The geomodeler writes a new configuration beside the case, with a prior for its fields, and checks it on a drawn sample. Run one of these two commands. Without a model, by the rules (the mean and spread from the case's bounds, the range assumed):
 
 ```bash
 uv run apex agent geomodel my_box/config.toml --no-llm
+```
+
+Or with a model, saying what you know in words:
+
+```bash
 uv run apex agent geomodel my_box/config.toml --request "ln PERMX around 5 with a 20-cell range, porosity 0.2 ± 0.03"
 ```
 
-The result is `my_box/config_prior.toml` (or `--out`). With `--data`, a CSV of hard data at cells (`i,j,k,property,value`), the geomodeler estimates the variogram from them. See [the geomodeler](../geomodeler.md).
+The result is `my_box/config_prior.toml`. The geomodeler never writes over an existing file: if you later run the other command as well, give it another name with `--out`, for example `--out my_box/config_request.toml`. With `--data`, a CSV of hard data at cells (`i,j,k,property,value`), the geomodeler estimates the variogram from them. See [the geomodeler](../geomodeler.md).
 
 ## Step 4: validate and run
 
@@ -79,7 +84,7 @@ uv run apex run my_box/config.toml --max-steps 1   # the prior and one iteration
 uv run apex report my_box/runs/box --plots        # the data mismatch and figures
 ```
 
-The full run is up to 1,121 simulations of this 18,000-cell model, on 10 workers by default, so try one step first. If you did Step 3, run `my_box/config_prior.toml` instead: it has the same run name, so run one of the two, or change `[run] name` in one. The run is named after the deck (`box`; `--name` sets another). `apex resume my_box/runs/box` continues it from its last checkpoint.
+The full run is up to 1,121 simulations of this 18,000-cell model, on 10 workers by default, so try one step first. If you did Step 3, run `my_box/config_prior.toml` (or the file you gave `--out`) instead: it has the same run name, so run one of the two, or change `[run] name` in one. The run is named after the deck (`box`; `--name` sets another). `apex resume my_box/runs/box` continues it from its last checkpoint.
 
 ## Step 5: create a synthetic case from words
 
