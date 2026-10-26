@@ -515,6 +515,12 @@ def test_the_method_is_found_through_its_entry_point() -> None:
     assert method.max_forecasts() == (4, 0)
 ```
 
+Run them from the APEX folder, as the metric's:
+
+```bash
+uv run pytest /path/to/apex-geomda/tests
+```
+
 A method needs an independent reference. On the linear-Gaussian example the exact posterior is known: `make_case.py` writes the case, and the posterior mean and spread of a large ensemble should approach the Kalman posterior. Compare the run's RMSE (in `apex summary`) with ES-MDA's on the same case, and test the posterior against the exact one as APEX's own method tests do.
 
 ## Contributing it to APEX itself

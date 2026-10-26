@@ -2,6 +2,8 @@
 
 **Agentic Platform for Ensemble eXploration**: a framework for ensemble-based history matching, forecasting, uncertainty quantification and optimization of subsurface models, with agents that plan, monitor and report on the work. It natively re-implements and extends NORCE's [Python Ensemble Toolbox (PET)](https://github.com/Python-Ensemble-Toolbox/PET).
 
+APEX is compatible with ERT: with APEX's interface, each can run the other's cases ([APEX and ERT](docs/ert.md)). PET and ERT cases convert to and from APEX cases, within what each can express ([the case-converter](docs/agents.md#bringing-your-own-case-the-case-converter)).
+
 Status: early development.
 
 ## Quick start
@@ -108,7 +110,7 @@ uv run apex service stop                          # when you are done
 <details>
 <summary><b>6. Run a first example</b></summary>
 
-A history-matching run on a small linear-Gaussian case, which needs no simulator:
+A history-matching run on a small linear-Gaussian case, which needs no simulator. [Your first history-matching run](docs/getting_started/first_run.md) walks through it step by step: a copy of the example, its configuration, validating, stopping and resuming, the results and a second method.
 
 ```bash
 uv run python examples/linear_gaussian/make_case.py

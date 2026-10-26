@@ -22,6 +22,7 @@ hooks:
 nav:
   - Home: index.md
   - Getting started:
+      - getting_started/first_run.md
       - getting_started/web_ui.md
       - getting_started/agents_cli.md
       - getting_started/case_converter.md

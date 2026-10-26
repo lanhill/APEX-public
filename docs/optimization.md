@@ -450,15 +450,17 @@ name = "cheap_water"
 patch = { objective = { options = { wwi = 6.0 } } }
 ```
 
-Save it as `study.toml` and run:
+Save it as `study.toml` in `examples/optimization/3well`, next to `enopt.toml`: a study's case paths are relative to the study file's folder. Then, from the APEX folder:
 
 ```bash
-uv run apex study run study.toml
+uv run apex study run examples/optimization/3well/study.toml
 uv run apex study status 3well_optimizers
 uv run apex study compare 3well_optimizers
 ```
 
 `apex study run` takes the study file; `status` and `compare` take the study's name, its `[study] name`.
+
+`apex study run` submits the study's runs as background jobs and returns at once (`--wait` waits for the end). The jobs run with or without the job service: with `uv run apex service start` running, the service schedules them; without it, the command starts the first ones and each job starts the next as it ends. Either way, `apex study status` follows them.
 
 The comparison has each method and variant's mean and spread over the replicates, and paired differences with Wilcoxon tests. The first replicate uses the case's own seed, so it reproduces a plain `apex optimize` of that case; the others are derived from `[study] seed`, so the study is reproducible.
 
