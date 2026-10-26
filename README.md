@@ -60,6 +60,12 @@ uv sync --locked
 
 This creates `.venv/` inside the folder with APEX, its exact pinned dependencies (`uv.lock`), the development and documentation tools, and most optional features: reservoir simulators' files, figures, geostatistical and facies priors, the REST API and web UI server, MCP, the runtime agents' model providers and eCalc. Outside the folder, uv keeps its download cache in `~/.cache/uv`, its own program in `~/.local/bin` (step 1), and a Python it downloads in `~/.local/share/uv/python`. Every later command is run from this folder with `uv run`, which uses that environment.
 
+APEX's own messages and the web UI write commands as a plain `apex …`. To type them as they are, activate the environment in that terminal first; `apex` then works without `uv run` until the terminal closes (or `deactivate`):
+
+```bash
+source .venv/bin/activate
+```
+
 </details>
 
 <details open>
