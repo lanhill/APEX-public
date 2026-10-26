@@ -61,26 +61,26 @@ None of these plugins has any options. Each one's option set is empty and accept
 3. Check that the plugin is installed. Run:
 
    ```
-   apex plugins
+   uv run apex plugins
    ```
 
    This lists every plugin with its options. Look for the `avo_attributes` plugins and the name you picked. For these plugins the options are empty. If the name you picked is not listed, it is not available in your installation, so pick one that is. For the full descriptions as JSON, add the `--json` flag:
 
    ```
-   apex plugins --json
+   uv run apex plugins --json
    ```
 
 4. Name the plugin (for example `max`) in your run configuration, which is the TOML file you pass to `apex run`, and leave the plugin's options empty. This page does not describe the configuration sections that carry the attribute and the window, so it cannot show a complete configuration. If you do not have one yet, start from a configuration that already works for a history-matching run and change only the plugin name.
 5. Start the run:
 
    ```
-   apex run config.toml
+   uv run apex run config.toml
    ```
 
    To test on a small scale, stop early with `--max-steps`. The run stops after that many analysis steps, and you can continue later with `apex resume` and the run directory:
 
    ```
-   apex run config.toml --max-steps 1
+   uv run apex run config.toml --max-steps 1
    ```
 
    Progress is shown on standard error. Use `--no-progress` to turn it off (`--progress` is the default).

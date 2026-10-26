@@ -156,7 +156,7 @@ weight = { rule = "trace", w = 0.5 }
 These blocks show only the `[method]` part. A real run configuration also holds the other sections of your problem. Once the file is complete, start it with:
 
 ```bash
-apex run config.toml
+uv run apex run config.toml
 ```
 
 To stop after a few analysis steps, add `--max-steps`, for example `apex run config.toml --max-steps 5`, then continue with `apex resume <run_dir>`, where `<run_dir>` is the directory of the run. To ask a running run to stop at its next checkpoint, use `apex stop <run_dir>`; `apex resume` continues it. Progress is shown by default; pass `--no-progress` to turn it off.

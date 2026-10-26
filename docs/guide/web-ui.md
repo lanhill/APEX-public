@@ -85,6 +85,8 @@ The `optimization` route looks different from the others: it ends in `?path={opt
 
 ![The plugins page](img/webui-plugins.png)
 
+The picture was taken with APEX's optional extras installed, so its tabs count a few more plugins than a default `uv sync --locked` lists: an extra's plugins appear once it is installed.
+
 ![The agents page](img/webui-agents.png)
 
 ### Following work in progress
@@ -154,7 +156,7 @@ This example takes you from the catalogue to the charts of a history-matching ru
 10. Optional, in a terminal, once you know where your runs are kept (see *Run directory* above): for a written overview, run for example:
 
     ```bash
-    apex summary RUN_DIR --output report.md --title "My run"
+    uv run apex summary RUN_DIR --output report.md --title "My run"
     ```
 
     `RUN_DIR` can be one or more run directories, or a folder that holds runs, which `apex summary` searches. It reports every metric at every step. The Markdown goes to `report.md` and a CSV file is written next to it, in the same folder. Without `--output` the Markdown is printed to the terminal; without `--title` the title is "Results summary".

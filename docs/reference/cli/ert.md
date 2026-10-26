@@ -12,7 +12,7 @@ Every one of these 6 items, with its options, as APEX's code defines them. Writt
 Compare APEX's method with ERT's on one case, over seeds: a study.
 
 ```bash
-apex ert compare CONFIG
+uv run apex ert compare CONFIG
 ```
 
 | option | default | description |
@@ -30,7 +30,7 @@ apex ert compare CONFIG
 Write CASE as a native APEX case that runs without ERT.
 
 ```bash
-apex ert convert CASE OUT_DIR
+uv run apex ert convert CASE OUT_DIR
 ```
 
 | option | default | description |
@@ -43,7 +43,7 @@ apex ert convert CASE OUT_DIR
 Write CONFIG as a self-contained ERT case (case.ert, prior, observations, grid).
 
 ```bash
-apex ert export CONFIG OUT_DIR
+uv run apex ert export CONFIG OUT_DIR
 ```
 
 | option | default | description |
@@ -56,7 +56,7 @@ apex ert export CONFIG OUT_DIR
 History-match an ERT case with APEX's methods; ERT runs the forward model.
 
 ```bash
-apex ert history-match CASE APEX_TOML
+uv run apex ert history-match CASE APEX_TOML
 ```
 
 | option | default | description |
@@ -71,7 +71,7 @@ apex ert history-match CASE APEX_TOML
 Replay ERT's iterations into an APEX run directory (reports, summaries, comparisons).
 
 ```bash
-apex ert import CASE_DIR RUN_DIR
+uv run apex ert import CASE_DIR RUN_DIR
 ```
 
 
@@ -80,7 +80,7 @@ apex ert import CASE_DIR RUN_DIR
 Run ERT on an exported case, locally (ERT 26.x, the `ert` extra).
 
 ```bash
-apex ert run CASE_DIR
+uv run apex ert run CASE_DIR
 ```
 
 | option | default | description |

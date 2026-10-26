@@ -124,15 +124,15 @@ The values of `order`, `win_size` and `per_layer` are the defaults, so you can l
 Start the run, stopping after 5 analysis steps. Then continue it and print the report. Here the run directory is called `my_run`. Use the directory of your own run.
 
 ```bash
-apex run config.toml --max-steps 5
-apex resume my_run
-apex report my_run
+uv run apex run config.toml --max-steps 5
+uv run apex resume my_run
+uv run apex report my_run
 ```
 
 Add `--plots` to also write the figures (PNG and PDF). They go to `my_run/report` unless you pass `--output`. `--font-size` sets the font size in points (default 12).
 
 ```bash
-apex report my_run --plots --output figures --font-size 14
+uv run apex report my_run --plots --output figures --font-size 14
 ```
 
 To list all plugins with their options, run `apex plugins`. Add `--json` for the full descriptions as JSON.

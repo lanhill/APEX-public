@@ -12,7 +12,7 @@ Every one of these 3 items, with its options, as APEX's code defines them. Writt
 Approve up to a budget of one client's experiment ahead, until it expires.
 
 ```bash
-apex grant create CLIENT EXPERIMENT
+uv run apex grant create CLIENT EXPERIMENT
 ```
 
 | option | default | description |
@@ -26,7 +26,7 @@ apex grant create CLIENT EXPERIMENT
 List the active grants: id, client, experiment, used/budget, expiry.
 
 ```bash
-apex grant list
+uv run apex grant list
 ```
 
 | option | default | description |
@@ -39,7 +39,7 @@ apex grant list
 Revoke a grant at once (submissions already let through are not stopped).
 
 ```bash
-apex grant revoke GRANT_ID
+uv run apex grant revoke GRANT_ID
 ```
 
 | option | default | description |

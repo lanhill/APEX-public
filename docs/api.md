@@ -19,10 +19,10 @@ By the end of this lesson you can start the APEX REST API, get a token, validate
 ### 1. Start the service with the API
 
 ```bash
-apex service start --http 127.0.0.1:8765   # the scheduler and the API, in one process
-apex service token                          # print the bearer token (created on first use)
-apex service token --rotate                 # a new token; the old one is refused at once
-apex service stop
+uv run apex service start --http 127.0.0.1:8765   # the scheduler and the API, in one process
+uv run apex service token                          # print the bearer token (created on first use)
+uv run apex service token --rotate                 # a new token; the old one is refused at once
+uv run apex service stop
 ```
 
 `<root>` below means the service's data directory, where it keeps its state, such as `api_token` and `ui_access.toml`.
@@ -40,8 +40,8 @@ Every `/v1` request needs `Authorization: Bearer <token>`. The owner's API token
 **Guests** are people you let into the web UI without giving them the owner's token. The owner creates each one on the service's machine:
 
 ```bash
-apex service token --ui --guest alice     # create alice's token and print it
-apex service token --list-guests          # list the guests, with each expiry
+uv run apex service token --ui --guest alice     # create alice's token and print it
+uv run apex service token --list-guests          # list the guests, with each expiry
 ```
 
 Send the printed token to the guest. They send it as `Authorization: Bearer <token>`. A guest sees only their own jobs, runs, studies, predictions and chats, within `<root>/ui_access.toml` (see docs/ui.md, "Who sees what"). Hidden things answer `404`, refused actions `403`. `GET /v1/whoami` returns the role, the guest and the allowed actions.

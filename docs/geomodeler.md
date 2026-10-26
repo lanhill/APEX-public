@@ -7,10 +7,10 @@ audience: public
 The geomodeler gives a case's state variables a prior. It writes a new configuration beside the old one, with the prior's sections (and, for some skills, a stored ensemble), validates it, and checks a small drawn sample against what was asked. A run never calls it: the prior it writes is a recorded section or file, so runs stay reproducible.
 
 ```bash
-apex agent geomodel case/config.toml                        # the rules: Gaussian fields, values assumed
-apex agent geomodel case/config.toml --data case/wells.csv  # estimated from well data, conditioned to them
-apex agent geomodel case/config.toml --reference ref.npz    # statistics and variogram of a reference field
-apex agent geomodel case/config.toml --request "porosity correlated with ln PERMX, 0.7"
+uv run apex agent geomodel case/config.toml                        # the rules: Gaussian fields, values assumed
+uv run apex agent geomodel case/config.toml --data case/wells.csv  # estimated from well data, conditioned to them
+uv run apex agent geomodel case/config.toml --reference ref.npz    # statistics and variogram of a reference field
+uv run apex agent geomodel case/config.toml --request "porosity correlated with ln PERMX, 0.7"
 ```
 
 The same is the REST route `POST /v1/agents/geomodel` (`config`, `request`, `reference`, `data`), the web UI's *Give it a prior* in the editor, and the assistant's tool `draft_prior`.

@@ -28,7 +28,7 @@ This page covers 16 of APEX's functionalities: what each is, how to select it, a
 Minimise an objective with one of PET's optimizers (EnOpt, GenOpt, SmcOpt, ...).
 
 ```bash
-apex optimize CONFIG
+uv run apex optimize CONFIG
 ```
 
 | option | default | description |
@@ -42,7 +42,7 @@ apex optimize CONFIG
 List every plugin with its options (for clients: --json).
 
 ```bash
-apex plugins
+uv run apex plugins
 ```
 
 | option | default | description |
@@ -54,7 +54,7 @@ apex plugins
 Start a history-matching run.
 
 ```bash
-apex run CONFIG
+uv run apex run CONFIG
 ```
 
 | option | default | description |
@@ -67,7 +67,7 @@ apex run CONFIG
 Ask a running run to stop at its next checkpoint (resume continues it).
 
 ```bash
-apex stop RUN_DIR
+uv run apex stop RUN_DIR
 ```
 
 

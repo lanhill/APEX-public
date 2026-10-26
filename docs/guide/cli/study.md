@@ -40,7 +40,7 @@ By the end of this lesson you will be able to check a study with `apex validate`
 `apex validate` takes one required argument, `config`, the path to your TOML file (a run, a prediction or a study). It checks the file and plans its cost without simulating anything, so it is a safe first step.
 
 ```bash
-apex validate my-study.toml
+uv run apex validate my-study.toml
 ```
 
 - `--json`: print the validation as JSON. Off by default.
@@ -53,7 +53,7 @@ If the file is not valid, the command prints an error that starts with `error: i
 `apex study run` takes one required argument, `study`, the path to the study specification (TOML). It validates the specification and submits the study. The runs continue in the background.
 
 ```bash
-apex study run my-study.toml
+uv run apex study run my-study.toml
 ```
 
 Options:
@@ -91,8 +91,8 @@ A study that goes beyond these limits is a "large" study. This page does not sho
 The order is: submit the study, get the pending approval's token, approve that token, then submit the same study again with the token.
 
 ```bash
-apex approve <token>
-apex study run my-study.toml --approval-token <token>
+uv run apex approve <token>
+uv run apex study run my-study.toml --approval-token <token>
 ```
 
 Replace `<token>` with the token of your pending approval. Who is allowed to approve is a matter of how your service is run; the command itself only needs the token and the same services root.
@@ -102,7 +102,7 @@ Replace `<token>` with the token of your pending approval. Who is allowed to app
 `apex study status` takes the study's name as its one required argument, `name`. It shows the state of the study and of every run in it.
 
 ```bash
-apex study status my-study
+uv run apex study status my-study
 ```
 
 Add `--root` if your services root is not the default. The study's name is set by the study specification, so it need not match the file name. `my-study` here is a placeholder: use your own study's name here and in the next step. Read the state of each run in the output; the comparison in the next step is meant for runs that have finished.
@@ -116,7 +116,7 @@ Add `--root` if your services root is not the default. The study's name is set b
 - `--root`: the services root.
 
 ```bash
-apex study compare my-study --json
+uv run apex study compare my-study --json
 ```
 
 The valid metric names and labels depend on your study, and this page does not list them or state what is compared when `--metric` is left out. Take them from your study's reference material.
@@ -126,8 +126,8 @@ The valid metric names and labels depend on your study, and this page does not l
 You have `my-study.toml`. You want to check it, then run it at high priority with four jobs at once, and wait for it to finish.
 
 ```bash
-apex validate my-study.toml
-apex study run my-study.toml --priority high --max-concurrent-jobs 4 --wait
+uv run apex validate my-study.toml
+uv run apex study run my-study.toml --priority high --max-concurrent-jobs 4 --wait
 ```
 
 Because of `--wait`, the command returns when the study has finished. If the study is large, you will need approval first: either add `--yes`, or approve a token and add `--approval-token <token>` as shown above.
@@ -135,13 +135,13 @@ Because of `--wait`, the command returns when the study has finished. If the stu
 If you had left out `--wait`, the command would return right after submission. You could then check on it from another terminal:
 
 ```bash
-apex study status my-study
+uv run apex study status my-study
 ```
 
 When the status shows that the runs are done, compare the variants:
 
 ```bash
-apex study compare my-study
+uv run apex study compare my-study
 ```
 
 Here `my-study` stands for your study's name.

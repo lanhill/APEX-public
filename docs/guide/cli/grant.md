@@ -111,13 +111,13 @@ The client `planner` is about to run an experiment annotated `my-experiment`, an
 1. Create the grant:
 
    ```bash
-   apex grant create planner my-experiment --max-simulator-runs 200 --expires 12h
+   uv run apex grant create planner my-experiment --max-simulator-runs 200 --expires 12h
    ```
 
 2. Confirm it is there:
 
    ```bash
-   apex grant list
+   uv run apex grant list
    ```
 
    There is one row per active grant, with the columns id, client, experiment, used/budget and expiry. Your new grant shows `planner` and `my-experiment`, and its budget is 200.
@@ -125,13 +125,13 @@ The client `planner` is about to run an experiment annotated `my-experiment`, an
 3. Later, the experiment is called off. Copy the grant's id from the id column of the list and revoke it:
 
    ```bash
-   apex grant revoke <grant_id>
+   uv run apex grant revoke <grant_id>
    ```
 
 4. To see it again afterwards, include revoked and expired grants:
 
    ```bash
-   apex grant list --all
+   uv run apex grant list --all
    ```
 
 If your services root is not the default, add `--root /path/to/service` to each command.

@@ -12,7 +12,7 @@ Every one of these 5 items, with its options, as APEX's code defines them. Writt
 Rebuild the run catalogue from the run directories.
 
 ```bash
-apex service reindex
+uv run apex service reindex
 ```
 
 | option | default | description |
@@ -24,7 +24,7 @@ apex service reindex
 Start the job service of a root in the background (one per root).
 
 ```bash
-apex service start
+uv run apex service start
 ```
 
 | option | default | description |
@@ -37,7 +37,7 @@ apex service start
 Show whether the service runs, and the jobs by state.
 
 ```bash
-apex service status
+uv run apex service status
 ```
 
 | option | default | description |
@@ -49,7 +49,7 @@ apex service status
 Stop the job service (running jobs go on; their workers record their end).
 
 ```bash
-apex service stop
+uv run apex service stop
 ```
 
 | option | default | description |
@@ -62,7 +62,7 @@ apex service stop
 Print the REST API's bearer token (created on first use, readable by you only).
 
 ```bash
-apex service token
+uv run apex service token
 ```
 
 | option | default | description |

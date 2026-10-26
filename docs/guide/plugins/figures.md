@@ -31,8 +31,8 @@ By the end you will know what each figure plugin draws, which options it accepts
 To list every plugin with its options, run:
 
 ```bash
-apex plugins
-apex plugins --json
+uv run apex plugins
+uv run apex plugins --json
 ```
 
 The `--json` flag prints the full descriptions as JSON.
@@ -121,7 +121,7 @@ No option is shared by all six. Each plugin accepts only its own options, and an
 Suppose a run in `runs/case1` has finished. Write its figures to `runs/case1/figs` with a font size of 14 points:
 
 ```bash
-apex report runs/case1 --plots --output runs/case1/figs --font-size 14
+uv run apex report runs/case1 --plots --output runs/case1/figs --font-size 14
 ```
 
 The command prints the data mismatch history and performance metrics, and writes the figures, as PNG and PDF, to `runs/case1/figs`. Without `--output` they go to `runs/case1/report`.
@@ -129,7 +129,7 @@ The command prints the data mismatch history and performance metrics, and writes
 To compare this run with others in one Markdown table:
 
 ```bash
-apex summary runs --output runs-summary.md --title "Case 1 runs"
+uv run apex summary runs --output runs-summary.md --title "Case 1 runs"
 ```
 
 Here `runs` is a folder holding runs, which `apex summary` searches.

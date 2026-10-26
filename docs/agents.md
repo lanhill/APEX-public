@@ -56,9 +56,9 @@ API keys go only into a request's authentication, never into prompts or traces (
 ## Step 2: ask the agent
 
 ```bash
-apex agent ask "Which localization methods does APEX have, and which is the default?"
-apex agent ask "Validate /data/cases/m5spots/config.toml and tell me its cost" --model glm-4.6
-apex agent ask "..." --no-tool-calls           # a model without native tool calling
+uv run apex agent ask "Which localization methods does APEX have, and which is the default?"
+uv run apex agent ask "Validate /data/cases/m5spots/config.toml and tell me its cost" --model glm-4.6
+uv run apex agent ask "..." --no-tool-calls           # a model without native tool calling
 ```
 
 The agent answers with APEX's tools, the same tools that MCP hosts and external planners use. So approval applies to it as to any client: it cannot submit work above the service's approval limits until a person approves the pending token with `apex approve TOKEN`. The limits are the ones in `service.toml`. A token is issued when `validate` accepts work that is above them.
@@ -68,11 +68,11 @@ The agent answers with APEX's tools, the same tools that MCP hosts and external 
 `apex agent monitor` checks whether a run is healthy and whether it should stop. `RUN` is a run directory, a run id or a job id.
 
 ```bash
-apex agent monitor examples/linear_gaussian/runs/linear_gies  # once: rules and the model's judgement
-apex agent monitor 20260929T071500-3f2a --watch   # a job: again after every newly scored forecast
-apex agent monitor RUN --no-llm                   # rules only, no model
-apex agent monitor RUN --watch --act              # also stop the job on a stop recommendation
-apex agent monitor RUN --json                     # everything, for scripts
+uv run apex agent monitor examples/linear_gaussian/runs/linear_gies  # once: rules and the model's judgement
+uv run apex agent monitor 20260929T071500-3f2a --watch   # a job: again after every newly scored forecast
+uv run apex agent monitor RUN --no-llm                   # rules only, no model
+uv run apex agent monitor RUN --watch --act              # also stop the job on a stop recommendation
+uv run apex agent monitor RUN --json                     # everything, for scripts
 ```
 
 `--watch` keeps checking a job; press Ctrl+C to end it.
@@ -129,8 +129,8 @@ These three agents work like the monitor: code computes the facts, named rules d
 ### Diagnosis: what went wrong, and what to change
 
 ```bash
-apex agent diagnose examples/linear_gaussian/runs/linear_gies  # a run directory, run id or job id
-apex agent diagnose RUN --json                 # the facts, both diagnoses, the corrections
+uv run apex agent diagnose examples/linear_gaussian/runs/linear_gies  # a run directory, run id or job id
+uv run apex agent diagnose RUN --json                 # the facts, both diagnoses, the corrections
 ```
 
 The facts are the monitor's facts, plus the QA/QC of the posterior (see `apex qaqc`), the failed members grouped by reason, and the method, strategy and localization. In the QA/QC, a **Mahalanobis score** measures how far one datum lies from the forecast, in units of its uncertainty. The **gain ranking** orders the data by how much they moved the parameters.
@@ -153,10 +153,10 @@ The agent changes nothing. To use a patch, put it in a study variant (see the pl
 ### Planning: an experiment for a goal
 
 ```bash
-apex agent plan CASE.toml --goal "does adaptive localization improve the RMSE?" \
+uv run apex agent plan CASE.toml --goal "does adaptive localization improve the RMSE?" \
     --budget 20000                              # simulator runs for the whole study
-apex agent plan CASE.toml --goal "..." --submit # submit after you confirm
-apex agent plan CASE.toml --goal "..." --approval-token TOKEN   # after `apex approve TOKEN`
+uv run apex agent plan CASE.toml --goal "..." --submit # submit after you confirm
+uv run apex agent plan CASE.toml --goal "..." --approval-token TOKEN   # after `apex approve TOKEN`
 ```
 
 Replace `CASE.toml` with one of your own case configurations.
@@ -170,9 +170,9 @@ Replace `CASE.toml` with one of your own case configurations.
 ### Reports: a narrative of the results
 
 ```bash
-apex agent report RUN
-apex agent report --study NAME
-apex agent report RUN --out summary.md
+uv run apex agent report RUN
+uv run apex agent report --study NAME
+uv run apex agent report RUN --out summary.md
 ```
 
 The facts are, for a run, its summary, the metrics per step and the monitor's and diagnosis rules' findings; for a study, its comparison. The model writes the sections and lists every number the prose relies on, with its source. A key number that matches no fact is dropped and listed under *Corrections* at the end of the report, so a reader knows which prose to check. Without a model, a template reports each metric from the prior to the posterior, the health findings, and a study's differences.
@@ -180,8 +180,8 @@ The facts are, for a run, its summary, the metrics per step and the monitor's an
 ### Figures: the plotter
 
 ```bash
-apex agent plot RUN --preset brugge_classic
-apex agent plot RUN --request "the RMSE box plots and the layer maps"
+uv run apex agent plot RUN --preset brugge_classic
+uv run apex agent plot RUN --request "the RMSE box plots and the layer maps"
 ```
 
 The plotter draws a run's result figures into `RUN/report/plots/`, where the run's page in the web UI shows them. The facts are what the run holds and every figure plugin's options. The model, or without one the rules, chooses figures or a preset, and code refuses a choice the run cannot give before anything is drawn. See [figures](figures.md).
@@ -189,10 +189,10 @@ The plotter draws a run's result figures into `RUN/report/plots/`, where the run
 ### Bringing your own case: the case-converter
 
 ```bash
-apex agent convert import CASE.DATA --out my_case
-apex agent convert import examples/3dbox_production/BOX.DATA --history examples/3dbox_production/observations.csv --out my_box --no-llm   # the deck APEX ships
-apex agent convert import CASE.DATA --out my_case --history observed.csv --request "match porosity with ES-MDA"
-apex agent convert skills
+uv run apex agent convert import CASE.DATA --out my_case
+uv run apex agent convert import examples/3dbox_production/BOX.DATA --history examples/3dbox_production/observations.csv --out my_box --no-llm   # the deck APEX ships
+uv run apex agent convert import CASE.DATA --out my_case --history observed.csv --request "match porosity with ES-MDA"
+uv run apex agent convert skills
 ```
 
 The case-converter turns an OPM Flow or Eclipse deck into an APEX history-matching case that validates. It writes the configuration, a deck template, the observations and the deck's included files into `my_case/`. Nothing is simulated or submitted: run the case with `apex run my_case/config.toml` once you have read it.
@@ -210,9 +210,9 @@ Every value the converter assumed is listed in `my_case/CONVERSION.md`: the boun
 Synthetic cases are created from a description:
 
 ```bash
-apex agent convert create --out box --request "a 30 x 30 x 4 five-spot, 200 mD, monthly for three years"
-apex agent convert create --out store --request "CO2 storage: inject 1 Mt a year for 3 years into a 25 x 25 x 5 brine aquifer"
-apex agent convert observe box   # if you answered no to the truth run
+uv run apex agent convert create --out box --request "a 30 x 30 x 4 five-spot, 200 mD, monthly for three years"
+uv run apex agent convert create --out store --request "CO2 storage: inject 1 Mt a year for 3 years into a 25 x 25 x 5 brine aquifer"
+uv run apex agent convert observe box   # if you answered no to the truth run
 ```
 
 - **The description.** The model turns the request into a case description: a box grid, the wells and their controls, the report steps, a fluid preset, and the statistics of ln PERMX and PORO. The presets are `oil_water` (dead oil and water) and `co2_brine` (CO2 stored in a brine aquifer: OPM Flow's `CO2STORE`, with the CO2 dissolving in the brine, at a given salinity and temperature; CO2 injectors on rate, in sm3/day of CO2, about 1.46 million for 1 Mt a year, and optional brine producers). `co2_brine` runs on OPM Flow only: Eclipse would need E300's compositional `CO2STORE`, which the preset does not write. Code checks it, for example that the wells lie inside the grid. Without a model, the rules give a five-spot: 21 × 21 × 3 cells, four producers and an injector, monthly reports for two years.
@@ -222,8 +222,8 @@ apex agent convert observe box   # if you answered no to the truth run
 PET configurations go both ways, with no model:
 
 ```bash
-apex agent convert from-pet CONFIG.toml apex_case   # as apex pet-import
-apex agent convert to-pet apex_case/config.toml pet_case   # pet.toml, data.csv, var.csv, the runfile, the prior
+uv run apex agent convert from-pet CONFIG.toml apex_case   # as apex pet-import
+uv run apex agent convert to-pet apex_case/config.toml pet_case   # pet.toml, data.csv, var.csv, the runfile, the prior
 ```
 
 An APEX case written for PET reads back to the same APEX case, and PET's own reader accepts it. What PET cannot run as APEX does is refused with the reason, never approximated:
@@ -238,8 +238,8 @@ LM-EnRML and GN-EnRML run in both, but they stop by different rules, so the conv
 ERT cases go both ways too (`apex ert convert` and `apex ert export`, with the `ert` extra):
 
 ```bash
-apex agent convert from ert CASE.ert apex_case
-apex agent convert to ert apex_case/config.toml ert_case
+uv run apex agent convert from ert CASE.ert apex_case
+uv run apex agent convert to ert apex_case/config.toml ert_case
 ```
 
 Each simulator, and PET and ERT, has a converter skill; `apex agent convert skills` lists them with what each can do. A package that adds a simulator adds its skill (entry point `apex.converter_skills`).
@@ -247,9 +247,9 @@ Each simulator, and PET and ERT, has a converter skill; `apex agent convert skil
 ### Giving a case a prior: the geomodeler
 
 ```bash
-apex agent geomodel my_case/config.toml --reference my_case/reference.npz
-apex agent geomodel my_case/config.toml --request "ln PERMX around 5 with a 10-cell range, porosity 0.2 ± 0.03"
-apex agent geomodel my_case/config.toml --data my_case/wells.csv   # estimate from well data
+uv run apex agent geomodel my_case/config.toml --reference my_case/reference.npz
+uv run apex agent geomodel my_case/config.toml --request "ln PERMX around 5 with a 10-cell range, porosity 0.2 ± 0.03"
+uv run apex agent geomodel my_case/config.toml --data my_case/wells.csv   # estimate from well data
 ```
 
 The geomodeler gives a case's state variables a prior. It works on every variable not read from a stored ensemble, and writes the prior into a new configuration beside the old one (`config_prior.toml`).
@@ -303,9 +303,9 @@ monitor = "private"
 Check a finished run and ask what to change, with no model and no spending:
 
 ```bash
-apex agent monitor examples/linear_gaussian/runs/linear_gies --no-llm
-apex agent diagnose examples/linear_gaussian/runs/linear_gies --no-llm
-apex agent report examples/linear_gaussian/runs/linear_gies --no-llm
+uv run apex agent monitor examples/linear_gaussian/runs/linear_gies --no-llm
+uv run apex agent diagnose examples/linear_gaussian/runs/linear_gies --no-llm
+uv run apex agent report examples/linear_gaussian/runs/linear_gies --no-llm
 ```
 
 The monitor prints its findings, status and recommendation. Suppose it reports `stagnation`: the data mismatch stopped moving. The diagnosis then lists causes with recommendations and, where a recommendation is a setting, a validated patch. Copy that patch into a study variant, plan the study with `apex agent plan CASE.toml --goal "..."` and run it with `apex study run`. The report writes a narrative of the result. Once this works, add a model in `[agents.llm]` and repeat without `--no-llm`.

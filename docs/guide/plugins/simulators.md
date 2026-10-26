@@ -135,7 +135,7 @@ Some terms first. The run path is the directory in which ERT runs one member's f
 Instead of writing the `ert` options yourself, you can run:
 
 ```bash
-apex ert history-match my_case.ert
+uv run apex ert history-match my_case.ert
 ```
 
 This history-matches the ERT case with APEX's methods; ERT runs the forward model. APEX takes the fields, observations and steps from the case, and your APEX choices come from `apex.toml` next to the case (or the file you pass as a second argument). Further flags:

@@ -12,7 +12,7 @@ Every one of these 18 items, with its options, as APEX's code defines them. Writ
 Approve a pending submission (then submit it again with its token).
 
 ```bash
-apex approve TOKEN
+uv run apex approve TOKEN
 ```
 
 | option | default | description |
@@ -24,7 +24,7 @@ apex approve TOKEN
 Explore how to split production data for cross validation.
 
 ```bash
-apex data-split CONFIG
+uv run apex data-split CONFIG
 ```
 
 | option | default | description |
@@ -39,7 +39,7 @@ apex data-split CONFIG
 Forget runs whose folder is gone; prune what the service keeps.
 
 ```bash
-apex gc
+uv run apex gc
 ```
 
 | option | default | description |
@@ -55,7 +55,7 @@ apex gc
 Serve APEX's tools to an MCP host (Claude Code, ...); mcp extra, installed by default.
 
 ```bash
-apex mcp
+uv run apex mcp
 ```
 
 | option | default | description |
@@ -71,7 +71,7 @@ apex mcp
 Minimise an objective with one of PET's optimizers (EnOpt, GenOpt, SmcOpt, ...).
 
 ```bash
-apex optimize CONFIG
+uv run apex optimize CONFIG
 ```
 
 | option | default | description |
@@ -85,7 +85,7 @@ apex optimize CONFIG
 Convert a PET history-matching configuration into an APEX case.
 
 ```bash
-apex pet-import PET_CONFIG OUTPUT_DIR
+uv run apex pet-import PET_CONFIG OUTPUT_DIR
 ```
 
 | option | default | description |
@@ -103,7 +103,7 @@ apex pet-import PET_CONFIG OUTPUT_DIR
 List every plugin with its options (for clients: --json).
 
 ```bash
-apex plugins
+uv run apex plugins
 ```
 
 | option | default | description |
@@ -115,7 +115,7 @@ apex plugins
 Forecast ensembles of a history-matching run beyond history.
 
 ```bash
-apex predict CONFIG
+uv run apex predict CONFIG
 ```
 
 | option | default | description |
@@ -127,7 +127,7 @@ apex predict CONFIG
 QA/QC of an iterate: coverage, Mahalanobis scores, Kalman gains, movement (PET).
 
 ```bash
-apex qaqc RUN_DIR
+uv run apex qaqc RUN_DIR
 ```
 
 | option | default | description |
@@ -142,7 +142,7 @@ apex qaqc RUN_DIR
 Print the data mismatch history and performance metrics of a run; optionally write figures.
 
 ```bash
-apex report RUN_DIR
+uv run apex report RUN_DIR
 ```
 
 | option | default | description |
@@ -156,7 +156,7 @@ apex report RUN_DIR
 Continue a stopped or interrupted run from its last checkpoint.
 
 ```bash
-apex resume RUN_DIR
+uv run apex resume RUN_DIR
 ```
 
 | option | default | description |
@@ -169,7 +169,7 @@ apex resume RUN_DIR
 Start a history-matching run.
 
 ```bash
-apex run CONFIG
+uv run apex run CONFIG
 ```
 
 | option | default | description |
@@ -182,7 +182,7 @@ apex run CONFIG
 Print the JSON Schema of a configuration kind (what its TOML file accepts).
 
 ```bash
-apex schema KIND
+uv run apex schema KIND
 ```
 
 
@@ -191,7 +191,7 @@ apex schema KIND
 Ask a running run to stop at its next checkpoint (resume continues it).
 
 ```bash
-apex stop RUN_DIR
+uv run apex stop RUN_DIR
 ```
 
 
@@ -200,7 +200,7 @@ apex stop RUN_DIR
 Run a configuration, or resume a run, in the job service's background.
 
 ```bash
-apex submit CONFIG
+uv run apex submit CONFIG
 ```
 
 | option | default | description |
@@ -223,7 +223,7 @@ apex submit CONFIG
 Summarise runs: every metric at every step (iterates, forecasts, optimization steps).
 
 ```bash
-apex summary PATHS
+uv run apex summary PATHS
 ```
 
 | option | default | description |
@@ -236,7 +236,7 @@ apex summary PATHS
 Validate a configuration and plan its cost; nothing is simulated.
 
 ```bash
-apex validate CONFIG
+uv run apex validate CONFIG
 ```
 
 | option | default | description |
@@ -249,5 +249,5 @@ apex validate CONFIG
 Print the installed APEX version.
 
 ```bash
-apex version
+uv run apex version
 ```

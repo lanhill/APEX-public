@@ -88,7 +88,7 @@ options = { workers = 4, retries = 5, retry_delay_s = 10.0 }
 Start the run:
 
 ```bash
-apex run config.toml
+uv run apex run config.toml
 ```
 
 To keep every default of `serial`, give its name alone:
@@ -111,7 +111,7 @@ options = { workers = 2, retries = 1, timeout_s = 3600.0, ert_executable = "ert"
 `--max-steps` makes `apex run` stop after the given number of analysis steps. This command **starts a new run** and stops it after three steps:
 
 ```bash
-apex run config.toml --max-steps 3
+uv run apex run config.toml --max-steps 3
 ```
 
 Do not repeat this command to carry on. Each run lives in its own folder, and if that folder already holds a run, `apex run` refuses to start and exits with an error. The error tells you your options: resume the run with `apex resume`, or start a new one in another folder (another `[run]` name, or `[run]` `output_dir`, in the configuration), or move the old folder away first. This page does not cover the `[run]` section further.
@@ -119,13 +119,13 @@ Do not repeat this command to carry on. Each run lives in its own folder, and if
 To continue a stopped or interrupted run from its last checkpoint, pass the directory of that run to `apex resume`. Here `runs/my_run` stands for the directory of your own run; use the directory your run actually uses:
 
 ```bash
-apex resume runs/my_run
+uv run apex resume runs/my_run
 ```
 
 `apex resume` also accepts `--max-steps`:
 
 ```bash
-apex resume runs/my_run --max-steps 3
+uv run apex resume runs/my_run --max-steps 3
 ```
 
 The option is described only as stopping after this many analysis steps. Watch the progress output to see where the run stops.
@@ -133,7 +133,7 @@ The option is described only as stopping after this many analysis steps. Watch t
 To stop a run that is still going, open a second terminal and give `apex stop` the directory of that running run. It asks the run to stop at its next checkpoint, so it may not stop at once. `apex resume` continues it later:
 
 ```bash
-apex stop runs/my_run
+uv run apex stop runs/my_run
 ```
 
 Both `apex run` and `apex resume` show progress on standard error: bars on a terminal, timestamped lines otherwise. Add `--no-progress` to switch this off (`--progress` switches it on, which is the default).

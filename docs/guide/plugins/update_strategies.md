@@ -61,13 +61,13 @@ The plugins covered are `adaptive_rows`, `approx`, `ert_adaptive`, `ert_esmda`, 
 List every plugin with its options:
 
 ```bash
-apex plugins
+uv run apex plugins
 ```
 
 For full descriptions as JSON, add `--json`:
 
 ```bash
-apex plugins --json
+uv run apex plugins --json
 ```
 
 ## The strategies at a glance
@@ -129,14 +129,14 @@ The main reasons for a "no":
 6. Run `apex validate` on your configuration. It validates the configuration and plans its cost; nothing is simulated.
 
 ```bash
-apex validate config.toml
+uv run apex validate config.toml
 ```
 
    Add `--json` to get the validation as JSON, or `--root` to set the services root (default: `$APEX_HOME`, else `~/.apex/service`).
 7. Start the run with `apex run`:
 
 ```bash
-apex run config.toml
+uv run apex run config.toml
 ```
 
    `--max-steps N` stops after N analysis steps; you can continue later with `apex resume`. Progress is shown on standard error by default; `--no-progress` turns it off and `--progress` turns it on.
@@ -309,8 +309,8 @@ options = { taper_file = "path/to/your/taper_file", truncation = 0.99 }
 Finally, run `apex plugins` to see the plugin and its options, and `apex validate` on your configuration file to check it without simulating anything:
 
 ```bash
-apex plugins
-apex validate config.toml
+uv run apex plugins
+uv run apex validate config.toml
 ```
 
 ## Pitfalls

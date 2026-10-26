@@ -12,7 +12,7 @@ Every one of these 3 items, with its options, as APEX's code defines them. Writt
 Make (or complete) the frozen copy of a commit; print its folder.
 
 ```bash
-apex code freeze COMMIT
+uv run apex code freeze COMMIT
 ```
 
 | option | default | description |
@@ -24,7 +24,7 @@ apex code freeze COMMIT
 List the frozen copies, and what uses each.
 
 ```bash
-apex code list
+uv run apex code list
 ```
 
 | option | default | description |
@@ -36,7 +36,7 @@ apex code list
 Remove a frozen copy (refused while a job or a process uses it).
 
 ```bash
-apex code remove COMMIT
+uv run apex code remove COMMIT
 ```
 
 | option | default | description |

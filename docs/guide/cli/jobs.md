@@ -34,10 +34,10 @@ Options:
 Examples:
 
 ```bash
-apex jobs list
-apex jobs list --last 5
-apex jobs list --last 0
-apex jobs list --state running --state queued
+uv run apex jobs list
+uv run apex jobs list --last 5
+uv run apex jobs list --last 0
+uv run apex jobs list --state running --state queued
 ```
 
 ### 2. Inspect a job with `apex jobs show`
@@ -55,8 +55,8 @@ Options:
 Examples:
 
 ```bash
-apex jobs show 3f9a
-apex jobs show 3f9a --events 50
+uv run apex jobs show 3f9a
+uv run apex jobs show 3f9a --events 50
 ```
 
 ### 3. Stop a job with `apex jobs stop`
@@ -69,7 +69,7 @@ apex jobs show 3f9a --events 50
 It takes the required argument `job` (an id or its first characters) and the optional `--root`.
 
 ```bash
-apex jobs stop 3f9a
+uv run apex jobs stop 3f9a
 ```
 
 ## Worked example
@@ -79,25 +79,25 @@ You started several jobs and want to stop the one that is still waiting.
 1. Look at the jobs that are queued or running:
 
    ```bash
-   apex jobs list --state queued --state running
+   uv run apex jobs list --state queued --state running
    ```
 
 2. Pick the job from the id column. Say its id starts with `3f9a`. Check its record and recent events:
 
    ```bash
-   apex jobs show 3f9a --events 20
+   uv run apex jobs show 3f9a --events 20
    ```
 
 3. Stop it:
 
    ```bash
-   apex jobs stop 3f9a
+   uv run apex jobs stop 3f9a
    ```
 
 4. Confirm with the list again, or with `show`:
 
    ```bash
-   apex jobs show 3f9a
+   uv run apex jobs show 3f9a
    ```
 
 If the job was queued it is now cancelled. If it was running, it ends when it reaches its next checkpoint, so its state may not change at once.

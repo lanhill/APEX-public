@@ -26,13 +26,13 @@ By the end of this page you will know what the two plugins in the `petro_elastic
 1. List the plugins and their options to see what is available:
 
    ```bash
-   apex plugins
+   uv run apex plugins
    ```
 
    Add `--json` to get the full descriptions as JSON:
 
    ```bash
-   apex plugins --json
+   uv run apex plugins --json
    ```
 2. Select a plugin by adding a `[geophysics.pem]` table to the run configuration, with `name = "standard"` or `name = "soft_sand"`. Put its options in `[geophysics.pem.options]`. AVO data need a petro-elastic model.
 3. Set only the options you want to change. Unlisted options keep their defaults.
@@ -40,7 +40,7 @@ By the end of this page you will know what the two plugins in the `petro_elastic
 5. Check the edited file by starting the run for a single analysis step:
 
    ```bash
-   apex run config.toml --max-steps 1
+   uv run apex run config.toml --max-steps 1
    ```
 
    `--max-steps` stops the run after that many analysis steps, and you can continue later with `apex resume`. Add `--no-progress` if you do not want progress output on standard error. Note that `apex plugins` only lists what each plugin accepts. It does not read your configuration, so it cannot confirm your edits.

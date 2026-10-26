@@ -27,7 +27,7 @@ By the end you will be able to find a run, narrow the list by annotation, and re
 ### 1. List the runs
 
 ```bash
-apex runs list
+uv run apex runs list
 ```
 
 The runs are printed oldest first, so the most recent run is at the end of the output.
@@ -37,7 +37,7 @@ The runs are printed oldest first, so the most recent run is at the end of the o
 If your runs carry annotations, `--annotation` keeps only the runs with a given annotation. Give it a `key=value` pair:
 
 ```bash
-apex runs list --annotation key=value
+uv run apex runs list --annotation key=value
 ```
 
 Replace `key` and `value` with an annotation your runs actually have.
@@ -47,7 +47,7 @@ Replace `key` and `value` with an annotation your runs actually have.
 `apex runs show` takes a required `run` argument: a run id, or its first characters. A short prefix is enough as long as it identifies the run.
 
 ```bash
-apex runs show <run>
+uv run apex runs show <run>
 ```
 
 The summary is printed as JSON.
@@ -57,8 +57,8 @@ The summary is printed as JSON.
 Both commands accept `--root`. It points them at another services root instead of `$APEX_HOME` or `~/.apex/service`:
 
 ```bash
-apex runs list --root /path/to/service
-apex runs show <run> --root /path/to/service
+uv run apex runs list --root /path/to/service
+uv run apex runs show <run> --root /path/to/service
 ```
 
 ## Worked example
@@ -68,7 +68,7 @@ Suppose you want to inspect your most recent run.
 1. List the runs:
 
    ```bash
-   apex runs list
+   uv run apex runs list
    ```
 
    The list is oldest first, so the last entry is the newest. Note its run id.
@@ -76,7 +76,7 @@ Suppose you want to inspect your most recent run.
 2. Show that run, using the id or just its first characters. Here `1a2b3c` stands for the start of your run id:
 
    ```bash
-   apex runs show 1a2b3c
+   uv run apex runs show 1a2b3c
    ```
 
    The command prints the run's summary as JSON.
@@ -84,7 +84,7 @@ Suppose you want to inspect your most recent run.
 3. If you only care about runs with a certain annotation, repeat step 1 with a filter, then show the one you want:
 
    ```bash
-   apex runs list --annotation key=value
+   uv run apex runs list --annotation key=value
    ```
 
 ## Pitfalls

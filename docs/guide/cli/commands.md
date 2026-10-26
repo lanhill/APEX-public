@@ -89,7 +89,7 @@ Lists every plugin with its status and options. Add `--json` (off by default) to
 Prints the JSON Schema of a configuration kind. The optional argument `kind` is one of `history_match`, `prediction` or `study`; the default is `history_match`.
 
 ```bash
-apex schema prediction
+uv run apex schema prediction
 ```
 
 ## Checking, running and controlling a run
@@ -127,8 +127,8 @@ Runs a configuration, or resumes a run, in the background of the job service, so
 - `--root`: the services root.
 
 ```bash
-apex submit case/run.toml --priority low --wait
-apex submit case/run.toml --code live
+uv run apex submit case/run.toml --priority low --wait
+uv run apex submit case/run.toml --code live
 ```
 
 The first command submits the run in `case/run.toml` with low priority and waits for the job to end. The second runs the job with the code as it is now instead of the frozen copy.
@@ -155,9 +155,9 @@ Forecasts the ensembles of a history-matching run beyond history. Do the history
 This page does not list the contents of a prediction configuration. To write one, print what it accepts with `apex schema prediction`; the schema also shows how the file refers to the run to forecast. Save your file (below it is called `case/predict.toml`), check it, then forecast:
 
 ```bash
-apex schema prediction
-apex validate case/predict.toml
-apex predict case/predict.toml
+uv run apex schema prediction
+uv run apex validate case/predict.toml
+uv run apex predict case/predict.toml
 ```
 
 The first command shows what a prediction configuration accepts, the second checks your file and plans its cost, and the third makes the forecast. `apex report` also accepts the directory of a prediction, so you can look at the result with it.
@@ -172,8 +172,8 @@ Minimises an objective with one of PET's optimizers (EnOpt, GenOpt, SmcOpt, ...)
 - `--progress` / `--no-progress`: show or hide progress (default: on).
 
 ```bash
-apex optimize case/optimize.toml --max-iterations 5
-apex optimize --resume path/to/optimization_run
+uv run apex optimize case/optimize.toml --max-iterations 5
+uv run apex optimize --resume path/to/optimization_run
 ```
 
 The first command stops after 5 accepted iterations. The second continues the optimization run in the directory you give; replace the path with the directory of your own optimization run.
@@ -210,7 +210,7 @@ Checks the quality (QA/QC) of an iterate of a history-matching run. The report c
 - `--font-size`: font size of the figures in points. Default: `12.0`.
 
 ```bash
-apex qaqc runs/case_run --damping 0.5 --output runs/case_run/qaqc_damped
+uv run apex qaqc runs/case_run --damping 0.5 --output runs/case_run/qaqc_damped
 ```
 
 This checks the posterior of the run in `runs/case_run` with a damping of `0.5` and writes the report to `runs/case_run/qaqc_damped`. Replace the path with the directory of your own run.
@@ -228,8 +228,8 @@ Explores how to split production data for cross validation. In cross validation 
 - `--font-size`: font size of the figures in points. Default: `12.0`.
 
 ```bash
-apex data-split case/run.toml --max-cv 3 --output case/split --font-size 14
-apex data-split case/run.toml --prior-run runs/prior_forecast --max-cv 3
+uv run apex data-split case/run.toml --max-cv 3 --output case/split --font-size 14
+uv run apex data-split case/run.toml --prior-run runs/prior_forecast --max-cv 3
 ```
 
 The first command explores candidate splits of at most 3 wells for the case in `case/run.toml` and writes results and figures (font size 14) to `case/split`. The second also passes a run with a prior forecast; replace `runs/prior_forecast` with the directory of your own such run.
@@ -249,7 +249,7 @@ Converts a PET history-matching configuration into an APEX case.
 - `--avo-angles-checked` / `--no-avo-angles-checked`: import multi-angle AVO data that is known to hold each angle's own traces. SimulatorWrap's data does not: it gives every angle the last one's traces. Default: off.
 
 ```bash
-apex pet-import pet/config.toml apex_case --seed 7
+uv run apex pet-import pet/config.toml apex_case --seed 7
 ```
 
 This reads `pet/config.toml`, fixes the seed at 7 and writes the APEX case to `apex_case`. The simulator stays `opm_flow`. Replace the paths with your own. If your PET configuration samples a stored prior, add `--prior` with the path to that `.npz` file.
@@ -290,9 +290,9 @@ The token route works in three steps:
 3. Submit the same configuration again, giving the token to `--approval-token`.
 
 ```bash
-apex submit case/run.toml
-apex approve TOKEN
-apex submit case/run.toml --approval-token TOKEN
+uv run apex submit case/run.toml
+uv run apex approve TOKEN
+uv run apex submit case/run.toml --approval-token TOKEN
 ```
 
 Replace `TOKEN` with the token of the pending approval for your submission and the path with your own configuration.
@@ -308,7 +308,7 @@ Forgets runs whose folder is gone, and prunes what the service keeps. The switch
 - `--dry-run` / `--no-dry-run`: with `--code`, list what would go and remove nothing. Default: off.
 
 ```bash
-apex gc --code --dry-run
+uv run apex gc --code --dry-run
 ```
 
 This lists the frozen copies the clean-up would remove, without removing anything. Run it first, then repeat without `--dry-run` if the list is what you expect.
@@ -339,7 +339,7 @@ Serves APEX's tools to an MCP host, that is, a client such as Claude Code that c
 With stdio (the default), the host starts the command itself and talks to it through standard input and output, so no address is needed. With `--http`, the command runs as a server that listens at `HOST:PORT`, and a host connects to that address. How to register either kind of server is set in the host's own settings.
 
 ```bash
-apex mcp --http 127.0.0.1:8770 --client myclient --budget-runs 10
+uv run apex mcp --http 127.0.0.1:8770 --client myclient --budget-runs 10
 ```
 
 This serves over HTTP at `127.0.0.1:8770` (a port of its own: 8765 is the service's in the README, 8000 `mkdocs serve`'s), names the client `myclient` for quotas and the call log, and lets the session submit at most 10 simulator runs. Without `--http`, the command serves over stdio.
@@ -347,12 +347,12 @@ This serves over HTTP at `127.0.0.1:8770` (a port of its own: 8765 is the servic
 ## Worked example: a run from start to finish
 
 ```bash
-apex validate case/run.toml
-apex run case/run.toml --max-steps 2
-apex resume runs/case_run
-apex report runs/case_run --plots
-apex qaqc runs/case_run
-apex summary runs --output summary.md
+uv run apex validate case/run.toml
+uv run apex run case/run.toml --max-steps 2
+uv run apex resume runs/case_run
+uv run apex report runs/case_run --plots
+uv run apex qaqc runs/case_run
+uv run apex summary runs --output summary.md
 ```
 
 1. `apex validate` checks the configuration and plans its cost without simulating anything.

@@ -12,7 +12,7 @@ Every one of these 3 items, with its options, as APEX's code defines them. Writt
 Run one tool call (e.g. from an agent loop over a local model); print its result.
 
 ```bash
-apex tools call NAME
+uv run apex tools call NAME
 ```
 
 | option | default | description |
@@ -27,7 +27,7 @@ apex tools call NAME
 Print the tools as function-calling definitions (e.g. for Ollama or vLLM).
 
 ```bash
-apex tools export
+uv run apex tools export
 ```
 
 | option | default | description |
@@ -39,5 +39,5 @@ apex tools export
 List the tools, marking those that spend compute (they need an approval token).
 
 ```bash
-apex tools list
+uv run apex tools list
 ```

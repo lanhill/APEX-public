@@ -27,9 +27,9 @@ By the end of this page you can connect a model to APEX's tools, check that the 
 ## Check the tools locally
 
 ```bash
-apex tools list                          # all tools; those that spend compute need an approval token
-apex tools export --format openai        # or anthropic, json-schema: function-calling definitions
-apex tools call validate --json '{"config_file": "/path/run.toml"}' --model glm-4.6
+uv run apex tools list                          # all tools; those that spend compute need an approval token
+uv run apex tools export --format openai        # or anthropic, json-schema: function-calling definitions
+uv run apex tools call validate --json '{"config_file": "/path/run.toml"}' --model glm-4.6
 ```
 
 - `apex tools list` prints the tools. If it does, the `apex` command and its tool set work. It does not test a host connection.
@@ -102,7 +102,7 @@ To confirm that Claude Code has picked up the server, ask the model to call `lis
 `apex mcp --http HOST:PORT` serves Streamable HTTP. Every request needs the service's API token, the one `apex service token` prints (the same as the REST API's); a request without it gets `401`:
 
 ```bash
-apex mcp --http 127.0.0.1:8770 --client planner --model kimi-k2
+uv run apex mcp --http 127.0.0.1:8770 --client planner --model kimi-k2
 # the host connects to http://127.0.0.1:8770/mcp with the header
 #   Authorization: Bearer <the output of `apex service token`>
 ```

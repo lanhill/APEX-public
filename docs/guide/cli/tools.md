@@ -29,7 +29,7 @@ By the end of this lesson you will be able to:
 ### 1. List the tools
 
 ```bash
-apex tools list
+uv run apex tools list
 ```
 
 `apex tools list` takes no options. It prints the tools and marks those that spend compute. A tool marked this way needs an approval token before it will run, so check the marks before you build a loop around a tool.
@@ -39,7 +39,7 @@ Note the exact tool names in the output. You will pass one of them to `apex tool
 ### 2. Export the definitions for your model
 
 ```bash
-apex tools export
+uv run apex tools export
 ```
 
 `apex tools export` prints the tools as function-calling definitions. The `--format` option picks the shape:
@@ -53,7 +53,7 @@ apex tools export
 For example:
 
 ```bash
-apex tools export --format anthropic
+uv run apex tools export --format anthropic
 ```
 
 Give the printed definitions to your model server so the model knows which tools it can request.
@@ -61,7 +61,7 @@ Give the printed definitions to your model server so the model knows which tools
 ### 3. Run one tool call
 
 ```bash
-apex tools call <name>
+uv run apex tools call <name>
 ```
 
 `apex tools call` runs a single tool call and prints its result. This is the command an agent loop uses when the model asks for a tool. Files the call names, and the files their configurations name, must lie in the workspace's roots (by default `<root>/configs`) or in a folder listed under `[tools] roots` in `service.toml`; add your cases' folder there to use them.
@@ -82,13 +82,13 @@ Suppose `apex tools list` showed a tool called `my_tool` that takes one argument
 First, export the definitions for an OpenAI-compatible server (the default format):
 
 ```bash
-apex tools export --format openai
+uv run apex tools export --format openai
 ```
 
 Your model replies that it wants to call `my_tool` with `query` set to `hello`. Your loop then runs:
 
 ```bash
-apex tools call my_tool --json '{"query": "hello"}' --client my-agent --model my-local-model
+uv run apex tools call my_tool --json '{"query": "hello"}' --client my-agent --model my-local-model
 ```
 
 The result is printed, and you feed it back to the model. Because you passed `--client` and `--model`, the call is logged under those names, and quotas apply to the `my-agent` client.
@@ -96,7 +96,7 @@ The result is printed, and you feed it back to the model. Because you passed `--
 If the tool needs no arguments, leave `--json` out. It defaults to `{}`:
 
 ```bash
-apex tools call my_tool
+uv run apex tools call my_tool
 ```
 
 ## Pitfalls

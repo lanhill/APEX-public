@@ -32,20 +32,20 @@ The **services root** keeps everything about the jobs. It is `$APEX_HOME`, by de
 `apex service start` runs one scheduler for the root. It starts what fits, resumes jobs whose worker died (up to `max_retries`), and sends notifications. Clients only queue work. Stopping the service does not stop running jobs.
 
 ```bash
-apex service start            # or: --root DIR; --http HOST:PORT also serves the REST API (api.md)
-apex service status           # running?, and the jobs by state
-apex service stop
-apex service reindex          # rebuild the run catalogue from the run directories
+uv run apex service start            # or: --root DIR; --http HOST:PORT also serves the REST API (api.md)
+uv run apex service status           # running?, and the jobs by state
+uv run apex service stop
+uv run apex service reindex          # rebuild the run catalogue from the run directories
 ```
 
 `stop` waits up to 30 s (change it with `--timeout`). If the service is still stopping by then, it says so and exits with code 2 (not 1, which is an error). A script can then wait longer and check with `apex service status`:
 
 ```bash
-apex service stop --timeout 30
+uv run apex service stop --timeout 30
 if [ $? -eq 2 ]; then
-  apex service stop --timeout 120     # try again with a longer wait
+  uv run apex service stop --timeout 120     # try again with a longer wait
 fi
-apex service status                   # confirm it has stopped
+uv run apex service status                   # confirm it has stopped
 ```
 
 ## Submitting from the command line
@@ -53,11 +53,11 @@ apex service status                   # confirm it has stopped
 `apex submit` queues one configuration: a history-matching run, a prediction or an optimization. It tells which from the file's sections; `--kind` settles a file that has more than one. The job goes through the same queue, pools, approval and notifications as a study or the REST API. An identical run is reused. The run's folder is the one `apex run` (or `apex optimize`) would use.
 
 ```bash
-apex submit CONFIG.toml [--max-steps N] [--wait]     # prints the job id and the run's folder
-apex submit --resume RUN_DIR                          # continue a stopped run, even one started with apex run
-apex jobs list [--state running] [--last 20]          # id, kind, state, code, folder
-apex jobs show JOB                                    # the record and its last events (a prefix of the id will do)
-apex jobs stop JOB                                    # queued: cancelled; running: stops at the next checkpoint
+uv run apex submit CONFIG.toml [--max-steps N] [--wait]     # prints the job id and the run's folder
+uv run apex submit --resume RUN_DIR                          # continue a stopped run, even one started with apex run
+uv run apex jobs list [--state running] [--last 20]          # id, kind, state, code, folder
+uv run apex jobs show JOB                                    # the record and its last events (a prefix of the id will do)
+uv run apex jobs stop JOB                                    # queued: cancelled; running: stops at the next checkpoint
 ```
 
 Large submissions ask for approval, as `apex study run` does (`--yes`, or `--approval-token`). By default a job submitted from the command line runs **frozen code** (next section). `--code live` runs the checkout instead.
@@ -96,9 +96,9 @@ How approval happens:
 A **grant** approves an experiment's spending ahead. It is for one client and one experiment (the submission's `experiment` annotation), with a total budget of simulator runs and an expiry.
 
 ```bash
-apex grant create planner-x exp-042 --max-simulator-runs 60000 --expires 7d   # 7d, 12h or 30m; at most 30d
-apex grant list [--all]
-apex grant revoke ID
+uv run apex grant create planner-x exp-042 --max-simulator-runs 60000 --expires 7d   # 7d, 12h or 30m; at most 30d
+uv run apex grant list [--all]
+uv run apex grant revoke ID
 ```
 
 Walkthrough:
@@ -160,10 +160,10 @@ A job can instead be **pinned** to a commit. It then runs from a **frozen copy**
 - A copy gets the extras installed where APEX runs (`[jobs] code_extras` to choose), and its worker runs in the copy's environment, programs such as `ert` included.
 
 ```bash
-apex code freeze [COMMIT]        # make (or complete) a commit's copy; prints its folder
-apex code list                   # the copies, and the jobs or processes using each
-apex code remove COMMIT          # refused while a job or a process uses it
-apex gc --code [--dry-run]       # remove copies not pinned for [jobs] keep_code_days, and unused
+uv run apex code freeze [COMMIT]        # make (or complete) a commit's copy; prints its folder
+uv run apex code list                   # the copies, and the jobs or processes using each
+uv run apex code remove COMMIT          # refused while a job or a process uses it
+uv run apex gc --code [--dry-run]       # remove copies not pinned for [jobs] keep_code_days, and unused
 ```
 
 The service also removes unused copies daily: those no queued or running job pins and no process runs, last pinned more than `keep_code_days` (2) ago. The newest of `master` is always kept. Only copies APEX made are removed, and never one holding files git does not know; a copy you made by hand goes by hand. A resume pinned to a removed commit makes its copy again (a few minutes). A copy takes about 2 GB, most of it the environment.
@@ -209,9 +209,9 @@ max_failed_fraction = 0.2
 ## The catalogue
 
 ```bash
-apex runs list [--annotation study=NAME]
-apex runs show RUN_ID            # its summary, as JSON
-apex gc                          # forget entries whose directory was deleted (never deletes runs)
+uv run apex runs list [--annotation study=NAME]
+uv run apex runs show RUN_ID            # its summary, as JSON
+uv run apex gc                          # forget entries whose directory was deleted (never deletes runs)
 ```
 
 ## Pitfalls

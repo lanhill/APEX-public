@@ -159,7 +159,7 @@ inflation = [2.0, 2.0]
 Start the run, stopping after one analysis step:
 
 ```bash
-apex run config.toml --max-steps 1
+uv run apex run config.toml --max-steps 1
 ```
 
 Progress goes to standard error: bars on a terminal, timestamped lines otherwise. Add `--no-progress` to hide it (`--progress` is the default).
@@ -167,19 +167,19 @@ Progress goes to standard error: bars on a terminal, timestamped lines otherwise
 A run lives in its own run directory. The `[run]` section of your configuration sets it (the `name` or `output_dir`). Because of `--max-steps`, this run has stopped with work left. Continue it from its last checkpoint by giving `apex resume` that directory:
 
 ```bash
-apex resume RUN_DIR
+uv run apex resume RUN_DIR
 ```
 
 Replace `RUN_DIR` with your run directory. `apex resume` accepts the same `--max-steps` and `--progress`/`--no-progress` flags. To ask a run that is still going to stop at its next checkpoint, use:
 
 ```bash
-apex stop RUN_DIR
+uv run apex stop RUN_DIR
 ```
 
 When a run has finished or stopped, print its data mismatch history and performance metrics, and optionally write figures (PNG and PDF):
 
 ```bash
-apex report RUN_DIR --plots
+uv run apex report RUN_DIR --plots
 ```
 
 Figures go to `RUN_DIR/report` unless you pass `--output`. `--font-size` sets the font size in points (default 12).

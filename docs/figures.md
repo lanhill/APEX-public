@@ -17,7 +17,7 @@ By the end of this page you can draw a history-matching run's result figures wit
 ## Step 1: draw the classic set
 
 ```bash
-apex agent plot RUN_DIR --preset brugge_classic
+uv run apex agent plot RUN_DIR --preset brugge_classic
 ```
 
 The figures go to `RUN_DIR/report/plots/`, one figure per file, as PNG and PDF. The run's page in the web UI shows them under *Figures*. `--output DIR` writes them elsewhere. `summary.json` lists every figure drawn, and why any was skipped.
@@ -46,7 +46,7 @@ A figure the run cannot give is skipped and reported, with the reason, in `summa
 ## Step 2: ask in words
 
 ```bash
-apex agent plot RUN_DIR --request "the RMSE box plots and the layer maps"
+uv run apex agent plot RUN_DIR --request "the RMSE box plots and the layer maps"
 ```
 
 The agent reads what the run holds (its metrics and their labels, the variables with grids, the data types, whether it saved residuals) and every figure plugin's options. It then chooses figures and their options for the request.

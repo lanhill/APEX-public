@@ -183,13 +183,16 @@ def _answered(http: TestClient, headers: dict[str, str], body: dict[str, str]) -
     chat = http.post("/v1/chats", headers=headers, json={}).json()
     sent = http.post(f"/v1/chats/{chat['id']}/messages", headers=headers, json=body)
     assert sent.status_code == 202, sent.text
-    for _ in range(200):
+    # 60 s: a stub answers at once, but under a full parallel suite the answering thread
+    # can wait long for a CPU (release tester H13: 10 s ran out once under -n 36).
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
         full = http.get(f"/v1/chats/{chat['id']}", headers=headers).json()
         if not full["busy"] and len(full["messages"]) == 2:
             reply: dict[str, Any] = full["messages"][1]
             return reply
         time.sleep(0.05)
-    raise AssertionError("no answer")
+    raise AssertionError("no answer within 60 s")
 
 
 def test_the_chooser_over_http(tmp_path: Path) -> None:

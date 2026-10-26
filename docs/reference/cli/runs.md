@@ -12,7 +12,7 @@ Every one of these 2 items, with its options, as APEX's code defines them. Writt
 List the catalogued runs (oldest first).
 
 ```bash
-apex runs list
+uv run apex runs list
 ```
 
 | option | default | description |
@@ -25,7 +25,7 @@ apex runs list
 Show a run's summary, as JSON.
 
 ```bash
-apex runs show RUN
+uv run apex runs show RUN
 ```
 
 | option | default | description |

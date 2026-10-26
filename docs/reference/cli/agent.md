@@ -12,7 +12,7 @@ Every one of these 17 items, with its options, as APEX's code defines them. Writ
 Ask APEX's agent a question; it may use APEX's tools to answer.
 
 ```bash
-apex agent ask QUESTION
+uv run apex agent ask QUESTION
 ```
 
 | option | default | description |
@@ -32,7 +32,7 @@ apex agent ask QUESTION
 Create a synthetic case: deck, truth, prior, and observations from one truth run.
 
 ```bash
-apex agent convert create
+uv run apex agent convert create
 ```
 
 | option | default | description |
@@ -56,7 +56,7 @@ apex agent convert create
 Translate a case from a skill's format; nothing runs.
 
 ```bash
-apex agent convert from SKILL SOURCE OUTPUT
+uv run apex agent convert from SKILL SOURCE OUTPUT
 ```
 
 | option | default | description |
@@ -68,7 +68,7 @@ apex agent convert from SKILL SOURCE OUTPUT
 Write a PET case as an APEX case (as apex pet-import); nothing runs.
 
 ```bash
-apex agent convert from-pet PET_CONFIG OUTPUT
+uv run apex agent convert from-pet PET_CONFIG OUTPUT
 ```
 
 | option | default | description |
@@ -80,7 +80,7 @@ apex agent convert from-pet PET_CONFIG OUTPUT
 Convert a case into an APEX history-matching case that validates; nothing runs.
 
 ```bash
-apex agent convert import CASE
+uv run apex agent convert import CASE
 ```
 
 | option | default | description |
@@ -104,7 +104,7 @@ apex agent convert import CASE
 Run a created case's truth once, and write its observations.
 
 ```bash
-apex agent convert observe CASE
+uv run apex agent convert observe CASE
 ```
 
 | option | default | description |
@@ -117,7 +117,7 @@ apex agent convert observe CASE
 List the converter skills and what they can do.
 
 ```bash
-apex agent convert skills
+uv run apex agent convert skills
 ```
 
 
@@ -126,7 +126,7 @@ apex agent convert skills
 Translate a case into a skill's format (see `apex agent convert skills`); nothing runs.
 
 ```bash
-apex agent convert to SKILL SOURCE OUTPUT
+uv run apex agent convert to SKILL SOURCE OUTPUT
 ```
 
 | option | default | description |
@@ -138,7 +138,7 @@ apex agent convert to SKILL SOURCE OUTPUT
 Write an APEX case as a PET case (pet.toml, data, runfile, prior); nothing runs.
 
 ```bash
-apex agent convert to-pet CONFIG OUTPUT
+uv run apex agent convert to-pet CONFIG OUTPUT
 ```
 
 | option | default | description |
@@ -150,7 +150,7 @@ apex agent convert to-pet CONFIG OUTPUT
 Explain what went wrong in a run and what to change (advisory).
 
 ```bash
-apex agent diagnose TARGET
+uv run apex agent diagnose TARGET
 ```
 
 | option | default | description |
@@ -169,7 +169,7 @@ apex agent diagnose TARGET
 Draft an optimization of a history-matched case's forecast (no model).
 
 ```bash
-apex agent draft-optimization CASE
+uv run apex agent draft-optimization CASE
 ```
 
 | option | default | description |
@@ -197,7 +197,7 @@ apex agent draft-optimization CASE
 Give a case's state variables a prior, checked on a drawn sample.
 
 ```bash
-apex agent geomodel CONFIG
+uv run apex agent geomodel CONFIG
 ```
 
 | option | default | description |
@@ -219,7 +219,7 @@ apex agent geomodel CONFIG
 Check a run's health: rules on its facts, and a model's judgement.
 
 ```bash
-apex agent monitor TARGET
+uv run apex agent monitor TARGET
 ```
 
 | option | default | description |
@@ -241,7 +241,7 @@ apex agent monitor TARGET
 Propose a study for a case and a goal; submit it only if you confirm.
 
 ```bash
-apex agent plan CONFIG
+uv run apex agent plan CONFIG
 ```
 
 | option | default | description |
@@ -265,7 +265,7 @@ apex agent plan CONFIG
 Draw a run's result figures: a preset, or what --request asks for.
 
 ```bash
-apex agent plot TARGET
+uv run apex agent plot TARGET
 ```
 
 | option | default | description |
@@ -287,7 +287,7 @@ apex agent plot TARGET
 List the LLM providers.
 
 ```bash
-apex agent providers
+uv run apex agent providers
 ```
 
 
@@ -296,7 +296,7 @@ apex agent providers
 Write a narrative report of a run or a study.
 
 ```bash
-apex agent report TARGET
+uv run apex agent report TARGET
 ```
 
 | option | default | description |

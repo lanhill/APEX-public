@@ -12,8 +12,8 @@ Build it once (Node 22.12 or later; Node 18.18 still builds it, with npm's engin
 
 ```bash
 npm --prefix ui ci && npm --prefix ui run build   # writes ui/dist (not committed)
-apex service start --http 127.0.0.1:8765
-apex service token --ui --owner                   # your web-UI token, to paste into the sign-in page
+uv run apex service start --http 127.0.0.1:8765
+uv run apex service token --ui --owner                   # your web-UI token, to paste into the sign-in page
 ```
 
 Open `http://127.0.0.1:8765/ui/`. From another machine, tunnel the port (`ssh -L 8765:127.0.0.1:8765 host`). The token is kept for the browser session only. Sign in with the web-UI token (`--ui --owner`), not the API token that `apex service token` alone prints, which the web UI refuses. The web-UI token expires after `[ui] token_days` (7); `apex service token --ui --owner --rotate` issues a new one.
@@ -88,9 +88,9 @@ If the port is busy on the laptop, forward another one, e.g. `-L 9000:127.0.0.1:
 Your token (`apex service token`) sees everything. To share the UI, give each guest a **token of their own**:
 
 ```bash
-apex service token --ui --guest alice      # created on first use; --rotate replaces it
-apex service token --list-guests
-apex service token --ui --guest alice --revoke   # refused at once
+uv run apex service token --ui --guest alice      # created on first use; --rotate replaces it
+uv run apex service token --list-guests
+uv run apex service token --ui --guest alice --revoke   # refused at once
 ```
 
 (`apex service token --ui` alone is the guest `guest`.)

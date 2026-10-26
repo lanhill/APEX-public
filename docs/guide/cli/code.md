@@ -31,7 +31,7 @@ A frozen copy is a snapshot of a commit, kept in its own folder, so that work st
 ### 1. Freeze a commit: `apex code freeze`
 
 ```bash
-apex code freeze [commit] [--root ROOT]
+uv run apex code freeze [commit] [--root ROOT]
 ```
 
 - `commit` is optional. It can be a commit, a branch or a tag. The default is `HEAD`.
@@ -42,15 +42,15 @@ The command makes the frozen copy of that commit and prints the copy's folder. T
 A copy can be left unfinished, for example if an earlier `freeze` was interrupted. You do not need to do anything special: run the same `apex code freeze` command again and it completes the copy, then prints the folder.
 
 ```bash
-apex code freeze            # freezes HEAD
-apex code freeze main       # freezes the tip of a branch
-apex code freeze v1.0       # freezes a tag
+uv run apex code freeze            # freezes HEAD
+uv run apex code freeze main       # freezes the tip of a branch
+uv run apex code freeze v1.0       # freezes a tag
 ```
 
 ### 2. List the frozen copies: `apex code list`
 
 ```bash
-apex code list [--root ROOT]
+uv run apex code list [--root ROOT]
 ```
 
 This lists every frozen copy and shows what uses each one. Each copy is identified by its 12-character commit, a short form of the commit's ID. This is the value you give to `apex code remove`. Read the listing like this:
@@ -63,7 +63,7 @@ Use the listing before removing anything.
 ### 3. Remove a frozen copy: `apex code remove`
 
 ```bash
-apex code remove COMMIT [--root ROOT]
+uv run apex code remove COMMIT [--root ROOT]
 ```
 
 - `COMMIT` is required. It is the copy's 12-character commit, as shown by `apex code list`.
@@ -76,19 +76,19 @@ The command refuses to remove a copy while a job or a process uses it. In that c
 Freeze the current commit. The command prints the copy's folder; note it:
 
 ```bash
-apex code freeze
+uv run apex code freeze
 ```
 
 List the copies to check that yours is there and to see what uses it:
 
 ```bash
-apex code list
+uv run apex code list
 ```
 
 Find your copy in the listing and copy its 12-character commit. If the listing shows that a job or a process still uses it, wait until that work has finished and list again. When nothing uses the copy any more, remove it (the value below is only an illustration; use one from your own listing):
 
 ```bash
-apex code remove 0123456789ab
+uv run apex code remove 0123456789ab
 ```
 
 If the copy is still in use, the command refuses and the copy stays. If it succeeds, run `apex code list` again and the copy is no longer shown.
@@ -96,9 +96,9 @@ If the copy is still in use, the command refuses and the copy stays. If it succe
 If you keep your services somewhere other than the default, pass the same `--root` to every command:
 
 ```bash
-apex code freeze main --root /data/apex-services
-apex code list --root /data/apex-services
-apex code remove 0123456789ab --root /data/apex-services
+uv run apex code freeze main --root /data/apex-services
+uv run apex code list --root /data/apex-services
+uv run apex code remove 0123456789ab --root /data/apex-services
 ```
 
 ## Pitfalls

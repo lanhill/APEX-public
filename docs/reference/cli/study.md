@@ -12,7 +12,7 @@ Every one of these 3 items, with its options, as APEX's code defines them. Writt
 Compare a study's variants at each run's posterior.
 
 ```bash
-apex study compare NAME
+uv run apex study compare NAME
 ```
 
 | option | default | description |
@@ -26,7 +26,7 @@ apex study compare NAME
 Validate and submit a study; its runs go on in the background.
 
 ```bash
-apex study run STUDY
+uv run apex study run STUDY
 ```
 
 | option | default | description |
@@ -44,7 +44,7 @@ apex study run STUDY
 Show a study's state and every run's.
 
 ```bash
-apex study status NAME
+uv run apex study status NAME
 ```
 
 | option | default | description |

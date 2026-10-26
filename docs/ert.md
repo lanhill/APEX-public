@@ -32,7 +32,7 @@ ERT finds APEX's plugin by itself (entry point `ert`). The plugin adds the forwa
 ## Step 1: Export a case
 
 ```bash
-apex ert export CONFIG.toml OUT_DIR [--ert-defaults] [--overwrite]
+uv run apex ert export CONFIG.toml OUT_DIR [--ert-defaults] [--overwrite]
 ```
 
 `OUT_DIR` then holds a self-contained ERT case:
@@ -66,7 +66,7 @@ OPM Flow cases of grid fields, and also:
 ## Step 2: Run ERT
 
 ```bash
-apex ert run OUT_DIR --mode es_mda --weights 4,4,4,4   # or ensemble_smoother, ensemble_experiment, test_run
+uv run apex ert run OUT_DIR --mode es_mda --weights 4,4,4,4   # or ensemble_smoother, ensemble_experiment, test_run
 ```
 
 This runs `ert <mode> case.ert` in `OUT_DIR`, with APEX's environment first on `PATH`. ERT users can run the same command themselves.
@@ -78,8 +78,8 @@ Results are in ERT's `storage/` and in `runs/realization-<i>/iter-<k>/`, where `
 Run the import first; the report needs the run directory the import creates.
 
 ```bash
-apex ert import OUT_DIR [RUN_DIR]     # default RUN_DIR: OUT_DIR/apex_run
-apex report OUT_DIR/apex_run          # also: apex summary, comparisons, agents
+uv run apex ert import OUT_DIR [RUN_DIR]     # default RUN_DIR: OUT_DIR/apex_run
+uv run apex report OUT_DIR/apex_run          # also: apex summary, comparisons, agents
 ```
 
 The import replays ERT's iterations through APEX's own workflow. Each iterate's parameters are forecast by a stand-in simulator that returns the summary ERT simulated for exactly those parameters. The run directory then looks like an APEX run's: data mismatch, performance metrics, the held-out data's scores, `summary.json`, and `ert_import.json` (`source = "ert"`). A realization for which ERT has no summary fails in the replay too.
@@ -117,8 +117,8 @@ LOAD_WORKFLOW apex_history_match APEX_HISTORY_MATCH
 Then run it from ERT, or from APEX:
 
 ```bash
-ert workflow APEX_HISTORY_MATCH case.ert
-apex ert history-match case.ert [apex.toml] [--max-steps N]
+uv run ert workflow APEX_HISTORY_MATCH case.ert
+uv run apex ert history-match case.ert [apex.toml] [--max-steps N]
 ```
 
 `--max-steps N` stops after N analysis steps and prints `stopped (resume: run the same command again)`. To continue, run the same command again (with or without `--max-steps`): the run in `apex_runs/<name>/` is continued from its last checkpoint, not started anew. `ert workflow APEX_HISTORY_MATCH case.ert` continues it the same way.
@@ -191,8 +191,8 @@ The configuration APEX builds, and its inputs, are in `apex_runs/<name>.inputs/`
 ## An ERT case as a native APEX case
 
 ```bash
-apex ert convert case.ert native/ [--method esmda]
-apex run native/config.toml
+uv run apex ert convert case.ert native/ [--method esmda]
+uv run apex run native/config.toml
 ```
 
 For a case whose forward model is one step (`FLOW`, `ECLIPSE100` or `ECLIPSE300`) on a `DATA_FILE`, this writes an APEX case that runs on `opm_flow` or `eclipse` without ERT. The `DATA_FILE` becomes `model/deck.mako`, the `FIELD`s and `GEN_KW` groups become the state, and summary observations become APEX's CSV. Templates ERT writes but the deck does not include are listed in `convert.json`.
@@ -226,7 +226,7 @@ Limits:
 For one case there is a shortcut:
 
 ```bash
-apex ert compare config.toml --weights 4,4,4,4 --replicates 3 [--apex-method gies] [--yes] [--wait]
+uv run apex ert compare config.toml --weights 4,4,4,4 --replicates 3 [--apex-method gies] [--yes] [--wait]
 ```
 
 It builds a study that pits the case's own APEX method (or `--apex-method`) against ERT's run model, with `--replicates 3` giving three replicates of each. `--yes` submits the study without asking, and `--wait` makes the command wait for it to finish. Compare the results with `apex study compare <name>_apex_vs_ert`.

@@ -85,7 +85,7 @@ Three differences matter in practice:
 This page lists names, types and defaults. For the full description of every option of every plugin, run:
 
 ```bash
-apex plugins --json
+uv run apex plugins --json
 ```
 
 `--json` prints the full descriptions as JSON (without it you get the list of plugins with their options). The safe approach is to keep the defaults and change one option at a time, comparing runs, when you have a reason to.
@@ -99,7 +99,7 @@ apex plugins --json
 5. Start the run:
 
    ```bash
-   apex run run.toml
+   uv run apex run run.toml
    ```
 
    Progress is shown on standard error: bars on a terminal, timestamped lines otherwise. `--no-progress` turns it off (`--progress` is the default). Use `--max-steps N` to stop after `N` analysis steps; continue later with `apex resume`. To end a run at its next checkpoint, use `apex stop <run_dir>`, where `run_dir` is the directory of the running run.

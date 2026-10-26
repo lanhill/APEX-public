@@ -45,13 +45,13 @@ The plugin accepts only the options below. Any other option name is rejected.
 The classic set with every default:
 
 ```bash
-apex agent plot RUN_DIR --preset brugge_classic
+uv run apex agent plot RUN_DIR --preset brugge_classic
 ```
 
 With `normalized` and `model_change` switched on:
 
 ```bash
-apex agent plot RUN_DIR --preset brugge_classic --with normalized --with model_change
+uv run apex agent plot RUN_DIR --preset brugge_classic --with normalized --with model_change
 ```
 
 Through REST, the same: `POST /v1/agents/plot` with `{"run": "RUN_ID", "preset": "brugge_classic", "preset_options": {"normalized": true, "model_change": true}}`, where `RUN_ID` is the run's id from `GET /v1/runs` (not its folder).

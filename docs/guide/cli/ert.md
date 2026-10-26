@@ -44,7 +44,7 @@ The `apex ert` commands connect APEX to ERT. After this lesson you will be able 
 ### 1. Export an APEX configuration to ERT
 
 ```bash
-apex ert export CONFIG OUT_DIR
+uv run apex ert export CONFIG OUT_DIR
 ```
 
 - `CONFIG` is the APEX run configuration (TOML). `OUT_DIR` is the folder for the ERT case.
@@ -54,7 +54,7 @@ apex ert export CONFIG OUT_DIR
 ### 2. Run ERT on the exported case
 
 ```bash
-apex ert run CASE_DIR
+uv run apex ert run CASE_DIR
 ```
 
 - `CASE_DIR` is a folder written by `apex ert export`.
@@ -65,7 +65,7 @@ apex ert run CASE_DIR
 ### 3. Import ERT's iterations into APEX
 
 ```bash
-apex ert import CASE_DIR [RUN_DIR]
+uv run apex ert import CASE_DIR [RUN_DIR]
 ```
 
 - `CASE_DIR` is an exported case that ERT has run.
@@ -74,7 +74,7 @@ apex ert import CASE_DIR [RUN_DIR]
 ### 4. History-match an ERT case with APEX's methods
 
 ```bash
-apex ert history-match CASE [APEX_TOML]
+uv run apex ert history-match CASE [APEX_TOML]
 ```
 
 - `CASE` is an ERT case (`.ert`): fields, observations, steps.
@@ -87,7 +87,7 @@ apex ert history-match CASE [APEX_TOML]
 ### 5. Convert an ERT case to a native APEX case
 
 ```bash
-apex ert convert CASE OUT_DIR
+uv run apex ert convert CASE OUT_DIR
 ```
 
 - `CASE` is an ERT case (`.ert`). `OUT_DIR` is the folder for the native APEX case.
@@ -97,7 +97,7 @@ apex ert convert CASE OUT_DIR
 ### 6. Compare APEX with ERT over seeds
 
 ```bash
-apex ert compare CONFIG
+uv run apex ert compare CONFIG
 ```
 
 - `CONFIG` is an APEX history-matching configuration.
@@ -116,31 +116,31 @@ You have an APEX configuration `history_match.toml` and want ERT to run it, then
 1. Export the case. Replace the file and folder names with your own:
 
    ```bash
-   apex ert export history_match.toml ert_case
+   uv run apex ert export history_match.toml ert_case
    ```
 
 2. Check what ERT would do, without running it:
 
    ```bash
-   apex ert run ert_case --mode es_mda --weights 4,4,4,4 --dry-run
+   uv run apex ert run ert_case --mode es_mda --weights 4,4,4,4 --dry-run
    ```
 
 3. Run it for real:
 
    ```bash
-   apex ert run ert_case --mode es_mda --weights 4,4,4,4
+   uv run apex ert run ert_case --mode es_mda --weights 4,4,4,4
    ```
 
 4. Replay ERT's iterations into APEX. With no `RUN_DIR`, the result goes to `ert_case/apex_run`:
 
    ```bash
-   apex ert import ert_case
+   uv run apex ert import ert_case
    ```
 
 5. To see how APEX's method fares against ERT's on the same configuration, over three seeds each, start a study and wait for it:
 
    ```bash
-   apex ert compare history_match.toml --replicates 3 --name first-comparison --wait
+   uv run apex ert compare history_match.toml --replicates 3 --name first-comparison --wait
    ```
 
 ## Pitfalls

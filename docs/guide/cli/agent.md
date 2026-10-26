@@ -33,7 +33,7 @@ The commands covered are `apex agent ask`, `apex agent diagnose`, `apex agent dr
 ## Step 1: See which providers exist
 
 ```bash
-apex agent providers
+uv run apex agent providers
 ```
 
 This lists the LLM providers. It takes no options. Use the names it prints with `--provider`.
@@ -57,7 +57,7 @@ The commands `diagnose`, `monitor`, `plan`, `plot` and `report` also accept `--n
 ## Step 3: Ask a question with `apex agent ask`
 
 ```bash
-apex agent ask "Which runs have finished?"
+uv run apex agent ask "Which runs have finished?"
 ```
 
 The `question` argument is required. The agent may use APEX's tools to answer.
@@ -70,7 +70,7 @@ The `question` argument is required. The agent may use APEX's tools to answer.
 ## Step 4: Check a run with `apex agent monitor`
 
 ```bash
-apex agent monitor RUN_ID
+uv run apex agent monitor RUN_ID
 ```
 
 `apex agent monitor` checks a run's health. It applies rules to the run's facts and adds a model's judgement (with `--no-llm`, only the rules). The `target` is a run directory, a run id or a job id. Read the result as an assessment of whether the run looks healthy, and, for a running iterative run, whether stopping is recommended.
@@ -83,7 +83,7 @@ apex agent monitor RUN_ID
 ## Step 5: Understand a failure with `apex agent diagnose`
 
 ```bash
-apex agent diagnose RUN_ID --no-llm
+uv run apex agent diagnose RUN_ID --no-llm
 ```
 
 `apex agent diagnose` explains what went wrong in a run and what to change. It is advisory: it changes nothing. It takes the same `target` as `monitor`, and supports `--no-llm`, `--json` and the model options.
@@ -93,7 +93,7 @@ To act on the advice, edit the run's configuration as suggested and start the ru
 ## Step 6: Draw figures with `apex agent plot`
 
 ```bash
-apex agent plot RUN_ID --preset brugge_classic
+uv run apex agent plot RUN_ID --preset brugge_classic
 ```
 
 `apex agent plot` draws a run's result figures. The `target` is a run directory, a run id or a job id. You choose what to draw in one of three ways:
@@ -109,7 +109,7 @@ A related, model-free command is `apex report RUN_DIR`. It prints the data misma
 ## Step 7: Write a report with `apex agent report`
 
 ```bash
-apex agent report RUN_ID --out report.md
+uv run apex agent report RUN_ID --out report.md
 ```
 
 `apex agent report` writes a narrative report, in Markdown, of a run or a study.
@@ -122,7 +122,7 @@ apex agent report RUN_ID --out report.md
 ## Step 8: Plan a study with `apex agent plan`
 
 ```bash
-apex agent plan case.toml --goal "Find out which parameters the history constrains"
+uv run apex agent plan case.toml --goal "Find out which parameters the history constrains"
 ```
 
 `apex agent plan` proposes a study for a case and a goal. It submits the study only if you confirm.
@@ -144,7 +144,7 @@ A submission may be held until someone approves it. When that happens, it stays 
 3. Submit again with the token:
 
    ```bash
-   apex agent plan case.toml --goal "..." --approval-token TOKEN
+   uv run apex agent plan case.toml --goal "..." --approval-token TOKEN
    ```
 
 ## Step 9: Draft an optimization with `apex agent draft-optimization`
@@ -185,37 +185,37 @@ Suppose a history-matching run `hm_run` has finished and you want to review it, 
 1. Check which providers are available:
 
    ```bash
-   apex agent providers
+   uv run apex agent providers
    ```
 
 2. Check the run's health without a model:
 
    ```bash
-   apex agent monitor hm_run --no-llm
+   uv run apex agent monitor hm_run --no-llm
    ```
 
 3. If something looks wrong, ask for a diagnosis:
 
    ```bash
-   apex agent diagnose hm_run --no-llm
+   uv run apex agent diagnose hm_run --no-llm
    ```
 
 4. Draw the classic figures:
 
    ```bash
-   apex agent plot hm_run --preset brugge_classic
+   uv run apex agent plot hm_run --preset brugge_classic
    ```
 
 5. Write the report:
 
    ```bash
-   apex agent report hm_run --out hm_run_report.md
+   uv run apex agent report hm_run --out hm_run_report.md
    ```
 
 6. Draft an optimization using the run's posterior. Here the history is assumed to end before 2032 and the pressure bounds are in the deck's pressure unit:
 
    ```bash
-   apex agent draft-optimization case/config.toml \
+   uv run apex agent draft-optimization case/config.toml \
      --forecast-end 2032-12-31 \
      --wop 70 --wwp 5 --wwi 2 --disc 0.08 \
      --run hm_run --members 10 \

@@ -148,8 +148,8 @@ The facies names must be those in `facies`, and the property names those the sim
 7. To stop a run that is in progress, pass its run directory to `apex stop`. The run stops at its next checkpoint. Continue it later with `apex resume`, which also takes the run directory.
 
 ```bash
-apex stop RUN_DIR
-apex resume RUN_DIR
+uv run apex stop RUN_DIR
+uv run apex resume RUN_DIR
 ```
 
 `RUN_DIR` stands for the directory of your run.
@@ -259,8 +259,8 @@ clay = { poro = 0.04 }
 Save a configuration as `config.toml`, then check the plugins and test the run:
 
 ```bash
-apex plugins
-apex run config.toml --max-steps 1
+uv run apex plugins
+uv run apex run config.toml --max-steps 1
 ```
 
 If the run reports an error about an option, fix the option named in the message and run again. The layout of the `apex plugins` listing can differ, so look for the plugin name and compare its options with your file.
