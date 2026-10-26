@@ -26,6 +26,7 @@ nav:
       - getting_started/web_ui.md
       - getting_started/agents_cli.md
       - getting_started/case_converter.md
+      - getting_started/studies_and_approvals.md
       - getting_started/writing_a_plugin.md
   - User guide:
       - guide/index.md

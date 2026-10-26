@@ -10,6 +10,10 @@ Status: early development.
 
 <table>
 <tr>
+<td width="50%"><a href="docs/getting_started/first_run.md">Your first history-matching run, in a terminal</a></td>
+<td width="50%"><a href="docs/getting_started/studies_and_approvals.md">Studies, the job service and approvals</a></td>
+</tr>
+<tr>
 <td width="50%"><a href="docs/getting_started/agents_cli.md">Using agents from the command line</a></td>
 <td width="50%"><a href="docs/getting_started/case_converter.md">Bringing your own case to APEX: one deck or one description</a></td>
 </tr>
@@ -58,7 +62,7 @@ This creates `.venv/` inside the folder with APEX, its exact pinned dependencies
 
 </details>
 
-<details>
+<details open>
 <summary><b>4. Check the installation</b></summary>
 
 ```bash
@@ -140,10 +144,13 @@ With OPM Flow, `uv run apex run examples/3dbox_production_avo/config_esmda.toml`
 uv run mkdocs serve       # then open http://127.0.0.1:8000
 ```
 
-It describes the plugins, the configuration files and the workflows, with a user guide and notebooks. Its **Getting started** section has three step-by-step pages:
+It describes the plugins, the configuration files and the workflows, with a user guide and notebooks. Its **Getting started** section has six step-by-step pages:
 
+- *Your first history-matching run*: the linear-Gaussian example in a terminal, from a copy of it to its summary, report and figures.
 - *The web UI and its AI assistant*: run an example from the browser, and give the assistant a model (Claude through Claude Code with your subscription, or Gemma through Ollama).
 - *The agents from the command line*: the monitor, diagnosis, planner, report and plotter in a terminal, and Claude Code driving APEX's tools.
+- *Bringing your own case*: the case-converter and the geomodeler turn a deck and its history into an APEX case, give it a prior, and create a synthetic case from a description.
+- *Studies, the job service and approvals*: compare two methods over seeds in a study, run the job service, and approve a submission over the cost limits.
 - *Write and register your own plugin*: a new performance metric and a new history-matching algorithm, each in a package of your own.
 
 </details>
@@ -189,8 +196,8 @@ The parity tests compare against stored reference results; `tests/data/reference
 
 ## Disclaimer
 
-<details>
-<summary><b>Read the disclaimer</b></summary>
+<details open>
+<summary><b>The disclaimer</b></summary>
 
 This repository is made available and contributed to under a licence whose terms, for the protection of the contributors, make clear that it is offered "as is", without warranty, and disclaim liability for damages resulting from its use. APEX's licence, the GNU General Public License version 3 or later, includes such terms (sections 15 and 16).
 

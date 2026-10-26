@@ -1,0 +1,26 @@
+# A study on the linear-Gaussian example: ES-MDA and GIES, three seeds each, on 100 members
+# (7,923 simulator runs at most: within the default approval limits). Run it from the APEX
+# folder: uv run apex study run examples/linear_gaussian/study.toml
+[study]
+name = "linear_methods"
+seed = 7                  # derives the seeds of the replicates after the first
+replicates = 3
+metrics = ["rmse", "normalized_data_mismatch"]
+
+[study.cases]
+linear = "config_esmda.toml"   # relative to this file's folder
+
+[study.methods.esmda]          # each method is a complete [method] section
+name = "esmda"
+options = { inflation = [4, 4, 4, 4] }
+strategy = { name = "approx", options = { energy = 1.0 } }
+
+[study.methods.gies]
+name = "gies"
+strategy = { name = "rlmmac", options = { energy = 1.0 } }
+schedule = { initial = 1.0, factor = 2.0, data_mismatch_tolerance = 1e-4 }
+max_iterations = 20
+
+[[study.variants]]             # patches the case; here a smaller ensemble for every run
+name = "small"
+patch = { prior = { ensemble_size = 100 } }

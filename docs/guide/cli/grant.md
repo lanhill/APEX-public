@@ -12,6 +12,8 @@ items:
 
 # The apex grant commands
 
+Run these commands from the APEX folder: `uv run` runs them in APEX's environment, as the README's installation sets it up.
+
 ## Goal
 
 Some submissions wait for approval before they go ahead. You can approve a single pending submission with `apex approve`, which takes the pending approval's token. After approving, you submit it again with that token. A grant approves in advance instead: it covers a budget of simulator runs for one client's experiment until the grant expires.
@@ -45,7 +47,7 @@ In this lesson you will create a grant with `apex grant create`, check it with `
 | `--root` | option | no | Services root (default: `$APEX_HOME`, else `~/.apex/service`). |
 
 ```bash
-apex grant create planner my-experiment --max-simulator-runs 200 --expires 7d
+uv run apex grant create planner my-experiment --max-simulator-runs 200 --expires 7d
 ```
 
 While the grant is active, it approves work from `planner` annotated `my-experiment` ahead of time, up to the budget of 200 simulator runs. Once the expiry passes, the grant no longer approves anything.
@@ -57,13 +59,13 @@ After creating a grant, run `apex grant list` (next step) to confirm it is there
 `apex grant list` shows the active grants. For each one you see the id, client, experiment, used/budget and expiry. In `used/budget`, the budget is the number you gave to `--max-simulator-runs`, and `used` is how much of it has been used so far.
 
 ```bash
-apex grant list
+uv run apex grant list
 ```
 
 Add `--all` to also include expired and revoked grants. `--all` is an on switch and is off by default.
 
 ```bash
-apex grant list --all
+uv run apex grant list --all
 ```
 
 ### 3. Revoke a grant with `apex grant revoke`
@@ -71,7 +73,7 @@ apex grant list --all
 Give `apex grant revoke` the grant's id, which you copy from the id column of `apex grant list`. The grant is revoked at once.
 
 ```bash
-apex grant revoke <grant_id>
+uv run apex grant revoke <grant_id>
 ```
 
 To check the result, run `apex grant list --all`, which includes revoked grants.
@@ -83,13 +85,13 @@ Revoking only stops the grant from approving more. Submissions already let throu
 To stop a run that is already going, ask it to stop at its next checkpoint with `apex stop`. It takes the directory of the running run:
 
 ```bash
-apex stop <run_dir>
+uv run apex stop <run_dir>
 ```
 
 To continue a stopped or interrupted run from its last checkpoint, give `apex resume` the same run directory:
 
 ```bash
-apex resume <run_dir>
+uv run apex resume <run_dir>
 ```
 
 ### Approving one submission with `apex approve`
@@ -97,7 +99,7 @@ apex resume <run_dir>
 For a single pending submission, give `apex approve` the pending approval's token, then submit it again with that token:
 
 ```bash
-apex approve <token>
+uv run apex approve <token>
 ```
 
 Like the grant commands, it accepts `--root` if your services root is not the default.

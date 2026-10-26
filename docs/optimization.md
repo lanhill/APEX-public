@@ -32,8 +32,8 @@ APEX ports PET's `popt`. It provides ensemble optimizers (`enopt`, `genopt`, `sm
 ## Step 1: a first run
 
 ```bash
-uv run apex optimize examples/optimization/rosenbrock_enopt.toml [--max-iterations N]
-uv run apex optimize --resume runs/rosenbrock_enopt [--max-iterations N]
+uv run apex optimize examples/optimization/rosenbrock_enopt.toml --max-iterations 5
+uv run apex optimize --resume examples/optimization/runs/rosenbrock_enopt
 uv run apex plugins            # optimizers, objectives and step_rules, with their options and defaults
 ```
 
@@ -69,9 +69,25 @@ The run directory is `runs/<name>/` next to the configuration (or `[optimization
 - `checkpoint.npz`/`.json`: the optimizer's state and its random stream. `--resume` continues bit-identically;
 - `result.json`, once the run ends.
 
-`--max-iterations N` stops after N accepted steps in this invocation, and the run can be resumed. One process at a time holds `run.lock`.
+`--max-iterations N` stops after N accepted steps in this invocation, and the run can be resumed. The first command stops after 5 steps:
 
-**What to look at afterwards.** Open `result.json` for the best controls and the final objective value. Open `history.jsonl` to see how the objective fell, one row per accepted step. Rosenbrock's minimum is 0 at all controls equal to 1, so a good run ends near that.
+```text
+.../examples/optimization/runs/rosenbrock_enopt: stopped (resume with --resume); stopped by the caller
+objective 104.124 after 5 iterations (5 steps accepted), 100 objective evaluations
+x = -0.963089, 0.749435, -0.269319, 0.586082
+```
+
+and the second continues it to its end, here when EnOpt finds no improving step:
+
+```text
+.../examples/optimization/runs/rosenbrock_enopt: finished; EnOpt failed to find an improving step.
+objective 0.987801 after 99 iterations (98 steps accepted), 2060 objective evaluations
+x = 0.687803, 0.484728, 0.260265, 0.068049
+```
+
+One process at a time holds `run.lock`.
+
+**What to look at afterwards.** Open `result.json` for the best controls and the final objective value. Open `history.jsonl` to see how the objective fell, one row per accepted step. Rosenbrock's minimum is 0, at all controls equal to 1: compare the result with it. EnOpt's run above stops on a flat stretch at 0.99, short of the minimum.
 
 ## Step 2: choose an optimizer
 

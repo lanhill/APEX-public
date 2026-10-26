@@ -133,7 +133,10 @@ def test_the_command_writes_a_prior_and_refuses_an_existing_output(
     assert first.exit_code == 0, first.output
     assert "valid, and the drawn sample matches" in first.stdout
     assert again.exit_code == 1
-    assert "exists" in again.output
+    # The refusal names the file and how to choose another (release tester H12).
+    said = " ".join(again.output.split())
+    assert f"{config.parent.name}/{config.stem}_prior.toml exists" in said
+    assert "--out" in said
 
 
 def test_a_stored_prior_leaves_nothing_to_model(tmp_path: Path) -> None:

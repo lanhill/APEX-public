@@ -371,7 +371,7 @@ class Geomodeler:
             Path(output) if output is not None else config.with_name(f"{config.stem}_prior.toml")
         )
         if output.exists() or output.is_symlink():
-            raise ConfigError(f"{output.name} exists: give another output")
+            raise ConfigError(_taken(output))
         if output.resolve().parent != config.parent:
             raise ConfigError("write the new configuration beside the old one, so that its "
                               "relative paths still resolve")  # fmt: skip
@@ -381,7 +381,7 @@ class Geomodeler:
         # A skill's stored ensemble is named after the new configuration: one per output.
         ensemble = output.with_name(f"{output.stem}_ensemble.npz")
         if ensemble.exists() or ensemble.is_symlink():
-            raise ConfigError(f"{ensemble.name} exists: give another output")
+            raise ConfigError(_taken(ensemble))
         facts = facts.model_copy(update={"ensemble_file": ensemble.name})
         data_notes: list[str] = []
         if data is not None or reference is not None:
@@ -606,3 +606,15 @@ def _with_prior(raw: dict[str, Any], draft: PriorDraft, ensemble_size: int) -> d
     if existing:
         updated["parameterizations"] = existing
     return updated
+
+
+def _taken(path: Path) -> str:
+    """Return why ``path`` cannot be written, and what to do (release tester H12).
+
+    The web UI and the assistant always write the default name, so the remedy must work
+    there too: move the file away, or (on the command line) choose another output.
+    """
+    what = " (the new configuration's ensemble)" if path.name.endswith("_ensemble.npz") else ""
+    return (f"{path.parent.name}/{path.name} exists{what}, and the geomodeler never writes over "
+            "a file: delete or rename it, or choose another output file (--out on the "
+            "command line)")  # fmt: skip

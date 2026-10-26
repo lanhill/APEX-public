@@ -10,6 +10,8 @@ items:
 
 # The apex service commands
 
+Run these commands from the APEX folder: `uv run` runs them in APEX's environment, as the README's installation sets it up.
+
 ## Goal
 
 By the end of this lesson you will be able to start and stop the APEX job service for a root, check what it is doing, hand out access tokens for the REST API and the web UI, and rebuild the run catalogue if it gets out of step with the run directories.
@@ -31,7 +33,7 @@ A root is a directory that holds the job service's state: its runs, its jobs and
 ### 1. Start the service: `apex service start`
 
 ```bash
-apex service start
+uv run apex service start
 ```
 
 This starts the job service of the root in the background.
@@ -44,7 +46,7 @@ This starts the job service of the root in the background.
 To serve the REST API as well, give a host and port:
 
 ```bash
-apex service start --http 127.0.0.1:8765
+uv run apex service start --http 127.0.0.1:8765
 ```
 
 Keep the host at `127.0.0.1` unless a TLS proxy is in front of the service.
@@ -52,7 +54,7 @@ Keep the host at `127.0.0.1` unless a TLS proxy is in front of the service.
 ### 2. Check on it: `apex service status`
 
 ```bash
-apex service status
+uv run apex service status
 ```
 
 This shows whether the service is running and lists the jobs by state. It takes only `--root`.
@@ -62,7 +64,7 @@ This shows whether the service is running and lists the jobs by state. It takes 
 The REST API uses a bearer token. Print it with:
 
 ```bash
-apex service token
+uv run apex service token
 ```
 
 The token is created the first time you ask for it and can be read by you only.
@@ -81,25 +83,25 @@ Common cases:
 
 ```bash
 # Replace the API token
-apex service token --rotate
+uv run apex service token --rotate
 
 # A token for a guest called alice
-apex service token --ui --guest alice
+uv run apex service token --ui --guest alice
 
 # Take that access away again
-apex service token --ui --guest alice --revoke
+uv run apex service token --ui --guest alice --revoke
 
 # See who has a token, and when each expires
-apex service token --list-guests
+uv run apex service token --list-guests
 
 # Your own token for the web UI
-apex service token --ui --owner
+uv run apex service token --ui --owner
 ```
 
 ### 4. Stop the service: `apex service stop`
 
 ```bash
-apex service stop
+uv run apex service stop
 ```
 
 This stops the job service. Jobs that are already running go on, and their workers record their end themselves.
@@ -110,13 +112,13 @@ This stops the job service. Jobs that are already running go on, and their worke
 | `--timeout` | Seconds to wait for the service to end (default 30). The exit code is 2 if it is still stopping by then. |
 
 ```bash
-apex service stop --timeout 60
+uv run apex service stop --timeout 60
 ```
 
 ### 5. Rebuild the catalogue: `apex service reindex`
 
 ```bash
-apex service reindex
+uv run apex service reindex
 ```
 
 This rebuilds the run catalogue from the run directories. It takes only `--root`.
@@ -127,28 +129,28 @@ You want a service for a project root at `/data/project-a`, with the REST API on
 
 ```bash
 # 1. Start the service for this root, with the REST API on localhost
-apex service start --root /data/project-a --http 127.0.0.1:8765
+uv run apex service start --root /data/project-a --http 127.0.0.1:8765
 
 # 2. Confirm it is running and see the jobs by state
-apex service status --root /data/project-a
+uv run apex service status --root /data/project-a
 
 # 3. Print the API token for your client
-apex service token --root /data/project-a
+uv run apex service token --root /data/project-a
 
 # 4. Give a guest a UI token (the guest sees only their own work)
-apex service token --root /data/project-a --ui --guest alice
+uv run apex service token --root /data/project-a --ui --guest alice
 
 # 5. Later, check who has a token and when each expires
-apex service token --root /data/project-a --list-guests
+uv run apex service token --root /data/project-a --list-guests
 
 # 6. Stop the service, waiting up to a minute
-apex service stop --root /data/project-a --timeout 60
+uv run apex service stop --root /data/project-a --timeout 60
 ```
 
 If you later suspect the catalogue no longer matches the run directories, rebuild it:
 
 ```bash
-apex service reindex --root /data/project-a
+uv run apex service reindex --root /data/project-a
 ```
 
 ## Pitfalls
