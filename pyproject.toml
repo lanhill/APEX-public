@@ -180,6 +180,7 @@ module = [
     "CoolProp.*",
     "h5py",
     "h5py.*",
+    "pygments.*",
 ]
 ignore_missing_imports = true
 
