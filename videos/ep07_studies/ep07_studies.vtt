@@ -1,0 +1,153 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:01.675
+Episode seven: studies.
+
+2
+00:00:01.675 --> 00:00:11.802
+This video assumes APEX installed with OPM Flow, as in episode one, and a terminal in the APEX folder.
+
+3
+00:00:11.802 --> 00:00:14.893
+Today we compare optimizers in a study.
+
+4
+00:00:14.893 --> 00:00:16.637
+APEX ports PET's popt.
+
+5
+00:00:16.637 --> 00:00:28.644
+The case: examples/optimization/3well/enopt.toml is PET's popt tutorial.
+
+6
+00:00:28.644 --> 00:00:44.625
+Its objective is simulated, so it needs a deck simulator that APEX supports (opm_flow, eclipse): here OPM Flow, as in episode one.
+
+7
+00:00:44.625 --> 00:00:48.001
+Controls: the values the optimizer changes.
+
+8
+00:00:48.001 --> 00:01:00.371
+Each has its bounds.
+
+9
+00:01:00.371 --> 00:01:03.810
+The objective is the net present value, NPV.
+
+10
+00:01:03.810 --> 00:01:15.725
+The page states it as -NPV in millions: minimising it maximises NPV.
+
+11
+00:01:15.725 --> 00:01:17.352
+The case uses enopt.
+
+12
+00:01:17.352 --> 00:01:23.208
+APEX provides ensemble optimizers (enopt, genopt, smcopt), among others.
+
+13
+00:01:23.208 --> 00:01:24.591
+Each is a plugin.
+
+14
+00:01:24.591 --> 00:01:27.519
+Which of two is better on this case?
+
+15
+00:01:27.519 --> 00:01:35.827
+A study answers that.
+
+16
+00:01:35.827 --> 00:01:40.873
+A study of optimizations compares optimizers and settings over seeds.
+
+17
+00:01:40.873 --> 00:01:45.773
+A cell is one run: one case, method and variant, for one replicate.
+
+18
+00:01:45.773 --> 00:02:08.545
+Save it as study.toml in examples/optimization/3well, next to enopt.toml: a study's case paths are relative to the study file's folder.
+
+19
+00:02:08.545 --> 00:02:09.676
+Three replicates.
+
+20
+00:02:09.676 --> 00:02:28.180
+The first replicate uses the case's own seed, so it reproduces a plain apex optimize of that case; the others are derived from [study] seed, so the study is reproducible.
+
+21
+00:02:28.180 --> 00:02:31.176
+The case is the three-well configuration.
+
+22
+00:02:31.176 --> 00:02:46.554
+The methods are complete [optimizer] sections: enopt and smcopt.
+
+23
+00:02:46.554 --> 00:02:49.062
+Two variants: base, and cheap water.
+
+24
+00:02:49.062 --> 00:03:05.195
+A variant patches anything but [optimizer]: here, one option of the objective.
+
+25
+00:03:05.195 --> 00:03:19.276
+The study's metrics takes only what the comparison reports: here, the final and the best objective, and the evaluations used.
+
+26
+00:03:19.276 --> 00:03:24.355
+apex study run submits the study's runs as background jobs and returns at once.
+
+27
+00:03:24.355 --> 00:03:43.802
+The jobs run with or without the job service: with uv run apex service start running, the service schedules them; without it, the command starts the first ones and each job starts the next as it ends.
+
+28
+00:03:43.802 --> 00:03:46.193
+Now we run it, from the APEX folder.
+
+29
+00:03:46.193 --> 00:04:03.267
+apex study run takes the study file; status and compare take the study's name, its [study] name.
+
+30
+00:04:03.267 --> 00:04:06.191
+Either way, apex study status follows them.
+
+31
+00:04:06.191 --> 00:04:07.959
+It takes the study's name.
+
+32
+00:04:07.959 --> 00:04:09.999
+Look at the state of each run.
+
+33
+00:04:09.999 --> 00:04:26.846
+Every run is an OPM Flow optimization, so this takes a while.
+
+34
+00:04:26.846 --> 00:04:30.084
+We cut the wait; its real length is in the description.
+
+35
+00:04:30.084 --> 00:04:46.140
+The same command again: every run should now be finished.
+
+36
+00:04:46.140 --> 00:04:53.168
+The comparison has each method and variant's mean and spread over the replicates, and paired differences with Wilcoxon tests.
+
+37
+00:04:53.168 --> 00:05:16.848
+Find the final objective for each method and variant.
+
+38
+00:05:16.848 --> 00:05:22.348
+Thank you for watching.

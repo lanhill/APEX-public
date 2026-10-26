@@ -1,0 +1,85 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:03.062
+Episode five: figures, and a second method.
+
+2
+00:00:03.062 --> 00:00:10.751
+This video assumes APEX installed, as in episode one, and the complete ES-MDA run from episodes two to four.
+
+3
+00:00:10.751 --> 00:00:16.655
+Run every command below from the APEX folder.
+
+4
+00:00:16.655 --> 00:00:19.456
+For the figures, we add plots to the report.
+
+5
+00:00:19.456 --> 00:00:38.578
+They are written as PNG and PDF files in the run's report/ folder.
+
+6
+00:00:38.578 --> 00:00:50.781
+First metrics/ (the metrics at each step).
+
+7
+00:00:50.781 --> 00:01:04.040
+Then health/ (the ensemble's spread and the members' data mismatch).
+
+8
+00:01:04.040 --> 00:01:18.692
+And data/ (the predicted data against the observations, before and after).
+
+9
+00:01:18.692 --> 00:01:21.318
+Now a second method on the same case.
+
+10
+00:01:21.318 --> 00:01:35.669
+The example also has GIES, an iterative method, in config_gies.toml, with its own run name (linear_gies).
+
+11
+00:01:35.669 --> 00:01:51.013
+Its method section names gies, with its own update strategy and schedule.
+
+12
+00:01:51.013 --> 00:02:05.350
+We run it, to the end this time.
+
+13
+00:02:05.350 --> 00:02:28.261
+Given a folder, apex summary tabulates every run it finds, so the two methods are side by side.
+
+14
+00:02:28.261 --> 00:02:40.644
+GIES chooses its number of steps and stops when it has converged (converged), while ES-MDA always takes the number of steps its configuration gives.
+
+15
+00:02:40.644 --> 00:02:41.318
+Where next?
+
+16
+00:02:41.318 --> 00:02:45.671
+The web UI and its AI assistant: run the same example from the browser.
+
+17
+00:02:45.671 --> 00:02:51.311
+The agents from the command line: check, diagnose and report this run with a language model.
+
+18
+00:02:51.311 --> 00:02:57.996
+Writing a plugin: your own metric or method, run on this example.
+
+19
+00:02:57.996 --> 00:03:04.575
+So: report with plots writes the figures, and summary of a folder puts its runs side by side.
+
+20
+00:03:04.575 --> 00:03:10.529
+Next, in episode six: your first optimization.
+
+21
+00:03:10.529 --> 00:03:16.029
+Thank you for watching.

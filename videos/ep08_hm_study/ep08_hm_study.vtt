@@ -1,0 +1,113 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.624
+Episode eight: a history-matching study.
+
+2
+00:00:02.624 --> 00:00:06.100
+This video assumes APEX installed, as in episode one.
+
+3
+00:00:06.100 --> 00:00:09.051
+Run every command below from the APEX folder.
+
+4
+00:00:09.051 --> 00:00:15.479
+The case is the linear-Gaussian example of Your first history-matching run (episodes two to five).
+
+5
+00:00:15.479 --> 00:00:21.589
+It runs in seconds and needs no reservoir simulator.
+
+6
+00:00:21.589 --> 00:00:33.183
+A study runs every combination of cases, methods and variants, several times with different seeds (the replicates), and compares the results.
+
+7
+00:00:33.183 --> 00:00:34.359
+The example has one.
+
+8
+00:00:34.359 --> 00:00:54.355
+[study]: its name (linear_methods), 3 replicates, the seed the later replicates' seeds come from (the first keeps the case's own), and the metrics to compare.
+
+9
+00:00:54.355 --> 00:01:06.193
+[study.cases]: the case, the example's ES-MDA configuration.
+
+10
+00:01:06.193 --> 00:01:21.665
+[study.methods.esmda] and [study.methods.gies]: each a complete [method] section.
+
+11
+00:01:21.665 --> 00:01:35.103
+[[study.variants]]: a change to the case for every run, here an ensemble of 100 members instead of 500.
+
+12
+00:01:35.103 --> 00:01:36.385
+Check its cost first.
+
+13
+00:01:36.385 --> 00:01:51.055
+The plan ends with the study's total.
+
+14
+00:01:51.055 --> 00:02:02.033
+Jobs submitted from the command line run a frozen copy of APEX's code by default, so that editing the APEX folder never changes a running job.
+
+15
+00:02:02.033 --> 00:02:13.075
+The first submission makes the copy, a git worktree of the commit with an environment of its own, which takes a few minutes and about 2 GB; uncommitted changes are not in it.
+
+16
+00:02:13.075 --> 00:02:17.806
+Ours was made before this video.
+
+17
+00:02:17.806 --> 00:02:21.591
+apex study run submits the 6 runs as background jobs.
+
+18
+00:02:21.591 --> 00:02:37.389
+Without --wait it returns at once; with it, it waits and prints study complete.
+
+19
+00:02:37.389 --> 00:02:47.298
+The runs go to the services root ($APEX_HOME, by default ~/.apex/service), in studies/linear_methods/.
+
+20
+00:02:47.298 --> 00:02:59.621
+apex study status counts the runs by state (6 complete).
+
+21
+00:02:59.621 --> 00:03:14.071
+And apex jobs list lists every job with its state.
+
+22
+00:03:14.071 --> 00:03:37.795
+apex study compare gives each method's mean and spread over the replicates, and the paired difference with a Wilcoxon test.
+
+23
+00:03:37.795 --> 00:03:46.613
+With 3 replicates the test cannot show a difference (compare says so); a real comparison needs more.
+
+24
+00:03:46.613 --> 00:03:56.059
+apex study run takes the study file, while status and compare take the study's name, its [study] name.
+
+25
+00:03:56.059 --> 00:04:03.303
+So: validate the study first, run it, follow it by its name, and compare the methods over the replicates.
+
+26
+00:04:03.303 --> 00:04:06.615
+And remember: three replicates are only a start.
+
+27
+00:04:06.615 --> 00:04:13.248
+Next, in episode nine: the job service from the terminal.
+
+28
+00:04:13.248 --> 00:04:18.748
+Thank you for watching.

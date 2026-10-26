@@ -1,0 +1,121 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:03.085
+Episode nine: the job service from the terminal.
+
+2
+00:00:03.085 --> 00:00:06.492
+This video assumes APEX installed, as in episode one.
+
+3
+00:00:06.492 --> 00:00:16.969
+Run these commands from the APEX folder: uv run runs them in APEX's environment, as the README's installation sets it up.
+
+4
+00:00:16.969 --> 00:00:23.913
+A root is a directory that holds the job service's state: its runs, its jobs and its tokens.
+
+5
+00:00:23.913 --> 00:00:28.820
+Each root has at most one job service, running in the background.
+
+6
+00:00:28.820 --> 00:00:30.858
+Every command takes --root.
+
+7
+00:00:30.858 --> 00:00:39.824
+If you leave it out, APEX uses $APEX_HOME, and if that is not set, ~/.apex/service.
+
+8
+00:00:39.824 --> 00:00:50.219
+This starts the job service of the root in the background.
+
+9
+00:00:50.219 --> 00:01:04.623
+This shows whether the service is running and lists the jobs by state.
+
+10
+00:01:04.623 --> 00:01:06.773
+The REST API uses a bearer token.
+
+11
+00:01:06.773 --> 00:01:11.919
+The token is created the first time you ask for it and can be read by you only.
+
+12
+00:01:11.919 --> 00:01:17.877
+This video does not print one: tokens are secrets.
+
+13
+00:01:17.877 --> 00:01:23.627
+To serve the REST API as well, give a host and port, as in this command.
+
+14
+00:01:23.627 --> 00:01:25.305
+We only type it here.
+
+15
+00:01:25.305 --> 00:01:38.946
+Keep the host at 127.0.0.1 unless a TLS proxy is in front of the service.
+
+16
+00:01:38.946 --> 00:01:40.591
+This stops the job service.
+
+17
+00:01:40.591 --> 00:01:52.979
+Jobs that are already running go on, and their workers record their end themselves.
+
+18
+00:01:52.979 --> 00:02:04.813
+We check again: the service is no longer running.
+
+19
+00:02:04.813 --> 00:02:11.981
+The stop command can also wait longer, with --timeout: Seconds to wait for the service to end (default 30).
+
+20
+00:02:11.981 --> 00:02:15.398
+The exit code is 2 if it is still stopping by then.
+
+21
+00:02:15.398 --> 00:02:23.725
+We only type it.
+
+22
+00:02:23.725 --> 00:02:27.023
+This rebuilds the run catalogue from the run directories.
+
+23
+00:02:27.023 --> 00:02:38.110
+Use it if the catalogue no longer matches the run directories.
+
+24
+00:02:38.110 --> 00:02:45.210
+If you use several roots, pass the same --root to every command.
+
+25
+00:02:45.210 --> 00:02:47.045
+Expecting stop to end jobs.
+
+26
+00:02:47.045 --> 00:02:48.676
+Running jobs keep going.
+
+27
+00:02:48.676 --> 00:02:53.483
+Their workers record their end.
+
+28
+00:02:53.483 --> 00:03:00.302
+So: start, status and stop act on one service per root, and stopping it leaves running jobs alone.
+
+29
+00:03:00.302 --> 00:03:06.133
+Next, in episode ten: approving a submission.
+
+30
+00:03:06.133 --> 00:03:11.633
+Thank you for watching.

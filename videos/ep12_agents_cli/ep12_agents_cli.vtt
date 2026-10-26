@@ -1,0 +1,145 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:03.194
+Episode twelve: the agents from the command line.
+
+2
+00:00:03.194 --> 00:00:06.974
+This video assumes APEX installed as the README describes.
+
+3
+00:00:06.974 --> 00:00:09.582
+Run every command below from its folder.
+
+4
+00:00:09.582 --> 00:00:16.388
+That is episode one, plus Claude Code, installed and logged in.
+
+5
+00:00:16.388 --> 00:00:18.653
+The agents need one thing first.
+
+6
+00:00:18.653 --> 00:00:20.493
+A finished run to look at.
+
+7
+00:00:20.493 --> 00:00:23.112
+The README's first example makes one.
+
+8
+00:00:23.112 --> 00:00:40.551
+Its run folder is examples/linear_gaussian/runs/linear_esmda.
+
+9
+00:00:40.551 --> 00:00:47.432
+The agents use [agents.llm] in service.toml, in the services root; here the default one, in the home folder.
+
+10
+00:00:47.432 --> 00:00:50.044
+The model is Claude, through Claude Code.
+
+11
+00:00:50.044 --> 00:01:00.130
+The calls count against your subscription's usage.
+
+12
+00:01:00.130 --> 00:01:08.162
+The agents use APEX's tools, and tool clients read only the service's workspace folders unless service.toml adds more.
+
+13
+00:01:08.162 --> 00:01:12.178
+So we add the absolute path of your APEX folder's examples.
+
+14
+00:01:12.178 --> 00:01:21.337
+Type your own folder's absolute path here.
+
+15
+00:01:21.337 --> 00:01:25.351
+We check the model with a first answer through the model.
+
+16
+00:01:25.351 --> 00:01:42.854
+Good to know: Every agent except apex agent ask also works without a model, with --no-llm: it then decides by its rules only.
+
+17
+00:01:42.854 --> 00:01:47.970
+We ask which localization methods APEX has, and which is the default.
+
+18
+00:01:47.970 --> 00:02:08.677
+The agent answers with APEX's tools: plugins, schemas, validation, runs and jobs.
+
+19
+00:02:08.677 --> 00:02:10.181
+Now the run itself.
+
+20
+00:02:10.181 --> 00:02:13.189
+We keep its folder in a variable, RUN.
+
+21
+00:02:13.189 --> 00:02:23.874
+RUN may also be a run id or a job id.
+
+22
+00:02:23.874 --> 00:02:27.002
+The monitor asks: is it healthy, should it stop?
+
+23
+00:02:27.002 --> 00:02:46.132
+In each agent, code computes the facts and named rules decide first.
+
+24
+00:02:46.132 --> 00:02:50.182
+Diagnosis gives causes, and what to change (with validated patches).
+
+25
+00:02:50.182 --> 00:03:13.696
+The model then judges with read-only tools, and its answer is held to the facts: a finding no rule backs is dropped, and each correction is printed.
+
+26
+00:03:13.696 --> 00:03:17.721
+The report agent writes a narrative of the results, in Markdown.
+
+27
+00:03:17.721 --> 00:03:36.697
+Every call is recorded in the run's agents/ folder, prompt included.
+
+28
+00:03:36.697 --> 00:03:53.156
+The plotter draws figures from a request in words: here, box plots of the data mismatch.
+
+29
+00:03:53.156 --> 00:04:04.383
+This is one of the figures it drew.
+
+30
+00:04:04.383 --> 00:04:09.759
+The planner writes a study within the budget, revising it when validation refuses it.
+
+31
+00:04:09.759 --> 00:04:17.727
+Here the question is whether a longer inflation schedule improves the RMSE, within a budget of twenty thousand simulator runs.
+
+32
+00:04:17.727 --> 00:04:37.384
+It submits nothing unless you add --submit and confirm.
+
+33
+00:04:37.384 --> 00:04:46.302
+The other way round: Claude Code can call APEX's tools in a conversation: list plugins, validate and submit runs, read results.
+
+34
+00:04:46.302 --> 00:04:48.830
+This command registers APEX with it.
+
+35
+00:04:48.830 --> 00:05:03.857
+--budget-runs limits the simulator runs this session may submit.
+
+36
+00:05:03.857 --> 00:05:09.357
+Thank you for watching.

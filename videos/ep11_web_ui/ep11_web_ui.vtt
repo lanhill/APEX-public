@@ -1,0 +1,157 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:03.968
+Episode eleven: the web UI and its AI assistant.
+
+2
+00:00:03.968 --> 00:00:18.571
+This video assumes APEX installed, as in episode one, Claude Code installed and logged in, and Node.js 22.12 or later, to build the web UI once.
+
+3
+00:00:18.571 --> 00:00:22.406
+First we build the web UI, in APEX's folder.
+
+4
+00:00:22.406 --> 00:00:36.148
+This writes ui/dist/.
+
+5
+00:00:36.148 --> 00:00:38.816
+The web UI is served by APEX's job service.
+
+6
+00:00:38.816 --> 00:00:49.729
+This command starts the service in the background.
+
+7
+00:00:49.729 --> 00:00:54.034
+This one prints your web-UI token, which this video hides.
+
+8
+00:00:54.034 --> 00:01:04.746
+The token expires after 7 days.
+
+9
+00:01:04.746 --> 00:01:09.299
+In the browser: Open http://127.0.0.1:8765/ui/.
+
+10
+00:01:09.299 --> 00:01:28.136
+Sign in with the user name owner and the token from apex service token --ui --owner.
+
+11
+00:01:28.136 --> 00:01:37.918
+The web UI: It shows jobs, runs, studies, predictions, optimizations, plugins and examples, and has an editor for configuration files.
+
+12
+00:01:37.918 --> 00:01:44.780
+We open Examples, choose History matching, and copy the linear-Gaussian example's ES-MDA case.
+
+13
+00:01:44.780 --> 00:01:55.598
+The copy opens in the Editor.
+
+14
+00:01:55.598 --> 00:01:56.968
+We click Validate.
+
+15
+00:01:56.968 --> 00:02:10.846
+The editor shows the run's plan: members, forecasts, simulator runs.
+
+16
+00:02:10.846 --> 00:02:11.832
+We click Submit.
+
+17
+00:02:11.832 --> 00:02:14.914
+The job appears on the Jobs page with live events.
+
+18
+00:02:14.914 --> 00:02:18.120
+Only work submitted from the web UI is listed there.
+
+19
+00:02:18.120 --> 00:02:29.074
+Runs started with apex run in a terminal do not appear in the web UI.
+
+20
+00:02:29.074 --> 00:02:31.311
+When it is complete, we open its run.
+
+21
+00:02:31.311 --> 00:02:46.183
+The run page has a chart per metric, the steps and the run's figures.
+
+22
+00:02:46.183 --> 00:02:54.657
+The assistant uses the model of [chat.llm] in service.toml, or else [agents.llm], which the other agents also use.
+
+23
+00:02:54.657 --> 00:02:57.184
+Here, Claude, through Claude Code.
+
+24
+00:02:57.184 --> 00:03:06.377
+Check it with claude --version.
+
+25
+00:03:06.377 --> 00:03:11.348
+We put it in service.toml in the services root: here the default, in the home folder.
+
+26
+00:03:11.348 --> 00:03:22.751
+The calls therefore count against your subscription's usage, not API billing.
+
+27
+00:03:22.751 --> 00:03:36.297
+The service reads service.toml when it starts, so we restart it.
+
+28
+00:03:36.297 --> 00:03:38.843
+We click AI Assistant in the top bar.
+
+29
+00:03:38.843 --> 00:03:44.416
+The panel stays open as you move between pages, and it knows the page you are on.
+
+30
+00:03:44.416 --> 00:04:02.282
+We ask which update strategies ES-MDA accepts.
+
+31
+00:04:02.282 --> 00:04:06.990
+On the run we submitted, we ask whether it is healthy, and what it would change.
+
+32
+00:04:06.990 --> 00:04:28.281
+The assistant uses the monitor and diagnosis agents and quotes their findings.
+
+33
+00:04:28.281 --> 00:04:35.375
+Now we ask it to plan a comparison of ES-MDA with and without adaptive localization, within 20,000 simulator runs.
+
+34
+00:04:35.375 --> 00:04:58.910
+When it plans a study, it writes a draft into your folder and shows a card with the draft's cost and Launch, Review in the editor and Discard.
+
+35
+00:04:58.910 --> 00:05:01.223
+Nothing runs until you click Launch.
+
+36
+00:05:01.223 --> 00:05:05.206
+The assistant itself never submits, stops or resumes anything.
+
+37
+00:05:05.206 --> 00:05:19.119
+We launch it, and the study appears under Studies.
+
+38
+00:05:19.119 --> 00:05:30.018
+When you are done: Stop the service with uv run apex service stop.
+
+39
+00:05:30.018 --> 00:05:35.518
+Thank you for watching.

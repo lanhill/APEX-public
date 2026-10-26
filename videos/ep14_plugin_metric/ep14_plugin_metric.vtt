@@ -1,0 +1,153 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:04.329
+Episode fourteen: write a plugin, a performance metric.
+
+2
+00:00:04.329 --> 00:00:10.233
+This video assumes APEX installed as the README describes, and Python 3.12.
+
+3
+00:00:10.233 --> 00:00:14.507
+That is episode one.
+
+4
+00:00:14.507 --> 00:00:26.779
+Almost everything in APEX is a plugin: methods, update strategies, localizations, priors, simulators, executors, metrics, optimizers, objectives and figures.
+
+5
+00:00:26.779 --> 00:00:28.733
+Each kind has a registry.
+
+6
+00:00:28.733 --> 00:00:48.057
+And uv run apex plugins lists every registry and its plugins.
+
+7
+00:00:48.057 --> 00:00:51.544
+Create a package of your own, outside the APEX folder.
+
+8
+00:00:51.544 --> 00:01:16.390
+Its one file is a metric: the mean absolute data error of each member, in units of the observation errors.
+
+9
+00:01:16.390 --> 00:01:17.762
+What APEX takes from it.
+
+10
+00:01:17.762 --> 00:01:22.796
+The options are the constructor's keyword arguments, with their type hints and defaults.
+
+11
+00:01:22.796 --> 00:01:23.482
+Here, scale.
+
+12
+00:01:23.482 --> 00:01:37.214
+The summary is the first line of the class docstring.
+
+13
+00:01:37.214 --> 00:01:39.781
+Evaluate returns one value per member.
+
+14
+00:01:39.781 --> 00:01:47.552
+Arrays keep the ensemble on the last axis: the forecast is (n_data, n_members), a state variable (size, n_members).
+
+15
+00:01:47.552 --> 00:02:04.806
+And raise ValueError with a clear message for invalid options or inputs, as the constructor does.
+
+16
+00:02:04.806 --> 00:02:09.717
+In your pyproject.toml, add an entry point in the registry's group.
+
+17
+00:02:09.717 --> 00:02:26.721
+Its name is the plugin's name in configurations: here, mae, in the group apex.metrics.
+
+18
+00:02:26.721 --> 00:02:30.350
+Install your package into the environment that runs APEX.
+
+19
+00:02:30.350 --> 00:02:41.315
+We do it from the APEX folder.
+
+20
+00:02:41.315 --> 00:02:43.176
+We check that APEX finds it.
+
+21
+00:02:43.176 --> 00:02:56.226
+APEX finds entry points when a registry is first used, so nothing else is needed.
+
+22
+00:02:56.226 --> 00:02:57.604
+One thing to know.
+
+23
+00:02:57.604 --> 00:03:04.953
+A later plain uv sync makes the environment exactly APEX's lock again, and removes your package.
+
+24
+00:03:04.953 --> 00:03:16.803
+Install it again, or use uv sync --locked --inexact, which keeps it.
+
+25
+00:03:16.803 --> 00:03:24.973
+Next: Copy examples/linear_gaussian/config_esmda.toml to config_mae.toml in the same folder, and give its run a name of its own.
+
+26
+00:03:24.973 --> 00:03:26.888
+We did that before this scene.
+
+27
+00:03:26.888 --> 00:03:28.165
+Then add the metric.
+
+28
+00:03:28.165 --> 00:03:44.035
+Listing [[metrics]] replaces the default metrics, so name the ones you also want.
+
+29
+00:03:44.035 --> 00:03:53.382
+We go to the linear-Gaussian example's folder.
+
+30
+00:03:53.382 --> 00:03:55.333
+We validate the configuration.
+
+31
+00:03:55.333 --> 00:04:10.909
+APEX refuses unknown or mistyped options when a configuration is validated.
+
+32
+00:04:10.909 --> 00:04:22.872
+Then we run it.
+
+33
+00:04:22.872 --> 00:04:27.120
+The summary now has a column for it, from the prior to the result.
+
+34
+00:04:27.120 --> 00:04:49.739
+The same values are in the run's checkpoints, in apex report --plots, on the web UI's run page and available to the agents.
+
+35
+00:04:49.739 --> 00:04:53.016
+Finally, a test against a value you can work out by hand.
+
+36
+00:04:53.016 --> 00:05:08.534
+It also finds the metric through its entry point.
+
+37
+00:05:08.534 --> 00:05:20.108
+We run the test.
+
+38
+00:05:20.108 --> 00:05:25.608
+Thank you for watching.

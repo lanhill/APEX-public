@@ -1,0 +1,93 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.783
+Episode ten: when a run needs approval.
+
+2
+00:00:02.783 --> 00:00:06.565
+This video assumes APEX installed, as in episode one.
+
+3
+00:00:06.565 --> 00:00:12.476
+Run every command below from the APEX folder.
+
+4
+00:00:12.476 --> 00:00:28.492
+A submission needs a person's approval when it may take more simulator runs, or start more runs, than the limits in service.toml ([approval] max_simulator_runs, 20,000 by default, and max_runs, 20).
+
+5
+00:00:28.492 --> 00:00:32.797
+At a terminal, the command asks you, and your yes is the approval.
+
+6
+00:00:32.797 --> 00:00:40.910
+Answer no, or submit from a script, and you get a pending token to approve instead.
+
+7
+00:00:40.910 --> 00:00:52.388
+To see it on a small run, lower the limit in your own services root's service.toml.
+
+8
+00:00:52.388 --> 00:01:05.524
+The example's ES-MDA run may take 2,500 simulator runs, so it is now over the limit.
+
+9
+00:01:05.524 --> 00:01:06.430
+We submit it.
+
+10
+00:01:06.430 --> 00:01:08.032
+It asks before it runs.
+
+11
+00:01:08.032 --> 00:01:11.027
+Answer y, and it is approved and submitted.
+
+12
+00:01:11.027 --> 00:01:27.210
+Answer n, and you get the token; here we answer n.
+
+13
+00:01:27.210 --> 00:01:36.621
+A token is bound to that submission and its cost, can be used once, and expires after 24 hours.
+
+14
+00:01:36.621 --> 00:01:40.063
+Approve the token you were given, then submit again with it.
+
+15
+00:01:40.063 --> 00:01:51.565
+Here we only type the command, with the page's example token; use your own.
+
+16
+00:01:51.565 --> 00:01:56.230
+Then the same submission again, with --approval-token and your token.
+
+17
+00:01:56.230 --> 00:02:07.790
+We only type it.
+
+18
+00:02:07.790 --> 00:02:14.785
+Remove the [approval] lines afterwards to go back to the default limits.
+
+19
+00:02:14.785 --> 00:02:21.317
+Grants approve a budget in advance, for a client's experiment.
+
+20
+00:02:21.317 --> 00:02:24.001
+So: over the limits, APEX asks first.
+
+21
+00:02:24.001 --> 00:02:30.602
+Your yes is the approval; no gives a pending token, which you approve and then submit with.
+
+22
+00:02:30.602 --> 00:02:37.438
+Next, in episode eleven: the web UI and its AI assistant.
+
+23
+00:02:37.438 --> 00:02:42.938
+Thank you for watching.

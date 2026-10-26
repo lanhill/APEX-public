@@ -1,0 +1,141 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.694
+Episode thirteen: bring your own case.
+
+2
+00:00:02.694 --> 00:00:11.203
+It assumes APEX with OPM Flow (episode one), Claude Code as the model (episode twelve), and the web UI (episode eleven).
+
+3
+00:00:11.203 --> 00:00:13.259
+A language model is optional.
+
+4
+00:00:13.259 --> 00:00:20.568
+Without one, add --no-llm and the converter decides by its rules.
+
+5
+00:00:20.568 --> 00:00:30.865
+We convert the deck that ships with APEX, a 60 × 60 × 5 three-phase box with three producers and three water injectors, as a user would bring it, with no model.
+
+6
+00:00:30.865 --> 00:00:33.053
+It never runs a simulation itself.
+
+7
+00:00:33.053 --> 00:00:51.895
+It takes under a minute and prints what it chose.
+
+8
+00:00:51.895 --> 00:00:53.766
+We open my_box/CONVERSION.md.
+
+9
+00:00:53.766 --> 00:00:57.379
+Every value the converter had to assume is listed there.
+
+10
+00:00:57.379 --> 00:01:17.691
+The prior is one stationary field per property, with the deck's mean and variance, not the deck's values cell by cell.
+
+11
+00:01:17.691 --> 00:01:25.127
+In the configuration it wrote: The method is GIES with adaptive localization, 100 members and 10 iterations.
+
+12
+00:01:25.127 --> 00:01:42.161
+A converted case is real: it has no true model, so its metrics are the data mismatches only.
+
+13
+00:01:42.161 --> 00:01:47.883
+With a model, say what you want in words, and the converter follows it where the deck allows.
+
+14
+00:01:47.883 --> 00:01:51.882
+Here: porosity only, with ES-MDA in four steps and fifty members.
+
+15
+00:01:51.882 --> 00:02:14.364
+The model's choices are checked against the deck.
+
+16
+00:02:14.364 --> 00:02:17.886
+Before running, we validate the converted case.
+
+17
+00:02:17.886 --> 00:02:32.633
+It gives the plan: members, forecasts, simulator runs.
+
+18
+00:02:32.633 --> 00:02:41.002
+The full run is up to 1,121 simulations of this 18,000-cell model, on 10 workers by default, so try one step first.
+
+19
+00:02:41.002 --> 00:02:45.732
+That is the prior and one iteration first: about 200 simulations.
+
+20
+00:02:45.732 --> 00:03:02.301
+We cut the wait; its real length is in the description.
+
+21
+00:03:02.301 --> 00:03:19.837
+The report gives the data mismatch and figures.
+
+22
+00:03:19.837 --> 00:03:30.902
+Here is one of those figures.
+
+23
+00:03:30.902 --> 00:03:33.071
+Without a deck, describe the case.
+
+24
+00:03:33.071 --> 00:03:42.068
+The converter then draws a true model from the prior, asks before running the truth once on OPM Flow, and writes its observations with noise.
+
+25
+00:03:42.068 --> 00:03:59.244
+Here we answer no, and run the truth in the next scene.
+
+26
+00:03:59.244 --> 00:04:04.157
+If you answered no to the truth run (or gave --no-observe), run it later.
+
+27
+00:04:04.157 --> 00:04:20.784
+A created case is synthetic: it has a true model, so its runs also report how close the members come to it (RMSE).
+
+28
+00:04:20.784 --> 00:04:22.288
+Now in the web UI.
+
+29
+00:04:22.288 --> 00:04:27.048
+From Examples we copy 3dBox: production data on OPM Flow.
+
+30
+00:04:27.048 --> 00:04:41.594
+Each copies the whole example, BOX.DATA and observations.csv included.
+
+31
+00:04:41.594 --> 00:04:48.874
+Open Agents, and under Bring a case give the deck and its history by their workspace paths, as the Editor lists them.
+
+32
+00:04:48.874 --> 00:04:50.057
+We import the deck.
+
+33
+00:04:50.057 --> 00:04:51.301
+The case is a draft.
+
+34
+00:04:51.301 --> 00:05:10.295
+Open its config.toml in the Editor to review, validate and submit it.
+
+35
+00:05:10.295 --> 00:05:15.795
+Thank you for watching.

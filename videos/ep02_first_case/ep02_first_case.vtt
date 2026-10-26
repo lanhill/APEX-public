@@ -1,0 +1,125 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.051
+Episode two: your first case.
+
+2
+00:00:02.051 --> 00:00:06.153
+This video assumes APEX installed as the README describes.
+
+3
+00:00:06.153 --> 00:00:09.336
+Run every command below from the APEX folder.
+
+4
+00:00:09.336 --> 00:00:13.451
+That is episode one.
+
+5
+00:00:13.451 --> 00:00:17.314
+This video and the next three follow one page of the documentation.
+
+6
+00:00:17.314 --> 00:00:27.970
+By the end of this page you have run a complete history match in a terminal, from a copy of an example to its summary, report and figures.
+
+7
+00:00:27.970 --> 00:00:37.343
+The case is APEX's linear-Gaussian example: a linear model y = G x with 3 unknowns and 8 data, a Gaussian prior and Gaussian data errors.
+
+8
+00:00:37.343 --> 00:00:40.900
+It needs no reservoir simulator and runs in seconds.
+
+9
+00:00:40.900 --> 00:00:49.826
+Because the model is linear and Gaussian, its exact answer (the Kalman posterior) is known.
+
+10
+00:00:49.826 --> 00:00:53.229
+Work on a copy, so that the example stays as it is.
+
+11
+00:00:53.229 --> 00:01:03.810
+We copy it to a folder called my_first_case.
+
+12
+00:01:03.810 --> 00:01:07.003
+This removes runs you made in the example, e.g.
+
+13
+00:01:07.003 --> 00:01:16.378
+by the README's step 6, if there are any.
+
+14
+00:01:16.378 --> 00:01:29.693
+make_case.py writes the case's files next to itself: the forward model G (forward.npz), the observed data with their error variances (observations.csv) and the true model that generated them (truth.npz).
+
+15
+00:01:29.693 --> 00:01:43.935
+It also prints the exact answer to compare with later.
+
+16
+00:01:43.935 --> 00:01:56.805
+Here are the observed data with their error variances: one row per datum.
+
+17
+00:01:56.805 --> 00:02:12.659
+my_first_case is a folder of your own: git status lists it as untracked, and an APEX update leaves it alone.
+
+18
+00:02:12.659 --> 00:02:14.141
+Now the configuration.
+
+19
+00:02:14.141 --> 00:02:16.566
+A run is described by one TOML file.
+
+20
+00:02:16.566 --> 00:02:22.090
+[run]: the run's name (linear_esmda), which names its folder, and the random seed.
+
+21
+00:02:22.090 --> 00:02:31.482
+The same seed gives the same results.
+
+22
+00:02:31.482 --> 00:02:42.889
+[[state.variables]]: the unknowns, here one variable x of size 3.
+
+23
+00:02:42.889 --> 00:02:55.004
+[prior]: the ensemble, 500 members drawn from a standard normal distribution.
+
+24
+00:02:55.004 --> 00:03:05.681
+[observations]: the data, from observations.csv.
+
+25
+00:03:05.681 --> 00:03:20.953
+[case]: a synthetic case, with the true model in truth.npz, so that runs also report how far the members are from the truth (RMSE).
+
+26
+00:03:20.953 --> 00:03:35.301
+[simulator]: the model that turns each member into predicted data, here the linear model in forward.npz.
+
+27
+00:03:35.301 --> 00:03:46.917
+[execution]: where the members run, here 4 processes on this machine.
+
+28
+00:03:46.917 --> 00:04:06.951
+[method]: the history-matching method, ES-MDA in 4 steps (inflation = [4, 4, 4, 4]), with its update strategy.
+
+29
+00:04:06.951 --> 00:04:11.529
+So: a copy of your own, its files, and one file that describes the run.
+
+30
+00:04:11.529 --> 00:04:18.742
+In the next video we check what the run will cost, and run part of it.
+
+31
+00:04:18.742 --> 00:04:24.242
+Thank you for watching.

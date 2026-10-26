@@ -1,0 +1,89 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.648
+Episode six: your first optimization.
+
+2
+00:00:02.648 --> 00:00:09.947
+This video assumes APEX installed with OPM Flow, as in episode one, and a terminal in the APEX folder.
+
+3
+00:00:09.947 --> 00:00:16.226
+By the end, you can run an optimization with APEX.
+
+4
+00:00:16.226 --> 00:00:21.773
+The case: examples/optimization/3well/enopt.toml is PET's popt tutorial.
+
+5
+00:00:21.773 --> 00:00:36.086
+Its folder holds the configuration, the deck template deck.mako and, for the robust variant, models.npz.
+
+6
+00:00:36.086 --> 00:00:38.968
+Controls: the values the optimizer changes.
+
+7
+00:00:38.968 --> 00:00:55.366
+Here, two control variables, each with its initial values, its bounds and a variance.
+
+8
+00:00:55.366 --> 00:01:04.053
+An objective of a simulator's responses (registry response_objectives) runs each column of controls as one simulation.
+
+9
+00:01:04.053 --> 00:01:17.941
+Here the objective is the net present value, NPV, as -NPV in millions: minimising it maximises NPV.
+
+10
+00:01:17.941 --> 00:01:36.803
+For an objective computed by a simulator, start with enopt: it estimates the gradient from an ensemble and needs no derivatives.
+
+11
+00:01:36.803 --> 00:01:53.566
+The simulators and executors are the history-matching ones (opm_flow, eclipse, process, ...): here OPM Flow, on four processes.
+
+12
+00:01:53.566 --> 00:01:59.021
+Now we run it, as in the page's step one, with a few iterations first: here three.
+
+13
+00:01:59.021 --> 00:02:04.210
+A successful run prints its progress and writes history.jsonl and result.json.
+
+14
+00:02:04.210 --> 00:02:20.903
+We cut the wait; its real length is in the description.
+
+15
+00:02:20.903 --> 00:02:30.441
+--max-iterations N stops after N accepted steps in this invocation, and the run can be resumed.
+
+16
+00:02:30.441 --> 00:02:41.686
+The run directory is runs/&lt;name&gt;/ next to the configuration: here, runs, then the run's name, three-well enopt.
+
+17
+00:02:41.686 --> 00:02:59.413
+Open history.jsonl to see how the objective fell, one row per accepted step.
+
+18
+00:02:59.413 --> 00:03:07.928
+evaluations.jsonl in the run directory records every simulated evaluation, with its value and responses.
+
+19
+00:03:07.928 --> 00:03:14.640
+Simulation folders are in simulations/eval_&lt;id&gt;/.
+
+20
+00:03:14.640 --> 00:03:28.227
+So: the configuration names the controls, the objective, the optimizer and the simulator; apex optimize runs it, a few iterations at a time; and result.json holds the best controls.
+
+21
+00:03:28.227 --> 00:03:34.755
+Next, episode seven compares optimizers in a study.
+
+22
+00:03:34.755 --> 00:03:40.255
+Thank you for watching.

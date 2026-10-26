@@ -1,0 +1,69 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:10.722
+APEX: ensemble-based history matching, forecasting, uncertainty quantification and optimization of subsurface models.
+
+2
+00:00:10.722 --> 00:00:16.235
+It natively re-implements and extends NORCE's Python Ensemble Toolbox (PET).
+
+3
+00:00:16.235 --> 00:00:22.256
+APEX is compatible with ERT: with APEX's interface, each can run the other's cases.
+
+4
+00:00:22.256 --> 00:00:30.687
+PET and ERT cases convert to and from APEX cases, within what each can express.
+
+5
+00:00:30.687 --> 00:00:35.921
+With OPM Flow, APEX history-matches the 3dBox case on its rates and seismic maps.
+
+6
+00:00:35.921 --> 00:00:44.114
+Commercial simulators (Eclipse) are used when installed and licensed on your machine.
+
+7
+00:00:44.114 --> 00:01:02.545
+A run's folder holds provenance.json (the APEX commit, the libraries, the host and the inputs' hashes that made it).
+
+8
+00:01:02.545 --> 00:01:10.936
+Inside: geostatistical and facies priors, MCP, the runtime agents' model providers (tools for LLMs) and eCalc.
+
+9
+00:01:10.936 --> 00:01:12.843
+From Python: import apex.
+
+10
+00:01:12.843 --> 00:01:19.967
+The parity tests compare against stored reference results.
+
+11
+00:01:19.967 --> 00:01:33.011
+The web UI and its AI assistant: give the assistant a model (Claude through Claude Code with your subscription, or Gemma through Ollama), a hosted or a local LLM.
+
+12
+00:01:33.011 --> 00:01:36.247
+And agents that plan, monitor and report on the work.
+
+13
+00:01:36.247 --> 00:01:46.578
+Bringing your own case: the case-converter and the geomodeler turn a deck and its history into an APEX case, give it a prior.
+
+14
+00:01:46.578 --> 00:01:52.078
+Writing and registering your own plugin.
+
+15
+00:01:52.078 --> 00:01:53.643
+Status: early development.
+
+16
+00:01:53.643 --> 00:01:59.051
+Get the code, and start with the Quick start.
+
+17
+00:01:59.051 --> 00:02:04.551
+Thank you for watching.

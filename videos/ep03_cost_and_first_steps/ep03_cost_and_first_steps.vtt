@@ -1,0 +1,97 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:03.583
+Episode three: check the cost, then run part of it.
+
+2
+00:00:03.583 --> 00:00:10.468
+This video assumes APEX installed, as in episode one, and the copy my_first_case from episode two.
+
+3
+00:00:10.468 --> 00:00:16.330
+Run every command below from the APEX folder.
+
+4
+00:00:16.330 --> 00:00:29.294
+File names in a configuration are relative to the configuration's own folder, so the copy reads its own files.
+
+5
+00:00:29.294 --> 00:00:34.325
+This command prints everything such a file may hold, as a long JSON Schema.
+
+6
+00:00:34.325 --> 00:00:50.613
+We look only at its end.
+
+7
+00:00:50.613 --> 00:00:52.390
+Before running, the cost.
+
+8
+00:00:52.390 --> 00:01:04.748
+The prior is the ensemble, 500 members drawn from a standard normal distribution.
+
+9
+00:01:04.748 --> 00:01:16.723
+The method is ES-MDA in 4 steps (inflation = [4, 4, 4, 4]).
+
+10
+00:01:16.723 --> 00:01:22.368
+apex validate checks the configuration without running anything, and prints the run's plan.
+
+11
+00:01:22.368 --> 00:01:40.093
+Note that your run's id, a hash of the configuration and its folder, will differ.
+
+12
+00:01:40.093 --> 00:01:45.146
+A forecast runs every member once: the prior's and one after each of the 4 steps.
+
+13
+00:01:45.146 --> 00:01:51.651
+On a real case, the plan tells you the cost before you start.
+
+14
+00:01:51.651 --> 00:01:53.994
+Now we run it, but only part of it.
+
+15
+00:01:53.994 --> 00:01:56.939
+--max-steps 2 stops the run after two steps.
+
+16
+00:01:56.939 --> 00:02:14.646
+The table shows the data mismatch falling from the prior (step 0).
+
+17
+00:02:14.646 --> 00:02:23.070
+The run's folder is my_first_case/runs/linear_esmda, next to its configuration.
+
+18
+00:02:23.070 --> 00:02:26.473
+Every step is saved as a checkpoint in the run's folder.
+
+19
+00:02:26.473 --> 00:02:32.793
+A long run can also be stopped from another terminal with this command: it stops at its next checkpoint.
+
+20
+00:02:32.793 --> 00:02:43.394
+Ours has already stopped, so we only type it.
+
+21
+00:02:43.394 --> 00:02:46.476
+So: validate first, and read the plan's cost.
+
+22
+00:02:46.476 --> 00:02:48.598
+Max steps stops a run part-way.
+
+23
+00:02:48.598 --> 00:02:54.859
+In the next video we resume it and read the results.
+
+24
+00:02:54.859 --> 00:03:00.359
+Thank you for watching.

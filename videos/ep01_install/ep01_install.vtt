@@ -1,0 +1,149 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.071
+Episode one: install APEX.
+
+2
+00:00:02.071 --> 00:00:07.009
+This video assumes only a Linux terminal with internet access.
+
+3
+00:00:07.009 --> 00:00:12.975
+APEX is tested on Linux with Python 3.12.
+
+4
+00:00:12.975 --> 00:00:25.646
+APEX is a framework for ensemble-based history matching, forecasting, uncertainty quantification and optimization of subsurface models, with agents that plan, monitor and report on the work.
+
+5
+00:00:25.646 --> 00:00:27.380
+Status: early development.
+
+6
+00:00:27.380 --> 00:00:36.636
+First, we check that git is installed.
+
+7
+00:00:36.636 --> 00:00:41.114
+You need git and uv, the Python package manager APEX uses.
+
+8
+00:00:41.114 --> 00:00:45.283
+uv also downloads Python 3.12 if your system lacks it.
+
+9
+00:00:45.283 --> 00:00:58.524
+This command installs uv.
+
+10
+00:00:58.524 --> 00:01:12.722
+Open a new terminal afterwards (or run source ~/.local/bin/env) so that uv is on your PATH.
+
+11
+00:01:12.722 --> 00:01:22.222
+Then check it with uv --version.
+
+12
+00:01:22.222 --> 00:01:27.513
+Next, we clone the public repository into a folder named apex.
+
+13
+00:01:27.513 --> 00:01:39.666
+APEX's licence is GPL-3.0-or-later.
+
+14
+00:01:39.666 --> 00:01:41.373
+We move into the new folder.
+
+15
+00:01:41.373 --> 00:01:49.156
+Every command from now on runs here.
+
+16
+00:01:49.156 --> 00:01:51.280
+Now we create the environment.
+
+17
+00:01:51.280 --> 00:02:02.466
+This creates .venv/ inside the folder with APEX, its exact pinned dependencies (uv.lock), the development and documentation tools, and most optional features.
+
+18
+00:02:02.466 --> 00:02:13.188
+We cut the wait.
+
+19
+00:02:13.188 --> 00:02:18.789
+Every later command is run from this folder with uv run, which uses that environment.
+
+20
+00:02:18.789 --> 00:02:21.029
+First, the command-line interface.
+
+21
+00:02:21.029 --> 00:02:36.840
+Look at the list of commands.
+
+22
+00:02:36.840 --> 00:03:03.324
+This lists every plugin you can choose (methods, simulators, priors, the agents' skills, ...); [parity], [validated], [stable], [experimental] tags show a status.
+
+23
+00:03:03.324 --> 00:03:07.627
+To check the installation further, we run the test suite, on 4 cores.
+
+24
+00:03:07.627 --> 00:03:17.939
+We cut the wait and show the result.
+
+25
+00:03:17.939 --> 00:03:22.217
+Three optional features are not in the default environment.
+
+26
+00:03:22.217 --> 00:03:32.152
+This command would add two: co2, CO₂'s equation of state (CoolProp), for monitoring CO₂ storage; and ert, the interface to Equinor's ERT.
+
+27
+00:03:32.152 --> 00:03:46.608
+Note: each uv sync installs exactly what it is given, so repeat earlier ones when adding another.
+
+28
+00:03:46.608 --> 00:03:52.176
+Reservoir simulations also need OPM Flow, which is not a Python package.
+
+29
+00:03:52.176 --> 00:03:59.291
+On Ubuntu 24.04 or later (OPM's packages): these are the commands, as the README lists them.
+
+30
+00:03:59.291 --> 00:04:06.405
+Note: only OPM Flow (step 5) needs administrator rights, and only for reservoir simulations.
+
+31
+00:04:06.405 --> 00:04:22.586
+For other systems, see OPM's binary packages.
+
+32
+00:04:22.586 --> 00:04:25.688
+Once it is installed, this checks OPM Flow.
+
+33
+00:04:25.688 --> 00:04:35.424
+Episodes six, seven and thirteen need it.
+
+34
+00:04:35.424 --> 00:04:40.869
+This command serves the documentation; then open http://127.0.0.1:8000 in a browser.
+
+35
+00:04:40.869 --> 00:04:53.672
+It describes the plugins, the configuration files and the workflows, with a user guide and notebooks.
+
+36
+00:04:53.672 --> 00:05:08.197
+Later, to update: git pull, then uv sync --locked again, with the same --extra options as before.
+
+37
+00:05:08.197 --> 00:05:13.697
+Thank you for watching.

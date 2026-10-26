@@ -1,0 +1,73 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:03.390
+Episode four: resume the run and read its results.
+
+2
+00:00:03.390 --> 00:00:10.847
+This video assumes APEX installed, as in episode one, and the run from episode three, stopped after two steps.
+
+3
+00:00:10.847 --> 00:00:16.597
+Run every command below from the APEX folder.
+
+4
+00:00:16.597 --> 00:00:22.525
+Every step is saved as a checkpoint in the run's folder.
+
+5
+00:00:22.525 --> 00:00:23.600
+Now we resume it.
+
+6
+00:00:23.600 --> 00:00:44.247
+The run continues from its last checkpoint to the end; a resumed run gives exactly the same results as one that never stopped.
+
+7
+00:00:44.247 --> 00:00:46.535
+What if we run the same command again?
+
+8
+00:00:46.535 --> 00:01:01.403
+Running the same configuration again with apex run is refused while its folder holds a run.
+
+9
+00:01:01.403 --> 00:01:12.741
+So: resume it, or give the new run another [run] name, here in the run section.
+
+10
+00:01:12.741 --> 00:01:41.524
+The summary gives every metric at every step, as member means ± standard deviations (the sample standard deviation, so slightly larger than the run's table), from the prior (step 0) to the result.
+
+11
+00:01:41.524 --> 00:01:51.097
+data_mismatch is what the method minimises: each member's misfit to the data, weighted by the data errors.
+
+12
+00:01:51.097 --> 00:01:58.150
+normalized_data_mismatch is the mean square of the residuals to the observations, each scaled by its data error.
+
+13
+00:01:58.150 --> 00:02:05.384
+Near 1, the members fit the data about as well as the data errors allow.
+
+14
+00:02:05.384 --> 00:02:13.343
+rmse is the members' distance from the true model, which only a synthetic case has.
+
+15
+00:02:13.343 --> 00:02:19.677
+model_change is how much the members changed in the last step.
+
+16
+00:02:19.677 --> 00:02:27.683
+So: resume continues from the last checkpoint, with exactly the same results, and summary gives every metric at every step.
+
+17
+00:02:27.683 --> 00:02:33.767
+In the next video: the figures, and a second method.
+
+18
+00:02:33.767 --> 00:02:39.267
+Thank you for watching.

@@ -1,0 +1,133 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:04.159
+Episode fifteen: write a plugin, a history-matching algorithm.
+
+2
+00:00:04.159 --> 00:00:14.507
+This video assumes APEX installed, as in episode one, and shows the plugin steps of episode fourteen more briefly.
+
+3
+00:00:14.507 --> 00:00:19.661
+A history-matching method is a small state machine that APEX's workflow drives.
+
+4
+00:00:19.661 --> 00:00:22.336
+The method never runs a simulator itself.
+
+5
+00:00:22.336 --> 00:00:26.120
+The example is ES-MDA with a geometric inflation schedule.
+
+6
+00:00:26.120 --> 00:00:41.707
+It goes in a package of its own.
+
+7
+00:00:41.707 --> 00:00:58.932
+Its inflation factors decrease geometrically, so the early updates are damped and the last ones refine.
+
+8
+00:00:58.932 --> 00:01:03.464
+Start asks for the prior's forecast, and advance takes the forecasts back.
+
+9
+00:01:03.464 --> 00:01:33.560
+It asks for forecasts, and the workflow runs them on the configured simulator and executor, with failed-member handling, checkpoints, metrics, progress and cross validation.
+
+10
+00:01:33.560 --> 00:01:35.208
+Two rules keep runs exact.
+
+11
+00:01:35.208 --> 00:01:39.392
+Draw random numbers only from setup.streams, never from np.random.
+
+12
+00:01:39.392 --> 00:01:46.683
+Put everything the loop needs into export_state(), including a pending update whose forecast has not come back yet.
+
+13
+00:01:46.683 --> 00:02:04.363
+Restore state then continues from a checkpoint.
+
+14
+00:02:04.363 --> 00:02:23.921
+The update itself comes from APEX: the method calls an update strategy, here approx, and keeps only its own loop.
+
+15
+00:02:23.921 --> 00:02:36.200
+We register it in pyproject.toml, as for the metric, with the entry point in apex.methods.
+
+16
+00:02:36.200 --> 00:02:49.497
+From the APEX folder, we install the package into APEX's environment.
+
+17
+00:02:49.497 --> 00:02:52.034
+We check that APEX finds the method.
+
+18
+00:02:52.034 --> 00:03:03.627
+Its status, experimental, is shown in apex plugins.
+
+19
+00:03:03.627 --> 00:03:12.835
+We go to the linear-Gaussian example's folder.
+
+20
+00:03:12.835 --> 00:03:20.681
+The page says: copy the original config_esmda.toml (not the metric's copy) to config_geo.toml, give its run a name of its own.
+
+21
+00:03:20.681 --> 00:03:25.414
+Then replace its [method] section with this one, which names the new method.
+
+22
+00:03:25.414 --> 00:03:36.860
+We did the copy, and removed its old [method] section, before this scene.
+
+23
+00:03:36.860 --> 00:03:37.974
+We validate it.
+
+24
+00:03:37.974 --> 00:03:55.060
+The plan should say at most 5 forecasts, 2,500 simulator runs: the method's own count.
+
+25
+00:03:55.060 --> 00:04:08.961
+Then we run it, like any of APEX's own methods.
+
+26
+00:04:08.961 --> 00:04:28.468
+The report shows the schedule (in the damping column) and the data mismatch falling.
+
+27
+00:04:28.468 --> 00:04:30.086
+Does it resume exactly?
+
+28
+00:04:30.086 --> 00:04:35.079
+Stop a run early, resume it, and compare it with the uninterrupted run.
+
+29
+00:04:35.079 --> 00:04:48.622
+First, two steps of a copy.
+
+30
+00:04:48.622 --> 00:04:49.725
+Then we resume it.
+
+31
+00:04:49.725 --> 00:04:56.401
+Every checkpoint must be identical to the uninterrupted run's; the page has a short check that compares them.
+
+32
+00:04:56.401 --> 00:05:09.884
+A method needs an independent reference.
+
+33
+00:05:09.884 --> 00:05:15.384
+Thank you for watching.
