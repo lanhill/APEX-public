@@ -157,6 +157,19 @@ def note_uncommitted(service: ApexService, commits: Iterable[str | None]) -> Non
         )
 
 
+def code_label(record: dict[str, Any]) -> str:
+    """Return the code a job ran: its pinned commit, ``live``, or ``reused``.
+
+    A job that reused an identical finished run ran no code: it shows ``reused`` and, when a
+    job made that run, that job's code (the tester's H18).
+    """
+    spec = record.get("spec") or {}
+    if "reused" in spec:
+        made = spec.get("reused_code")
+        return f"reused ({made})" if isinstance(made, str) else "reused"
+    return str((record.get("code") or {}).get("commit") or "live")
+
+
 @jobs_app.command("list")
 def jobs_list(
     state: Annotated[
@@ -170,7 +183,7 @@ def jobs_list(
     if state:
         records = [r for r in records if r["state"] in state]
     for record in records[-last:] if last else records:
-        code = (record.get("code") or {}).get("commit", "live")
+        code = code_label(record)
         where = record["run_dirs"][0] if record["run_dirs"] else ""
         typer.echo(f"{record['id']}  {record['kind']:<19} {record['state']:<9} {code:<12}  {where}")
 
@@ -291,7 +304,7 @@ def submit(
     elif handle.reused:
         reused = " (an identical run: reused)"
     typer.echo(f"{handle.kind} job {handle.id}{reused}: {record['state']}, "
-               f"code {pinned or 'live'}")  # fmt: skip
+               f"code {code_label(record)}")  # fmt: skip
     typer.echo(f"  folder: {where}")
     if record["state"] not in FINAL:
         typer.echo(f"  follow: apex jobs show {handle.id}  |  stop: apex jobs stop {handle.id}")

@@ -108,6 +108,9 @@ def test_a_run_is_submitted_frozen_by_default_and_listed(
 
     again = apex("submit", str(case.config), "--root", str(root))
     assert "(an identical run: reused)" in again
+    # Release tester H18: the reusing job ran no code; it names the code that made the run.
+    assert f"code reused ({commit})" in again
+    assert f"reused ({commit})" in apex("jobs", "list", "--root", str(root))
     assert '"state": "complete"' in apex("jobs", "show", job[:20], "--root", str(root))
 
 
@@ -265,6 +268,50 @@ def test_without_a_terminal_the_pending_token_is_printed(
     assert again.exit_code == 0, again.output
     assert "(an identical run: reused)" in again.output
     assert "approval" not in again.output
+
+
+def test_a_reusing_job_never_shows_live_code() -> None:
+    """Release tester H18: a reused run's job said "code live" though it ran nothing."""
+    from apex.cli.job_commands import code_label
+
+    reused = {"spec": {"reused": "/runs/case"}, "code": None}
+    made = {"spec": {"reused": "/runs/case", "reused_code": "0123456789ab"}, "code": None}
+
+    assert code_label(reused) == "reused"  # no record says which code made the run
+    assert code_label(made) == "reused (0123456789ab)"
+    assert code_label({"spec": {}, "code": None}) == "live"
+    assert code_label({"spec": {}, "code": {"commit": "0123456789ab"}}) == "0123456789ab"
+
+
+def test_a_token_refused_says_what_changed(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release tester H17 (2026-10-27): after a `git pull` between approving and submitting,
+    the token was refused as "for another submission", which did not say why."""
+    from apex.services import approval, identity
+
+    root = _approval_root(tmp_path)
+    config = str(linear_case(ensemble_size=20).config)  # 100 simulator runs
+    refused = runner.invoke(app, ["submit", config, "--root", str(root)], input="")
+    found = re.search(r"pending approval token: (\w+)", refused.output)
+    assert found is not None, refused.output
+    token = found.group(1)
+    apex("approve", token, "--root", str(root))
+
+    pulled = {"apex": "0", "commit": "f" * 40, "uncommitted": None}
+    monkeypatch.setattr(identity, "code_version", lambda: pulled)
+    monkeypatch.setattr(approval, "code_version", lambda: pulled)
+    after_pull = runner.invoke(app, ["submit", config, "--approval-token", token,
+                                     "--root", str(root)])  # fmt: skip
+
+    assert after_pull.exit_code == 1, after_pull.output
+    assert "APEX's code changed since it was approved" in after_pull.output
+    assert "-> ffffffffffff" in after_pull.output
+    monkeypatch.undo()
+    other = str(linear_case(ensemble_size=21, name="other").config)
+    another = runner.invoke(app, ["submit", other, "--approval-token", token, "--root", str(root)])
+    assert another.exit_code == 1, another.output
+    assert "its runs differ from the approved ones" in another.output
 
 
 def test_a_grant_approves_a_submission_of_its_client_and_experiment(

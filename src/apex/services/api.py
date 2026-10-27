@@ -658,10 +658,12 @@ class ApexService:
         asked = {"requested_dir": str(requested)} if requested is not None else {}
         if _complete(path):
             # Recorded under the submitting client too (the web UI's users see their own
-            # jobs by it). The spec records the run it reused.
+            # jobs by it). The spec records the run it reused, and the code that
+            # made it: this job runs no code of its own, live or frozen.
+            made = run_commit(Path(path)) or _made_with(records, identity)
             job = self.jobs.submit(
                 "run",
-                {"reused": str(path), **asked},
+                {"reused": str(path), **asked, **({"reused_code": made} if made else {})},
                 run_ids=[identity], run_dirs=[str(path)],
                 annotations=annotations, parent=parent, state="complete",
                 client=scheduling.get("client", "user"),
@@ -1339,6 +1341,25 @@ class ApexService:
         """Return a finished prediction's results."""
         policy.check_source(path, self.jobs.settings.policy, self.root)
         return summarise_prediction(path)
+
+
+def _made_with(records: list[dict[str, Any]], identity: str) -> str | None:
+    """Return the commit of the job that made run ``identity`` (or "live checkout"), if any.
+
+    The fallback of the run's own provenance (:func:`run_commit`), which names no commit
+    for a run started from an uncommitted tree.
+    """
+    for record in reversed(records):
+        spec = record.get("spec") or {}
+        if identity not in record["run_ids"] or record["state"] != "complete":
+            continue
+        if "reused" in spec:
+            made = spec.get("reused_code")
+            if isinstance(made, str):
+                return made
+            continue
+        return str((record.get("code") or {}).get("commit") or "live checkout")
+    return None
 
 
 def _complete(path: Path) -> bool:

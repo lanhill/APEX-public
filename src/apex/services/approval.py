@@ -24,6 +24,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from apex.core.errors import ConfigError
+from apex.services.identity import code_version
 from apex.services.settings import ApprovalSection
 from apex.storage.sqlite_store import SQLiteStore
 
@@ -47,6 +48,30 @@ class ApprovalRequired(ConfigError):
 def fingerprint(run_ids: Sequence[str]) -> str:
     """Return the fingerprint of a submission: a hash of its run ids."""
     return hashlib.sha256(json.dumps(sorted(run_ids)).encode()).hexdigest()
+
+
+def _short(code: Any) -> str:  # noqa: ANN401 (a stored record's field)
+    if not isinstance(code, dict):
+        return "unknown"
+    if not code.get("commit"):  # an installed APEX: no checkout
+        return f"version {code.get('apex')}"
+    commit = str(code["commit"])[:12]
+    dirty = code.get("uncommitted")
+    return f"{commit} with uncommitted changes {str(dirty)[:8]}" if dirty else commit
+
+
+def _changed(record: dict[str, Any]) -> str:
+    """Say why a submission is not the approved one: APEX's code, or its runs, changed.
+
+    Not every fingerprint holds the code (a prediction's, a resume's), so a changed code is
+    named as the likely cause, not the only one.
+    """
+    approved, now = record.get("code"), code_version()
+    if approved is not None and approved != now:
+        return (f"APEX's code changed since it was approved ({_short(approved)} -> "
+                f"{_short(now)}; a run's id includes the code), or its configuration or "
+                "inputs differ")  # fmt: skip
+    return "its runs differ from the approved ones (another configuration, or changed inputs)"
 
 
 def _now() -> dt.datetime:
@@ -74,6 +99,8 @@ class Approvals:
             token,
             {
                 "fingerprint": print_,
+                # The code is part of every run's id: kept to say so when it changes.
+                "code": code_version(),
                 "cost": cost,
                 "requested_by": requested_by,
                 "created": _now().isoformat(timespec="seconds"),
@@ -108,7 +135,8 @@ class Approvals:
         """
         record = self._usable(token)
         if record["fingerprint"] != print_:
-            raise ConfigError(f"approval {token} is for another submission; validate again")
+            raise ConfigError(f"approval {token} is for another submission: {_changed(record)}; "
+                              "validate it again, and approve its new token")  # fmt: skip
         if not record["approved_by"]:
             raise ConfigError(f"approval {token} is still pending: run `apex approve {token}`")
         record["used"] = True

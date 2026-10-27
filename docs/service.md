@@ -60,6 +60,8 @@ uv run apex jobs show JOB                                    # the record and it
 uv run apex jobs stop JOB                                    # queued: cancelled; running: stops at the next checkpoint
 ```
 
+The code column is the commit a job runs, or `live`. A job that reused an identical finished run ran nothing: it shows `reused (COMMIT)`, COMMIT being the code that made that run (from the run's `provenance.json`, else its job; `live checkout` for a job of the checkout's uncommitted code), or a bare `reused` when neither says.
+
 Large submissions ask for approval, as `apex study run` does (`--yes`, or `--approval-token`). By default a job submitted from the command line runs **frozen code** (next section). `--code live` runs the checkout instead.
 
 ## Scheduling

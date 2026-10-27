@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -270,7 +271,13 @@ def test_copies_get_the_extras_installed_here_by_default(tmp_path: Path) -> None
     # Each one's packages are installed here (CI syncs none, the workstation all but torch).
     from importlib import metadata
 
-    requires = metadata.distribution("apex").requires or []
+    # APEX's own extras and those of the workspace's installed members (named apex-...).
+    requires = [
+        r
+        for dist in metadata.distributions()
+        if re.fullmatch(r"apex([-_].+)?", str(dist.metadata["Name"]).lower())
+        for r in dist.requires or []
+    ]
     for extra in extras:
         assert any(f'extra == "{extra}"' in r or f"extra == '{extra}'" in r for r in requires)
 

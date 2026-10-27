@@ -101,7 +101,7 @@ uv run apex approve 4c60b46a3781c1ad
 uv run apex submit examples/linear_gaussian/config_esmda.toml --approval-token 4c60b46a3781c1ad
 ```
 
-A token is bound to that submission and its cost, can be used once, and expires after 24 hours. Remove the `[approval]` lines afterwards to go back to the default limits. [Grants](../guide/cli/grant.md) approve a budget in advance, for a client's experiment.
+A token is bound to that submission and its cost, can be used once, and expires after 24 hours. APEX's code is part of the submission: after updating APEX (`git pull`) between approving and submitting, the token is refused with a message that APEX's code changed (with the two commits, in a git checkout), and the submission needs a new approval. Remove the `[approval]` lines afterwards to go back to the default limits. [Grants](../guide/cli/grant.md) approve a budget in advance, for a client's experiment.
 
 ## Next steps
 
