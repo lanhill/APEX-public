@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from apex.cli.job_commands import detect_kind
 from apex.cli.main import app
 from apex.core.errors import ConfigError
+from apex.services import api as api_module
 from apex.services import code as code_module
 from apex.services.api import ApexService
 from apex.storage.sqlite_store import JOB_PROTOCOL
@@ -85,7 +86,7 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_a_run_is_submitted_frozen_by_default_and_listed(
-    root: Path, linear_case: CaseFactory
+    root: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = linear_case()
     repo = root.parent / "repo"
@@ -106,11 +107,17 @@ def test_a_run_is_submitted_frozen_by_default_and_listed(
     assert commit in listed
     assert commit in apex("code", "list", "--root", str(root))
 
-    again = apex("submit", str(case.config), "--root", str(root))
+    # Release tester H18: a reusing job ran no code; it names the code that made the run, from
+    # its provenance or, without a commit there (an uncommitted tree), the job that made it.
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module, "run_commit", lambda path: None)
+        again = apex("submit", str(case.config), "--root", str(root))
     assert "(an identical run: reused)" in again
-    # Release tester H18: the reusing job ran no code; it names the code that made the run.
     assert f"code reused ({commit})" in again
     assert f"reused ({commit})" in apex("jobs", "list", "--root", str(root))
+    # The provenance names the live checkout's commit when it is clean (the stub copy runs it).
+    made = code_module.run_commit(case.directory / "runs" / "case") or commit
+    assert f"code reused ({made})" in apex("submit", str(case.config), "--root", str(root))
     assert '"state": "complete"' in apex("jobs", "show", job[:20], "--root", str(root))
 
 
