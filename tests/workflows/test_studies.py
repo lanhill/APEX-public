@@ -108,6 +108,9 @@ def test_budget_and_approval_are_checked_before_anything_runs(
     validation = service.validate_study(over)
     assert not validation.valid
     assert "over its budget of 50" in validation.errors[0]
+    # A reported issue (#248): the refusal says what each arm costs and what would fit.
+    assert "Runs per replicate: linear/four_steps 100, linear/two_steps 60" in validation.errors[0]
+    assert "even one replicate is over it; lower the cost of" in validation.errors[0]
     assert len(validation.plans) == 4
     with pytest.raises(ConfigError, match="over its budget"):
         service.submit_study(over)

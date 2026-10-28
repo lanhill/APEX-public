@@ -423,7 +423,8 @@ def test_the_assistant_plans_a_draft_and_proposes_it_but_never_submits(
     assert answer == "I planned the study and proposed it."
     over = json.loads(stub.requests[1].messages[-1].content)
     assert not over["ok"]
-    assert "over the budget" in over["error"]  # 2 x 3 x 100 = 600 > 200: revised
+    assert "over its budget of 200" in over["error"]  # 2 x 3 x 100 = 600 > 200: revised
+    assert "To fit: run 1 replicate (200 runs)" in over["error"]  # a reported issue, #248
     planned = json.loads(stub.requests[2].messages[-1].content)["result"]
     assert planned["cost"] == 2 * 1 * 100
     # What the arms share and how they differ, from the cells (a reported issue).
@@ -432,6 +433,8 @@ def test_the_assistant_plans_a_draft_and_proposes_it_but_never_submits(
     # No localization in the baseline: "none", not a default that would localize.
     assert planned["differs"]["alpha | baseline"]["method.localization.name"] == "none"
     assert list(planned["seeds"]) == ["r0"]
+    # Whether rmse can compare, for the answer to state (a reported issue, #247).
+    assert planned["true_model"].startswith("yes: the case is synthetic")
     assert (folder / "study_loc_test.toml").exists()
     [proposal] = store.proposals(chat.id)
     assert (proposal.state, proposal.draft, proposal.data["cost"]) == ("pending", draft, 200)
@@ -665,8 +668,9 @@ def test_a_proposal_is_launched_or_discarded_by_the_user_over_http(
     assert (elsewhere.json()["state"], elsewhere.json()["job"]) == ("launched", None)
     assert http.post(f"/v1/chats/{chat.id}/proposals/{third}:launched", headers=AUTH,
                      json={"elsewhere": True}).status_code == 409  # fmt: skip
-    told = http.get(f"/v1/chats/{chat.id}", headers=AUTH).json()["messages"][-1]["content"]
-    assert "outside your web-UI folder: nothing new was submitted" in told
+    # Not necessarily the last message: the study launched above may end meanwhile.
+    told = [m["content"] for m in http.get(f"/v1/chats/{chat.id}", headers=AUTH).json()["messages"]]
+    assert sum("outside your web-UI folder: nothing new was submitted" in m for m in told) == 1
 
 
 def test_ui_users_see_their_own_drafts_and_plan_only_if_listed(
@@ -845,7 +849,7 @@ def test_a_refused_tool_call_tells_the_user_why(tmp_path: Path, linear_case: Cas
 
     [result] = [e for e in store.events(chat.id) if e.kind == "tool_result"]
     assert result.data["ok"] is False
-    assert "over the budget" in result.data["error"]
+    assert "over its budget of 1. Runs per replicate" in result.data["error"]
 
 
 def test_a_streaming_model_writes_its_answer_as_it_goes(tmp_path: Path) -> None:

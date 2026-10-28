@@ -371,7 +371,7 @@ def test_the_assistants_design_of_an_optimization_study_is_kept_and_revisable(
             case="alpha/opt.toml", goal="compare", budget=400,
             methods={"smc": {**smcopt, "max_iterations": 3}},
         ))  # fmt: skip
-    with pytest.raises(ValueError, match="over the budget"):
+    with pytest.raises(ValueError, match=r"over its budget of 1\. Runs per replicate"):
         plan.handler(plan.arguments(case="alpha/opt.toml", goal="compare", budget=1,
                                     methods={"smc": smcopt}))  # fmt: skip
 

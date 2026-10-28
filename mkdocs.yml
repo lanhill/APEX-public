@@ -72,6 +72,8 @@ nav:
       - guide/plugins/reflectivity.md
       - guide/cli/code.md
       - guide/cli/jobs.md
+      - guide/plugins/geomodeling_skills.md
+      - guide/plugins/chop_components.md
   - Reference:
       - reference/agents.md
       - reference/assistant-tools.md

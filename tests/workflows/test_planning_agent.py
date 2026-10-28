@@ -127,7 +127,8 @@ def test_an_over_budget_or_invalid_proposal_is_revised(
     assert result.decided_by == "model"
     assert result.proposal.replicates == 3
     assert len(result.revisions) == 2
-    assert "over the budget" in result.revisions[0]
+    assert "over its budget of 600. Runs per replicate" in result.revisions[0]
+    assert "over the budget" not in result.revisions[0]  # said once, by the study
     assert "run.seed" in result.revisions[1]
     assert "refused" in stub.requests[1].messages[1].content
     assert result.cost == 3 * PER_RUN

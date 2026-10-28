@@ -68,6 +68,49 @@ def cell_label(case: str, method: str | None, variant: str, replicate: int) -> s
     return "/".join([case, *([method] if method else []), variant, f"r{replicate}"])
 
 
+#: How a study's refusal over its budget begins, for planners that would say it again.
+OVER_BUDGET = "the study may take"
+
+
+def over_budget(total: int | None, limit: int, costs: Sequence[tuple[str, int, int | None]]) -> str:
+    """Return why a study is over its budget, with each arm's cost and what would fit.
+
+    ``costs`` holds ``(arm, replicate, simulator runs)`` per cell (``None``: unbounded), the
+    arm being ``case/[method/]variant``. A reported issue (#248): the bare total left the
+    assistant to guess which cells to shrink, and it handed the choice back to the user.
+    """
+    head = (
+        f"{OVER_BUDGET} {total if total is not None else 'an unknown number of'} "
+        f"simulator runs, over its budget of {limit}"
+    )
+    unbounded = sorted({arm for arm, _, runs in costs if runs is None})
+    if unbounded:
+        return f"{head}: the runs of {', '.join(unbounded)} cannot be bounded"
+    first = {arm: runs for arm, replicate, runs in costs if replicate == 0 and runs is not None}
+    if not first:
+        return head
+    replicates = max(replicate for _, replicate, _ in costs) + 1
+    per_replicate = sum(first.values())
+    arms = ", ".join(f"{arm} {runs}" for arm, runs in first.items())
+    fits = limit // per_replicate if per_replicate else replicates
+    costliest = max(first, key=lambda arm: first[arm])
+    shrink = (
+        f"lower the cost of the costliest arm, {costliest} ({first[costliest]} runs): "
+        "fewer iterations, members or a smaller population"
+    )
+    if 1 <= fits < replicates:
+        plural = "s" if fits > 1 else ""
+        advice = f"run {fits} replicate{plural} ({fits * per_replicate} runs), or {shrink}"
+    elif fits < 1:
+        advice = f"even one replicate is over it; {shrink}, or drop an arm"
+    else:  # (the replicates' costs differ: a seed changed a bound)
+        advice = shrink
+    return (
+        f"{head}. Runs per replicate: {arms} ({per_replicate} in all, "
+        f"{replicates} replicate{'s' if replicates > 1 else ''}). To fit: {advice}"
+    )
+
+
 @dataclass(frozen=True)
 class StudyPlan:
     """An expanded, validated study."""
@@ -304,6 +347,7 @@ def plan_study(
         return StudyPlan(spec, [], Validation(valid=False, errors=[str(error)]))
     errors: list[str] = []
     plans: list[RunPlan] = []
+    costs: list[tuple[str, int, int | None]] = []
     valid_cells: list[PlannedCell] = []
     skipped = tuple(skipped_cells(spec))
     for cell in cells:
@@ -313,6 +357,13 @@ def plan_study(
         errors += [f"{label}: {e}" for e in validation.errors]
         if validation.plan is not None:
             plans.append(validation.plan)
+            runs, predictions = (
+                validation.plan.max_simulator_runs,
+                prediction_runs(spec, validation.plan.members),
+            )
+            arm = label.rsplit("/", 1)[0]
+            costs.append((arm, cell.replicate, None if runs is None or predictions is None
+                          else runs + predictions))  # fmt: skip
         errors += [f"{label}: {e}" for e in _prediction_violations(service, spec, cell, base_dir)]
         if not validation.errors:
             valid_cells.append(cell)
@@ -322,10 +373,7 @@ def plan_study(
     limit = spec.study.budget.max_simulator_runs
     total = plan.max_simulator_runs
     if not errors and limit is not None and (total is None or total > limit):
-        errors.append(
-            f"the study may take {total if total is not None else 'an unknown number of'} "
-            f"simulator runs, over its budget of {limit}"
-        )
+        errors.append(over_budget(total, limit, costs))
         plan = StudyPlan(spec, cells, Validation(valid=False, errors=errors, plans=plans), skipped)
     return plan
 

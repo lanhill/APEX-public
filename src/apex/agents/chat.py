@@ -653,7 +653,13 @@ SYSTEM = (
     "registry 'metrics'); metrics that need the truth (rmse, ssim, the facies metrics) "
     "apply only to synthetic cases with a truth file (case_info's kind). After a refused "
     "plan, read the refusal's cost breakdown (runs per cell, cells, the minimum design) "
-    "and answer from it, not from an estimate of your own. "
+    "and answer from it, not from an estimate of your own; a budget refusal names each "
+    "arm's runs per replicate and what fits: revise the design to fit it yourself (fewer "
+    "replicates, or fewer iterations or members of the costliest arm) and give the plan, "
+    "naming what you shrank. Before stating a case's settings (members, ne, maxiter, "
+    "population), read them with case_info and use the option names it shows, and take "
+    "costs from plan_study; never quote either from memory. plan_study's 'true_model' "
+    "says whether rmse can compare: state it with the metrics. "
     "A fact a tool returned earlier in this chat (a case's kind from case_info, a cost a "
     "refusal computed) is known: use it, never ask the user to confirm it, and never call it "
     "unverified or an estimate later; only what no tool gave is an assumption (economics "
@@ -913,6 +919,13 @@ class ChatAssistant:
                 "variants": [v.model_dump() for v in proposal.variants],
                 "replicates": proposal.replicates, "metrics": proposal.metrics,
                 "simulator": spec.study.simulator or f"each case's own ({facts.simulator})",
+                # Whether model-error metrics (rmse, ssim) can be compared, so the answer
+                # states it rather than leaving it to the user (a reported issue, #247).
+                "true_model": (
+                    "yes: the case is synthetic, so rmse and ssim compare against it"
+                    if facts.synthetic else
+                    "no: the case has no true model, so only data-mismatch metrics compare"
+                ),
                 **comparison,
                 "cost": total, "budget": facts.budget_simulator_runs,
                 "approval": _approval(service, len(cells), study_plan.max_simulator_runs),

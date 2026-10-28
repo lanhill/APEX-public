@@ -2,6 +2,7 @@
 audience: public
 items:
   - cli:apex plugins
+  - cli:apex report
   - cli:apex resume
   - cli:apex run
   - cli:apex stop
@@ -29,8 +30,8 @@ By the end of this lesson you will be able to:
 
 ## Prerequisites
 
-- A basic idea of amplitude versus offset (AVO) analysis and of a seismic trace as a series of amplitude samples.
-- An idea of the window. Here it means the contiguous range of samples an attribute looks at, for example "the 3rd to the 7th sample of the trace". The attribute works on the samples inside it. None of these plugins has an option for the window, so you cannot set it on the plugin itself.
+- A basic idea of amplitude versus offset (AVO) analysis, and of a seismic trace as a series of amplitude samples.
+- An idea of the window: the contiguous range of samples an attribute looks at, for example "the 3rd to the 7th sample of the trace". The attribute works only on the samples inside it. None of these plugins has an option for the window, so you cannot set the window on the plugin itself. The examples on this page simply assume a window is given.
 - Access to the `apex` command line, to check which plugins are installed and to start a run.
 
 ## The plugins
@@ -70,7 +71,7 @@ None of these plugins has any options. Each one's option set is empty and accept
    uv run apex plugins --json
    ```
 
-4. Name the plugin (for example `max`) in your run configuration, which is the TOML file you pass to `apex run`, and leave the plugin's options empty. This page does not describe the configuration sections that carry the attribute and the window, so it cannot show a complete configuration. If you do not have one yet, start from a configuration that already works for a history-matching run and change only the plugin name.
+4. Put the plugin name (for example `max`) where your run configuration names its AVO attribute, and give it no options. The run configuration is the TOML file you pass to `apex run`. The facts this page is built on do not say which section or key of that file holds the attribute, so this page cannot show a complete configuration. The safe route is to start from a history-matching configuration that already runs for you and change only the attribute's plugin name, leaving everything else as it is.
 5. Start the run:
 
    ```
@@ -84,7 +85,19 @@ None of these plugins has any options. Each one's option set is empty and accept
    ```
 
    Progress is shown on standard error. Use `--no-progress` to turn it off (`--progress` is the default).
-6. Compare the attribute value your run produces with a hand calculation on a few samples, as in the examples below. Use a small window so the arithmetic is easy to follow. This page does not say where a run reports the value, so look in the outputs of your own run.
+6. Look at the result of the run. `apex report` prints the data mismatch history and the performance metrics of a run. Give it the run directory:
+
+   ```
+   uv run apex report RUN_DIR
+   ```
+
+   Add `--plots` to also write the result figures as PNG and PDF. They go to `RUN_DIR/report` unless you give another directory with `--output`:
+
+   ```
+   uv run apex report RUN_DIR --plots --output figures
+   ```
+
+   This shows how the mismatch behaves when you change plugin. To check what an attribute computes, use the hand calculations below, which need no run.
 
 ## Worked example
 
@@ -118,13 +131,14 @@ The five samples inside the window are kept unchanged. The four outside it (the 
 
 ### The `time_shift` plugin
 
-`time_shift` does not average or sum amplitudes. It returns one time value: the two-way time to the reservoir's base. That time is used for the time shift, so choose `time_shift` when you want that time rather than an amplitude from the window. This page does not go further into how the time shift is applied or where the base time comes from.
+`time_shift` does not average or sum amplitudes. It returns one time value: the two-way time to the reservoir's base, which is used for the time shift. Choose `time_shift` when you want that time rather than an amplitude from the window. It has no options. This page does not describe how the time shift is applied or where the base time comes from.
 
 As an illustration only, with made-up numbers: if the reservoir's base lies at a two-way time of 2.150 s, `time_shift` returns 2.150 s. Because the result is a time and not a function of the amplitude statistics above, there is no sample arithmetic to check by hand. Treat it as a time, and do not compare it with the other attributes.
 
 ## Pitfalls
 
 - **Expecting options.** These plugins have none. Their option sets accept no properties, so there is no threshold or parameter to adjust. A setting you add anyway is not valid for the plugin. Remove it and choose a different plugin to get different behaviour.
+- **Looking for a window setting on the plugin.** The window is not an option of any of these plugins.
 - **Using `mean` to judge strength.** Positive and negative samples cancel in the mean. Use `rms` for overall energy.
 - **Confusing `min` with `sum_negative`.** `min` is one value, the deepest trough. `sum_negative` adds up every negative sample, so it grows with the number of negative samples as well as their size.
 - **Forgetting that `rms` is the default.** If you want a peak or trough, choose `max` or `min` explicitly.
@@ -134,7 +148,7 @@ As an illustration only, with made-up numbers: if the reservoir's base lies at a
 
 ## What to read next
 
-- Run `apex plugins` to see every plugin and its options, including those in other registries.
-- Run `apex plugins --json` if you want the full descriptions in a form that other tools can read.
-- Run `apex run` with `--max-steps` on a small case, then continue with `apex resume`. If you need to pause a run that is going, `apex stop` asks it to stop at its next checkpoint.
+- Run `uv run apex plugins` to see every plugin and its options, including those in other registries, and `uv run apex plugins --json` for the full descriptions in a form other tools can read.
+- Run `uv run apex run config.toml --max-steps 1` on a small case, then continue with `uv run apex resume RUN_DIR`. If you need to pause a run that is going, `uv run apex stop RUN_DIR` asks it to stop at its next checkpoint, and `apex resume` continues it.
+- Inspect a finished or partial run with `uv run apex report RUN_DIR`.
 - Read the other plugin pages in this guide's plugins section, to see which processing steps you can combine with these attributes.

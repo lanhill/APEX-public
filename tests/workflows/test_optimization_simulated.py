@@ -244,6 +244,20 @@ def test_simulated_objectives_are_refused_without_their_parts(
     )  # fmt: skip
     with pytest.raises(ConfigError, match="realizations_file"):
         optimization.build(optimization.load_optimization_config(robust))
+    # A reported issue (#250): line search and trust region need the objective's exact
+    # derivatives, which a simulated objective lacks; refused at build, so validation, plans
+    # and studies see it before anything runs.
+    for name in ("line_search", "trust_region"):
+        derivative = _config(tmp_path, name)
+        derivative.write_text(
+            derivative.read_text().replace(
+                'name = "enopt"\noptions = { ne = 6, maxiter = 6, alpha = 0.1, resample = 1 }',
+                f'name = "{name}"\noptions = {{ maxiter = 3 }}',
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match=r"exact gradient.*computed from simulations"):
+            optimization.build(optimization.load_optimization_config(derivative))
 
 
 SCALED = """

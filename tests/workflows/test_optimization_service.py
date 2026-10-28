@@ -442,3 +442,40 @@ def test_the_summary_says_a_run_has_several_objectives_before_its_first_front(
     assert not summary.multi_objective
     assert summary.objective_names is None
     assert summary.objective_scalings is None
+
+
+def test_a_study_over_its_budget_or_with_a_derivative_optimizer_is_refused_with_why(
+    service: ApexService, tmp_path: Path
+) -> None:
+    """Reported issues: a line_search cell on a simulated objective passed its plan and failed
+    at its start (#250), and a refusal over the budget gave only the total (#248)."""
+    import tomli_w
+
+    case = tmp_path / "toy.toml"
+    case.write_text(tomli_w.dumps(_config()), encoding="utf-8")
+
+    def study(methods: dict[str, Any], budget: int) -> Path:
+        path = tmp_path / "study.toml"
+        path.write_text(tomli_w.dumps({"study": {
+            "kind": "optimization", "name": "toy_budget", "replicates": 3,
+            "cases": {"toy": "toy.toml"}, "methods": methods, "variants": [{"name": "base"}],
+            "budget": {"max_simulator_runs": budget},
+        }}), encoding="utf-8")  # fmt: skip
+        return path
+
+    enopt = {"name": "enopt", "options": {"ne": 4, "maxiter": 2}}
+    derivative = service.validate_study(
+        study({"enopt": enopt, "line_search": {"name": "line_search"}}, 10)
+    )
+    assert not derivative.valid
+    assert any("line_search/base/r0" in e and "exact gradient" in e for e in derivative.errors)
+    # Its cost is unknown, not unbounded: no budget advice over an invalid cell.
+    assert not any(e.startswith("the study may take") for e in derivative.errors)
+
+    over = service.validate_study(
+        study({"enopt": enopt, "smcopt": {**enopt, "name": "smcopt"}}, 10)
+    )
+    assert not over.valid
+    [refusal] = over.errors
+    assert "Runs per replicate: toy/enopt/base " in refusal
+    assert "3 replicates). To fit:" in refusal

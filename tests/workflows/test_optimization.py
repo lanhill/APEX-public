@@ -160,3 +160,15 @@ def test_a_constrained_population_run_resumes_through_its_checkpoint_files(
         resumed = optimization.resume(first.run_dir)
     np.testing.assert_array_equal(resumed.result.x, full.result.x)
     assert layout.read_history(first.run_dir) == layout.read_history(full.run_dir)
+
+
+def test_derivative_optimizers_are_refused_on_an_objective_without_derivatives(
+    tmp_path: Path,
+) -> None:
+    """A reported issue (#250): line search needs the objective's exact gradient and Hessian,
+    which rastrigin does not give; refused when built, not when the run starts."""
+    path = _config(
+        tmp_path, optimizer="line_search", options="{ maxiter = 3 }", objective="rastrigin"
+    )
+    with pytest.raises(ConfigError, match=r"exact gradient and Hessian, and '\w+' has none: use"):
+        optimization.build(optimization.load_optimization_config(path))

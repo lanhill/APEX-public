@@ -34,6 +34,7 @@ from apex.services.optimization import optimization_summary, resolve_optimizatio
 from apex.services.study import (
     cell_label,
     comparison_from_values,
+    over_budget,
     replicate_seeds,
     resolve_case,
     study_record,
@@ -173,11 +174,14 @@ def plan_optimization_study(
     plan = OptimizationStudyPlan(cells, errors)
     budget = spec.study.budget.max_simulator_runs
     total = plan.max_simulator_runs
-    if budget is not None and (total is None or total > budget):
-        plan.errors.append(
-            f"the study may take {total if total is not None else 'an unbounded number of'} "
-            f"simulator runs, over its budget of {budget}"
-        )
+    # Not over invalid cells: their cost is unknown, not unbounded (their errors say why).
+    if not errors and budget is not None and (total is None or total > budget):
+        costs = [
+            (cell_label(c.case, c.method, c.variant, c.replicate).rsplit("/", 1)[0],
+             c.replicate, c.plan.max_simulator_runs if c.plan else None)
+            for c in plan.cells
+        ]  # fmt: skip
+        plan.errors.append(over_budget(total, budget, costs))
     return plan
 
 

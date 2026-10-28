@@ -87,6 +87,11 @@ def serve_jobs(
                     logger.exception("service hook failed", extra={"event": "hook_failed"})
             reap()
             stop.wait(runner.settings.service.poll_s)
+    except BaseException:
+        # The log is where the owner looks: a thread's traceback goes only to stderr, and a
+        # SystemExit (a library's sys.exit) not even there.
+        logger.exception("the service loop failed", extra={"event": "service_failed"})
+        raise
     finally:
         close = getattr(on_tick, "close", None)
         if callable(close):

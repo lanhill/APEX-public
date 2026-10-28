@@ -30,6 +30,7 @@ from apex.algorithms.optimization import (
 from apex.algorithms.optimization.combined import StackedResponses, stack_objectives
 from apex.algorithms.optimization.protocols import (
     ConstrainedObjective,
+    DifferentiableObjective,
     FloatArray,
     Objective,
     ResponseObjective,
@@ -446,6 +447,16 @@ def build(
     if optimizer.needs_covariance and cov is None:
         raise ConfigError(
             f"optimizer {config.optimizer.name!r} needs a variance for every control block"
+        )
+    # Line search and trust region need the objective's exact derivatives, which only some
+    # analytic objectives give (a reported issue, #250: a planned line_search cell on a
+    # simulated objective passed its plan and failed at its start).
+    if optimizer.needs_gradient and not isinstance(objective, DifferentiableObjective):
+        raise ConfigError(
+            f"optimizer {config.optimizer.name!r} needs an objective with an exact gradient "
+            f"and Hessian, and {label!r} has none"
+            + (" (it is computed from simulations)" if simulated else "")
+            + ": use an ensemble optimizer (enopt, genopt, smcopt), which estimates its gradient"
         )
     return optimizer, problem, cov
 

@@ -48,6 +48,8 @@ fi
 uv run apex service status                   # confirm it has stopped
 ```
 
+If the scheduler fails, it logs the error in `service.log` and the service exits with status 1, the REST API with it, so that a process manager restarting failed services (for example systemd's `Restart=on-failure`) starts it again. Jobs that were running go on, provided the process manager leaves the service's child processes alone (with systemd, `KillMode=process`).
+
 ## Submitting from the command line
 
 `apex submit` queues one configuration: a history-matching run, a prediction or an optimization. It tells which from the file's sections; `--kind` settles a file that has more than one. The job goes through the same queue, pools, approval and notifications as a study or the REST API. An identical run is reused. The run's folder is the one `apex run` (or `apex optimize`) would use.
@@ -60,7 +62,7 @@ uv run apex jobs show JOB                                    # the record and it
 uv run apex jobs stop JOB                                    # queued: cancelled; running: stops at the next checkpoint
 ```
 
-The code column is the commit a job runs, or `live`. A job that reused an identical finished run ran nothing: it shows `reused (COMMIT)`, COMMIT being the code that made that run (from the run's `provenance.json`, else its job; `live checkout` for a job of the checkout's uncommitted code), or a bare `reused` when neither says.
+The code column is the commit a job runs, or `live`. A job that reused an identical finished run ran nothing: it shows `reused (COMMIT)`, COMMIT being the code that made that run (from the run's `provenance.json`, else its job; `live checkout` for a job of the checkout's uncommitted code), or a bare `reused` when neither says. The commit is recorded when the reusing job is submitted, so reusing jobs submitted before APEX recorded it (October 2026) keep a bare `reused`.
 
 Large submissions ask for approval, as `apex study run` does (`--yes`, or `--approval-token`). By default a job submitted from the command line runs **frozen code** (next section). `--code live` runs the checkout instead.
 

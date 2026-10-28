@@ -58,6 +58,7 @@ from apex.domain.study import merge_patch
 from apex.services.api import ApexService
 from apex.services.plugins import option_model
 from apex.services.settings import PlannerSection
+from apex.services.study import OVER_BUDGET
 from apex.storage import optimization_directory as layout
 
 if TYPE_CHECKING:
@@ -1094,9 +1095,12 @@ class OptimizationPlanner:
                     break
                 proposal = proposal.model_copy(update={"replicates": proposal.replicates - 1})
         spec, validation, cost, errors = self.check(facts, proposal)
+        # The study's own refusal says each arm's cost and what fits (a reported issue, #248).
+        refused = any(e.startswith(OVER_BUDGET) for e in errors)
         if cost is not None and cost > facts.budget_simulator_runs:
-            errors.append(f"it costs {cost} simulator runs, over the budget of "
-                          f"{facts.budget_simulator_runs}")  # fmt: skip
+            if not refused:
+                errors.append(f"it costs {cost} simulator runs, over the budget of "
+                              f"{facts.budget_simulator_runs}")  # fmt: skip
             if (note := self.least_costs_note(facts, proposal)) is not None:
                 errors.append(note)
         if errors or spec is None or validation is None:

@@ -43,6 +43,7 @@ from apex.domain.services import Validation
 from apex.domain.study import MethodEntry, StudySpec
 from apex.services.api import ApexService
 from apex.services.settings import PlannerSection
+from apex.services.study import OVER_BUDGET
 from apex.services.tools import ToolSession, call
 
 if TYPE_CHECKING:
@@ -875,7 +876,10 @@ class Planner:
         errors.extend(validation.errors)
         costs = [p.max_simulator_runs for p in validation.plans]
         cost = None if not costs or any(c is None for c in costs) else sum(c or 0 for c in costs)
-        if cost is not None and cost > facts.budget_simulator_runs:
+        # The study's own refusal (its budget is this one) says each arm's cost and what
+        # fits (a reported issue, #248); this one only when another error hid it.
+        refused = any(e.startswith(OVER_BUDGET) for e in validation.errors)
+        if cost is not None and cost > facts.budget_simulator_runs and not refused:
             errors.append(
                 f"the study may take {cost} simulator runs, over the budget of "
                 f"{facts.budget_simulator_runs}: use fewer variants or replicates"
