@@ -200,6 +200,16 @@ class RoptOptimizer(OptimizerBase):
         per_batch = n_realizations * (self.number_of_perturbations + 1)
         return n_realizations + self.max_batches * per_batch
 
+    def max_evaluations_basis(self, n_realizations: int) -> str | None:
+        """Return :meth:`max_evaluations` as its terms with their values (``None`` without)."""
+        total = self.max_evaluations(n_realizations)
+        if total is None:
+            return None
+        n = n_realizations
+        realizations = f"{n} realization{'' if n == 1 else 's'}"
+        return (f"{n} for the start + {self.max_batches} batches x {realizations} x "
+                f"({self.number_of_perturbations} perturbations + 1) = {total}")  # fmt: skip
+
     def update_step(self) -> StepReport:  # pragma: no cover - ropt runs the loop
         """Not used: ropt drives the iterations (:meth:`_run`)."""
         raise NotImplementedError("ropt drives its own iterations")

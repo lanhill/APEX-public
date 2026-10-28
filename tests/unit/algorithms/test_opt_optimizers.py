@@ -272,3 +272,32 @@ def test_line_search_and_trust_region_keep_to_their_evaluation_bound(
     optimizer.minimize(problem)
     assert bound is not None
     assert optimizer.nfev * 2 <= bound
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: EnOpt(ne=4, maxiter=3),
+        lambda: EnOpt(
+            ne=6, maxiter=2, resample=1, epf={"r": 1.0, "conv_crit": 1e-6, "max_epf_iter": 3}
+        ),
+        lambda: SmcOpt(ne=4, maxiter=3),
+        lambda: GenOpt(ne=5, maxiter=2),
+        lambda: LineSearch(method="GD", maxiter=15, lsmaxiter=4),
+        lambda: TrustRegion(maxiter=15, trust_radius_cuts=2),
+    ],
+)
+def test_the_evaluation_bound_states_its_terms(make: Callable[[], OptimizerBase]) -> None:
+    """A reported issue (#235): the assistant explained EnOpt's bound of 32 as "about ne x
+    iterations" (12). The basis gives the bound's own terms, and they add up to it."""
+    optimizer = make()
+    bound = optimizer.max_evaluations(2)
+    per_iteration = optimizer.evaluations_per_iteration(2)
+    basis = optimizer.max_evaluations_basis(2)
+    assert bound is not None
+    assert per_iteration is not None
+    assert basis is not None
+    assert basis.endswith(f"= {bound}")
+    assert f"{optimizer.maxiter} iterations x at most {per_iteration}" in basis
+    assert 2 + optimizer.epf_maxiter * (2 + optimizer.maxiter * per_iteration) == bound
+    assert (optimizer.epf_maxiter == 1) == ("EPF rounds" not in basis)

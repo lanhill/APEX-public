@@ -361,6 +361,19 @@ def method_differences(facts: PlanFacts, proposal: StudyProposal) -> list[str]:
             if own != steps:
                 runs = "its own schedule of steps" if own is None else count(own, "step")
                 notes.append(f"{label} runs {runs}, the case {count(steps, unit)}")
+        levels = (entry.options or {}).get("levels")
+        from apex.services.composition import LEVEL_SIMULATOR_KEYS
+
+        if (_multilevel(entry.name) and not _case_own(facts, entry)
+                and isinstance(levels, list) and len(levels) >= 2
+                and not any(isinstance(level, Mapping)
+                            and any(k in level for k in LEVEL_SIMULATOR_KEYS)
+                            for level in levels)):  # fmt: skip
+            # Valid, but no level is cheaper (#232): it compares the hybrid update over an
+            # ensemble split, not a multilevel design's saving.
+            notes.append(f"every level of {label} runs the fine model ("
+                         f"{_coarse_model(facts.simulator)}), so it compares the hybrid "
+                         "update over levels, not cheaper levels")  # fmt: skip
         from apex.services.compatibility import default_strategy
 
         # A strategy left unset is resolved to its method's default, options included, as
@@ -388,6 +401,73 @@ def method_differences(facts: PlanFacts, proposal: StudyProposal) -> list[str]:
                          f"{theirs.get('options') or 'its defaults'} against "
                          f"{ours.get('options') or 'its defaults'}")  # fmt: skip
     return notes
+
+
+#: What makes a fidelity level coarse, per simulator: the level's own model, among
+#: ``services.composition.LEVEL_SIMULATOR_KEYS``. A level without one runs the fine
+#: model; a simulator not listed has no coarser models.
+COARSE_LEVEL_KEYS = {
+    "opm_flow": "upscale (the grid coarsened) or deck_template_file (a coarse deck)",
+    "eclipse": "upscale (the grid coarsened) or deck_template_file (a coarse deck)",
+    "linear": "forward_file or matrix (the level's own operator G)",
+}
+
+
+def _multilevel(name: str) -> bool:
+    """Whether a method plugin splits its ensemble into fidelity levels."""
+    try:
+        return getattr(methods.factory(name), "provides_levels", False) is True
+    except (UnknownPluginError, KeyError):
+        return False
+
+
+def _coarse_model(simulator: str) -> str:
+    """Say what makes a level coarse on ``simulator``, or that it has no coarser models."""
+    keys = COARSE_LEVEL_KEYS.get(simulator)
+    if keys is None:
+        return f"{simulator} has no coarser models, so every level runs the fine one"
+    return f"a coarse level names its model, on {simulator}: {keys}"
+
+
+def _case_own(facts: PlanFacts, entry: MethodEntry) -> bool:
+    """Whether an arm is the case's own algorithm as configured (not the study's design)."""
+    own = facts.case_method
+    return entry.name == own.get("name") and (entry.options or {}) == (own.get("options") or {})
+
+
+def level_problems(facts: PlanFacts, proposal: StudyProposal) -> list[str]:
+    """Return why a multilevel arm's levels are no multilevel design, in one message each.
+
+    A multilevel arm needs at least two levels (a reported issue, #232): one level is ES-MDA
+    on the hybrid update, so the study would not compare a multilevel design. The study's
+    validation names a level's missing keys one at a time; this states the whole format,
+    the case's ensemble size and what makes a level coarse on the case's simulator at once.
+    """
+    problems = []
+    n = facts.members
+    for label, entry in proposal.methods.items():
+        # The case's own design is the case's (the method takes one level), not the study's.
+        if entry.external or not _multilevel(entry.name) or _case_own(facts, entry):
+            continue
+        levels = (entry.options or {}).get("levels")
+        if isinstance(levels, list) and len(levels) >= 2:
+            continue
+        what = ("has no levels" if not isinstance(levels, list) or not levels else
+                "has one level, which is ES-MDA on the hybrid update, not a multilevel "
+                "design")  # fmt: skip
+        if n is not None and n >= 4:
+            size = f"the case's {n}"
+            example = (f"; e.g. levels = [{{ members = {n - n // 2}, weight = 0.5 }}, "
+                       f"{{ members = {n // 2}, weight = 0.5 }}]")  # fmt: skip
+        else:
+            size, example = "[prior] ensemble_size", ""
+        problems.append(
+            f"methods {label!r} ({entry.name}) {what}: give options.levels, at least two "
+            f"tables {{ members = N_l, weight = w_l }}, coarsest first, each of at least 2 "
+            f"members, adding up to {size}{example}; {_coarse_model(facts.simulator)} (a level "
+            "without its own model runs the fine one)"
+        )
+    return problems
 
 
 def _with_default_strategy(entry: dict[str, Any]) -> dict[str, Any]:
@@ -867,6 +947,10 @@ class Planner:
                 )
         if nulls_found:
             return None, None, None, errors
+        # Before the study's validation, which names one missing key of a level at a time
+        # (a reported issue, #232: four refusals, then a single level).
+        if problems := level_problems(facts, proposal):
+            return None, None, None, [*errors, *problems]
         try:
             spec = self.spec(facts, proposal)
         except ValidationError as error:

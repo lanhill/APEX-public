@@ -186,6 +186,12 @@ class GenOpt(OptimizerBase):
         # Both gradients take theta and the correlation; they are estimated inside the step.
         pass
 
+    iteration_evaluations: ClassVar[str] = (
+        "per attempt, 1 + resample: ne ensemble members (twice with "
+        "separate_mutation_ensemble; one realization each), then up to alpha_maxiter + 1 "
+        "line-search points, each on every realization"
+    )
+
     def evaluations_per_iteration(self, n_realizations: int) -> int:
         """Return the most evaluations of one iteration.
 

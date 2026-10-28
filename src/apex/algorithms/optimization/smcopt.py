@@ -142,6 +142,11 @@ class SmcOpt(OptimizerBase):
     def _evaluate_missing_derivatives(self) -> None:
         pass
 
+    iteration_evaluations: ClassVar[str] = (
+        "per attempt, 1 + resample: ne ensemble members (one realization each), then up to "
+        "alpha_maxiter + 1 line-search points, each on every realization"
+    )
+
     def evaluations_per_iteration(self, n_realizations: int) -> int:
         """Return the most evaluations of one iteration.
 

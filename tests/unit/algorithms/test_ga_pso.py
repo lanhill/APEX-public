@@ -28,7 +28,7 @@ from apex.algorithms.optimization import (
     optimizers,
 )
 from apex.algorithms.optimization.ga import polynomial_mutation, sbx, tournament
-from apex.algorithms.optimization.population import violation
+from apex.algorithms.optimization.population import PopulationOptimizer, violation
 from apex.algorithms.optimization.protocols import FloatArray, IntArray
 from apex.algorithms.optimization.pso import keep_in_bounds, velocity_update
 
@@ -284,6 +284,11 @@ def test_the_evaluation_bound_holds_and_generations_are_one_batch(name: str) -> 
     per_generation = optimizer.evaluations_per_iteration(2)
     assert per_generation is not None
     assert max(batches[1:]) <= per_generation  # the start is the whole population
+    # Its terms, for a planner to state (a reported issue, #235).
+    basis = optimizer.max_evaluations_basis(2)
+    assert basis is not None
+    assert basis.endswith(f"= {bound}")
+    assert f"{optimizer.maxiter} generations x {per_generation // 2} new members" in basis
 
 
 def test_a_stalled_best_ends_the_run_not_one_generation() -> None:
@@ -367,3 +372,20 @@ def test_non_finite_objective_values_fail_loudly() -> None:
 
     with pytest.raises(ValueError, match="non-finite"):
         _run("pso", _problem(broken, [0.5, 0.5], 1.0), seed=0, maxiter=2)
+
+
+@pytest.mark.parametrize("n_realizations", [1, 3])
+def test_a_population_bound_states_its_terms_with_epf(n_realizations: int) -> None:
+    """The review of #235: the population basis's start and EPF terms, on one realization
+    (no "x realizations") and on several; the terms multiply out to the bound."""
+    optimizer = optimizers.create("ga", maxiter=4, pop_size=8, constraint_handling="epf",
+                                  epf={"r": 1.0, "conv_crit": 1e-9, "max_epf_iter": 3})  # fmt: skip
+    assert isinstance(optimizer, PopulationOptimizer)
+    bound = optimizer.max_evaluations(n_realizations)
+    basis = optimizer.max_evaluations_basis(n_realizations)
+    assert bound == 8 * n_realizations + 3 * 4 * optimizer.n_new * n_realizations
+    assert basis is not None
+    assert basis.endswith(f"= {bound}")
+    assert "8 members for the start" in basis
+    assert f"3 EPF rounds x 4 generations x {optimizer.n_new} new members" in basis
+    assert ("realizations" in basis) == (n_realizations > 1)

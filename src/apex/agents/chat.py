@@ -658,7 +658,9 @@ SYSTEM = (
     "replicates, or fewer iterations or members of the costliest arm) and give the plan, "
     "naming what you shrank. Before stating a case's settings (members, ne, maxiter, "
     "population), read them with case_info and use the option names it shows, and take "
-    "costs from plan_study; never quote either from memory. plan_study's 'true_model' "
+    "costs from plan_study; never quote either from memory. An arm's cost in arm_costs "
+    "comes with its 'basis', how its bound is made up: explain a cost or a match by it, "
+    "never by a formula of your own. plan_study's 'true_model' "
     "says whether rmse can compare: state it with the metrics. "
     "A fact a tool returned earlier in this chat (a case's kind from case_info, a cost a "
     "refusal computed) is known: use it, never ask the user to confirm it, and never call it "
@@ -2258,7 +2260,7 @@ class _Matching:
     written (its own settings); ``intended``: per variant, the settings its patch changes.
     """
 
-    costs: Sequence[dict[str, int | None] | None]
+    costs: Sequence[Mapping[str, int | str | None] | None]
     cases: Mapping[str, dict[str, Any]]
     intended: Mapping[str, frozenset[str]]
 
@@ -2285,8 +2287,11 @@ BUDGET_TOLERANCE = 0.25
 _CASE_SETTINGS = ("prior.ensemble_size", "method.", "optimizer.")
 
 
-def _optimization_cost(cell: Any) -> dict[str, int | None] | None:  # noqa: ANN401 (a cell)
+def _optimization_cost(cell: Any) -> dict[str, int | str | None] | None:  # noqa: ANN401 (a cell)
     """Return an optimization cell's simulator runs and evaluations, from its plan.
+
+    With how its evaluations are made up (``basis``), so that the assistant states the bound's
+    terms rather than a formula of its own (a reported issue, #235).
 
     ``expand`` leaves a cell's plan unset (only planning the study fills it), so it is made
     here from the cell's configuration; a configuration that cannot be planned has no cost.
@@ -2299,7 +2304,11 @@ def _optimization_cost(cell: Any) -> dict[str, int | None] | None:  # noqa: ANN4
             plan = plan_optimization(cell.config)
         except (ApexError, KeyError, ValueError, TypeError, OSError, ValidationError):
             return None
-    return {"simulator_runs": plan.max_simulator_runs, "evaluations": plan.max_evaluations}
+    cost: dict[str, int | str | None] = {"simulator_runs": plan.max_simulator_runs,
+                                         "evaluations": plan.max_evaluations}  # fmt: skip
+    if plan.evaluations_basis:
+        cost["basis"] = plan.evaluations_basis
+    return cost
 
 
 def _case_documents(cases: Mapping[str, Path], base: Path) -> dict[str, dict[str, Any]]:
@@ -2324,7 +2333,7 @@ def _unmatched(
     shown: Mapping[str, Mapping[str, Any]],
     labels: Mapping[str, tuple[str, str]],
     matching: _Matching,
-    costs: Mapping[str, dict[str, int | None] | None],
+    costs: Mapping[str, Mapping[str, int | str | None] | None],
     populations: Mapping[str, int | None] | None = None,
 ) -> list[str]:
     """Return how a study's arms are not like for like (reported issues, 2026-10-20).
@@ -2339,7 +2348,7 @@ def _unmatched(
     found: list[str] = []
     # Budgets are compared between the methods of one case and variant: a variant's own
     # change (e.g. a smaller ensemble) costs differently by design.
-    groups: dict[tuple[str, str], dict[str, dict[str, int | None] | None]] = {}
+    groups: dict[tuple[str, str], dict[str, Mapping[str, int | str | None] | None]] = {}
     for label, cost in costs.items():
         groups.setdefault(labels[label], {})[label] = cost
     for group in groups.values():
@@ -2536,7 +2545,7 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
     accepted: dict[str, dict[str, tuple[str, frozenset[str]]]] = {}
     seeds: dict[int, set[Any]] = {}
     labels: dict[str, tuple[str, str]] = {}
-    costs: dict[str, dict[str, int | None] | None] = {}
+    costs: dict[str, Mapping[str, int | str | None] | None] = {}
     populations: dict[str, int | None] = {}
     for index, cell in enumerate(cells):
         config = cell.config

@@ -179,6 +179,8 @@ class OptimizerBase(ABC):
     needs_covariance: ClassVar[bool] = False
     #: Whether it optimizes several objectives at once; the others refuse them.
     multi_objective: ClassVar[bool] = False
+    #: What one iteration evaluates at most, in words, for :meth:`max_evaluations_basis`.
+    iteration_evaluations: ClassVar[str] = ""
 
     def __init__(
         self,
@@ -341,6 +343,22 @@ class OptimizerBase(ABC):
     def evaluations_per_iteration(self, n_realizations: int) -> int | None:
         """Return the most evaluations one iteration makes (``None``: not bounded here)."""
         return None
+
+    def max_evaluations_basis(self, n_realizations: int) -> str | None:
+        """Return :meth:`max_evaluations` as its terms with their values (``None``: no bound).
+
+        For a planner to say how an arm's cost is made up rather than guess a formula (a
+        reported issue, #235: "about ne x iterations" for EnOpt's 32).
+        """
+        per_iteration = self.evaluations_per_iteration(n_realizations)
+        total = self.max_evaluations(n_realizations)
+        if per_iteration is None or total is None:
+            return None
+        what = f" ({self.iteration_evaluations})" if self.iteration_evaluations else ""
+        rounds = "" if self.epf_maxiter == 1 else f"{self.epf_maxiter} EPF rounds x "
+        n = n_realizations
+        return (f"{n} for the start + {rounds}({n} re-evaluating it + {self.maxiter} "
+                f"iterations x at most {per_iteration}{what}) = {total}")  # fmt: skip
 
     def _start(self) -> None:
         self._started = True

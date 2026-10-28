@@ -135,6 +135,11 @@ class LineSearch(OptimizerBase):
                 break
         return StepReport(False, "Line search failed to find a suitable step size")
 
+    iteration_evaluations: ClassVar[str] = (
+        "per attempt, 1 + recompute_jac: up to lsmaxiter + 1 step lengths, each on every "
+        "realization"
+    )
+
     def evaluations_per_iteration(self, n_realizations: int) -> int:
         """Return the most evaluations of one iteration.
 
@@ -339,6 +344,10 @@ class TrustRegion(OptimizerBase):
             if report is not None:
                 return report
         return StepReport(False, "Trust-region step rejected after radius cut attempts.")
+
+    iteration_evaluations: ClassVar[str] = (
+        "up to 1 + trust_radius_cuts trial steps, each on every realization"
+    )
 
     def evaluations_per_iteration(self, n_realizations: int) -> int:
         """Return the most evaluations of one iteration.

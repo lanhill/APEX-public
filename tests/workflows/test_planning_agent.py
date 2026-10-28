@@ -19,6 +19,7 @@ from apex.agents.planner import (
     StudyProposal,
     VariantProposal,
     case_steps,
+    level_problems,
     method_differences,
     plan_facts,
     submit,
@@ -590,3 +591,74 @@ def test_the_smaller_ensemble_is_left_out_where_it_cannot_run(
     multilevel = {**facts.case_method, "options": {"levels": [{"members": 10}]}}
     assert _smaller_ensemble(facts.model_copy(update={"case_method": multilevel}), goal,
                              arms) == []  # fmt: skip
+
+
+def test_a_multilevel_arm_is_refused_without_two_levels_in_one_message(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue (#232): the study's validation named a level's keys one at a time
+    (four refusals), and the design that passed had one level of all 20 members, which is
+    ES-MDA on the hybrid update. The planner states the whole format at once and refuses
+    one level; two levels of the fine model are allowed, and said to be no cheaper."""
+    service = _service(tmp_path)
+    case = linear_case(ensemble_size=MEMBERS)
+    facts = plan_facts(service, case.config, budget=5000)
+    planner = Planner(service, None)
+
+    for levels in (None, [{"members": MEMBERS, "weight": 1.0}]):
+        options: dict[str, Any] = {"inflation": [4, 4, 4, 4]}
+        if levels is not None:
+            options["levels"] = levels
+        proposal = _methods_proposal(
+            {"esmda": ESMDA4, "ml": {"name": "multilevel_esmda", "options": options}}
+        )
+        [problem] = level_problems(facts, proposal)
+        assert "at least two" in problem
+        assert f"adding up to the case's {MEMBERS}" in problem
+        assert "{ members = 10, weight = 0.5 }" in problem  # an example that fits the case
+        assert "on linear: forward_file or matrix" in problem  # what makes a level coarse
+        assert ("one level" in problem) == (levels is not None)
+        spec, _, _, errors = planner.check(facts, proposal)
+        assert spec is None
+        assert errors == [problem]
+
+    two = [{"members": 10, "weight": 0.5}, {"members": 10, "weight": 0.5}]
+    proposal = _methods_proposal(
+        {
+            "esmda": ESMDA4,
+            "ml": {
+                "name": "multilevel_esmda",
+                "options": {"inflation": [4, 4, 4, 4], "levels": two},
+            },
+        }
+    )
+    assert level_problems(facts, proposal) == []
+    spec, _, _, errors = planner.check(facts, proposal)
+    assert spec is not None
+    assert errors == []
+    assert any(d.startswith("every level of ml runs the fine model")
+               for d in method_differences(facts, proposal))  # fmt: skip
+    coarse = [{**two[0], "matrix": [[1.0]] * 1}, two[1]]
+    proposal = _methods_proposal(
+        {
+            "ml": {
+                "name": "multilevel_esmda",
+                "options": {"inflation": [4, 4, 4, 4], "levels": coarse},
+            }
+        }
+    )
+    assert not any(d.startswith("every level") for d in method_differences(facts, proposal))
+    # Other errors stay with it (its review: one refusal, not one per round).
+    narrow = facts.model_copy(update={"max_variants": 1})
+    proposal = _methods_proposal({"esmda": ESMDA4, "ml": {"name": "multilevel_esmda"}})
+    _, _, _, errors = planner.check(narrow, proposal)
+    assert len(errors) == 2
+    assert "at most 1" in errors[0]
+    assert "has no levels" in errors[1]
+    # The case's own multilevel design is the case's: accepted as it is, with no note.
+    own = {"name": "multilevel_esmda", "options": {"inflation": [4, 4, 4, 4],
+           "levels": [{"members": MEMBERS, "weight": 1.0}]}}  # fmt: skip
+    mine = facts.model_copy(update={"method": "multilevel_esmda", "case_method": own})
+    proposal = _methods_proposal({"ml": own, "esmda": ESMDA4})
+    assert level_problems(mine, proposal) == []
+    assert not any(d.startswith("every level") for d in method_differences(mine, proposal))

@@ -170,6 +170,7 @@ def plan_optimization(config: OptimizationConfig) -> OptimizationPlan:
         n_controls=int(problem.x0.size),
         n_realizations=problem.n_realizations,
         max_evaluations=evaluations,
+        evaluations_basis=optimizer.max_evaluations_basis(problem.n_realizations),
         max_simulator_runs=(evaluations if simulated else 0),
         simulator=None if config.simulator is None else config.simulator.name,
         parallel_runs=int(workers) if simulated and workers else (1 if simulated else None),

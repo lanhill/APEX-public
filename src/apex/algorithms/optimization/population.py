@@ -371,6 +371,14 @@ class PopulationOptimizer(OptimizerBase):
         """One generation's new members on every realization."""
         return self.n_new * n_realizations
 
+    def max_evaluations_basis(self, n_realizations: int) -> str | None:
+        """Return :meth:`max_evaluations` as its terms with their values."""
+        rounds = "" if self.epf_maxiter == 1 else f"{self.epf_maxiter} EPF rounds x "
+        per_realization = "" if n_realizations == 1 else f" x {n_realizations} realizations"
+        return (f"{self.pop_size} members for the start{per_realization} + {rounds}"
+                f"{self.maxiter} generations x {self.n_new} new members{per_realization} "
+                f"= {self.max_evaluations(n_realizations)}")  # fmt: skip
+
     # ------------------------------------------------------------------ logs and state
 
     def log_columns(self) -> dict[str, float]:

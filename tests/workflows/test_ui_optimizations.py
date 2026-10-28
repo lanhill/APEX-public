@@ -502,6 +502,8 @@ def test_a_planned_optimization_study_reports_unequal_budgets_through_plan_study
     ))  # fmt: skip
     costs = result["arm_costs"]
     assert all(isinstance(c["evaluations"], int) for c in costs.values()), costs
+    # How each bound is made up, for the assistant to state (a reported issue, #235).
+    assert all(c["basis"].endswith(f"= {c['evaluations']}") for c in costs.values()), costs
     [budget] = [u for u in result["unmatched"] if u.startswith("budget")]
     assert "evaluations differ" in budget
     assert "unmatched" in result["next"]

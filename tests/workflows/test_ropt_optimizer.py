@@ -87,12 +87,17 @@ def test_ropt_on_rosenbrock_and_its_evaluation_bound(tmp_path: Path) -> None:
     plan = optimization.plan_optimization(config)
     # The start, then at most 600 batches of 1 x (10 + 1) evaluations.
     assert plan.max_evaluations == 1 + 600 * 11
+    # Its terms, for a planner to state (a reported issue, #235).
+    assert plan.evaluations_basis == (
+        "1 for the start + 600 batches x 1 realization x (10 perturbations + 1) = 6601"
+    )
     run = optimization.optimize(_config(tmp_path, "rosen", options, objective="rosenbrock"))
     result = layout.read_result(run.run_dir)
     assert result["objective"] < 0.05  # from 1.5 ... at (-0.5, 0.5, 0.2)
     assert result["member_evaluations"] <= plan.max_evaluations
     no_bound = optimizers.create("ropt", method="scipy/slsqp")
     assert no_bound.max_evaluations(3) is None  # without max_batches: unknown
+    assert no_bound.max_evaluations_basis(3) is None
 
 
 def test_unknown_methods_and_epf_are_refused(tmp_path: Path) -> None:

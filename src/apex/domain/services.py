@@ -111,6 +111,9 @@ class OptimizationPlan(_Document):
     max_evaluations: int | None = Field(
         description="Upper bound on the objective's evaluations (None: the optimizer cannot say)."
     )
+    evaluations_basis: str | None = Field(
+        default=None, description="How max_evaluations is made up, its terms with their values."
+    )
     max_simulator_runs: int | None = Field(
         description="One per evaluation for a simulated objective; 0 for an analytic one."
     )
