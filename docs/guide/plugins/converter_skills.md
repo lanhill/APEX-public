@@ -17,6 +17,7 @@ Converter skills let APEX read the simulation and workflow files you already hav
 
 - APEX is installed as described in the README. `apex` is not on your PATH, so every command below is run from the APEX folder as `uv run apex ...`.
 - You have an input file of one of the kinds in the table below.
+- For ERT cases, the `ert` extra is installed: `uv sync --locked --extra ert` in APEX's folder (see the [ERT page](../../ert.md)).
 
 ## The converters
 
@@ -24,54 +25,69 @@ Four converter skills are available. None of them has any options, so there is n
 
 | Plugin | Input | What it does |
 | --- | --- | --- |
-| `eclipse` | Eclipse decks (E100/E300, `.DATA`) | Reads the deck and converts it to an APEX case on `eclipse`. |
-| `opm_flow` | OPM Flow decks (`.DATA`) | Reads the deck and converts it to an APEX case on `opm_flow`. |
+| `eclipse` | Eclipse decks (E100/E300, `.DATA`) | Converts the deck to an APEX case on `eclipse` with `apex agent convert import --skill eclipse`. |
+| `opm_flow` | OPM Flow decks (`.DATA`) | Converts the deck to an APEX case on `opm_flow` with `apex agent convert import --skill opm_flow`. |
 | `ert` | ERT cases (`.ert`) | Converts to an APEX case with `apex ert convert`, and back with `apex ert export`. |
-| `pet` | PET configurations (`.toml`) | Converts to an APEX case with `apex pet-import`, and back. |
+| `pet` | PET configurations (`.toml`) | Converts to an APEX case with `apex pet-import`, and back with `apex agent convert to-pet`. |
 
 Both deck formats use the `.DATA` extension. The skill you pick decides which simulator the converted case runs on: `eclipse` for Eclipse decks, `opm_flow` for OPM Flow decks.
 
 ## Steps
 
 1. Identify your file type from the table. For example, a `.ert` file points to `ert`, and a PET `.toml` file points to `pet`.
-2. For `ert` and `pet`, run the matching command. Start with its help text to see what it accepts:
+2. Run the matching command. The paths below are placeholders for your own files, and the output folder must be new:
 
    ```bash
-   uv run apex ert convert --help
-   uv run apex pet-import --help
+   # an OPM Flow deck (use --skill eclipse for an Eclipse deck)
+   uv run apex agent convert import CASE.DATA --out apex_case --skill opm_flow
+   # an ERT case
+   uv run apex ert convert case.ert apex_case
+   # a PET configuration
+   uv run apex pet-import pet.toml apex_case
    ```
 
-3. Run the conversion on your file, using the arguments shown in the help.
-4. Open the APEX case that was produced and check it before you run anything.
-5. To go back to the original format, use `uv run apex ert export` for ERT. The `pet` skill also converts back to a PET configuration.
+   A deck needs its observed data: give `--history` a CSV (`time,datatype,value`) or a summary file, or leave it out when the deck itself has `WCONHIST`/`WCONINJH`. The deck converter asks the model of your agent settings for its choices; see [what a provider receives](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local), or add `--no-llm` to use its rules alone. Step 9 of the [agent commands](../cli/agent.md) covers it in full. Add `--help` to any command to see all its options.
+3. Each command writes the APEX case into the output folder, with its configuration in `apex_case/config.toml`. Check it with `uv run apex validate apex_case/config.toml` before you run anything.
+4. To go back to the original format, give the APEX configuration and a new folder:
+
+   ```bash
+   uv run apex ert export apex_case/config.toml ert_case
+   uv run apex agent convert to-pet apex_case/config.toml pet_case
+   ```
 
 ## Worked example: ERT round trip
 
-Suppose you have an ERT case in a `.ert` file and want to work on it in APEX, then hand it back.
+Suppose you have an ERT case in `case.ert` and want to work on it in APEX, then hand it back.
 
-1. Convert it to an APEX case:
+1. Convert it to an APEX case in a new folder:
 
    ```bash
-   uv run apex ert convert --help
+   uv run apex ert convert case.ert apex_case
    ```
 
-   Use the arguments listed there to point the command at your `.ert` file.
-2. Inspect the APEX case and make your changes.
+2. Check the case, then make your changes to `apex_case/config.toml`:
+
+   ```bash
+   uv run apex validate apex_case/config.toml
+   ```
+
 3. Export it again as an ERT case:
 
    ```bash
-   uv run apex ert export --help
+   uv run apex ert export apex_case/config.toml ert_case
    ```
 
-   Again, follow the listed arguments.
+   `ert_case` is a self-contained ERT case that ERT can run. It is APEX's own rendering of the case (its `case.ert`, prior, observations and grid), not your original `.ert` file.
 
-The PET workflow is the same, with `uv run apex pet-import` for the way in.
+The PET round trip is the same, with `uv run apex pet-import pet.toml apex_case` on the way in and `uv run apex agent convert to-pet apex_case/config.toml pet_case` on the way back.
 
 ## Pitfalls
 
 - Eclipse and OPM Flow decks both end in `.DATA`. The extension does not tell them apart, so make sure you know which simulator the deck was written for before choosing `eclipse` or `opm_flow`.
 - `ert` and `pet` are not interchangeable. `pet` takes PET configurations, which are `.toml` files, not ERT cases.
-- The converter skills have no options, so there is no TOML section to tune. If a conversion looks wrong, check the input file first.
+- The converter skills have no TOML options; what you can choose is in the commands' flags (`--help`). If a conversion looks wrong, check the input file first.
+- `apex ert convert` takes ERT cases whose forward model is one `FLOW`, `ECLIPSE100` or `ECLIPSE300` step on a `DATA_FILE`, and refuses others. `apex ert export` refuses cases with field data, data transforms together with a `[validation]` split, and model-error models. Each refusal states its reason.
+- `apex pet-import` writes a case on `opm_flow` by default; give `--simulator eclipse` for an Eclipse case.
 - Do not type `apex ...` on its own. It is not on the PATH, so always start with `uv run` from the APEX folder.
 
 ## What to read next
