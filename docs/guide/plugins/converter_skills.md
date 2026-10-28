@@ -79,7 +79,7 @@ Suppose you have an ERT case in `case.ert` and want to work on it in APEX, then 
 
    `ert_case` is a self-contained ERT case that ERT can run. It is APEX's own rendering of the case (its `case.ert`, prior, observations and grid), not your original `.ert` file.
 
-The PET round trip is the same, with `uv run apex pet-import pet.toml apex_case` on the way in and `uv run apex agent convert to-pet apex_case/config.toml pet_case` on the way back.
+The PET round trip is the same, with `uv run apex pet-import pet.toml apex_case` on the way in and `uv run apex agent convert to-pet apex_case/config.toml pet_case` on the way back. It needs a PET configuration of your own: see the pitfall on `to-pet` below.
 
 ## Pitfalls
 
@@ -88,6 +88,7 @@ The PET round trip is the same, with `uv run apex pet-import pet.toml apex_case`
 - The converter skills have no TOML options; what you can choose is in the commands' flags (`--help`). If a conversion looks wrong, check the input file first.
 - `apex ert convert` takes ERT cases whose forward model is one `FLOW`, `ECLIPSE100` or `ECLIPSE300` step on a `DATA_FILE`, and refuses others. `apex ert export` refuses cases with field data, data transforms together with a `[validation]` split, and model-error models. Each refusal states its reason.
 - `apex pet-import` writes a case on `opm_flow` by default; give `--simulator eclipse` for an Eclipse case.
+- `apex agent convert to-pet` writes only what PET can run as APEX does, so the way back is meant for cases PET can run, typically ones that came from PET. It refuses, with the reason: simulators other than OPM Flow and Eclipse, data transforms and field data (not yet exported), geophysical data, parameterizations, model-error models, cross validation (`[validation]`), localization, damping, methods PET lacks (such as GIES and CHOP), method options PET has no place for, template values, one-sided bounds, joint priors, priors other than a stored ensemble or a variogram PET's sampler reproduces, and a few template, observation and file-layout limits, each stated in its refusal. None of the examples shipped with APEX is such a case, so try it on a case you imported from PET.
 - Do not type `apex ...` on its own. It is not on the PATH, so always start with `uv run` from the APEX folder.
 
 ## What to read next
