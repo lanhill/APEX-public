@@ -49,7 +49,7 @@ A figure the run cannot give is skipped and reported, with the reason, in `summa
 uv run apex agent plot RUN_DIR --request "the RMSE box plots and the layer maps"
 ```
 
-The agent reads what the run holds (its metrics and their labels, the variables with grids, the data types, whether it saved residuals) and every figure plugin's options. It then chooses figures and their options for the request.
+The agent reads what the run holds (its metrics and their labels, the variables with grids, the data types, whether it saved residuals) and every figure plugin's options. It then chooses figures and their options for the request. These facts go to the model; see [what a provider receives, and how to keep it local](agents.md#what-a-provider-receives-and-how-to-keep-it-local).
 
 - **With a model**, code checks the model's choice against the run before anything is drawn. An unknown figure, an option the plugin refuses, a metric the run did not record, or more than `[agents.plotter] max_figures` requests sends the plan back to the model with the reasons.
 - **Without a model** (`--no-llm`), or when the model fails, the rules match the request's whole words (and their plurals): objective, mismatch, normalized, rmse, ssim, model change, forecast or wells, residual or MEC, map or layer, histogram, and seismic, AVO, gravity, displacement, subsidence, time shift or 4D (the geophysical maps). A request naming the classic set (classic, preset, all figures, full set) draws `brugge_classic`, with `normalized` and `model_change` switched on when the request names them. With no request, or none of these words, they draw `brugge_classic` as it is.

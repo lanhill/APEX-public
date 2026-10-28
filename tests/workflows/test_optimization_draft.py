@@ -236,7 +236,7 @@ def test_oil_rate_controls_are_bounded_by_the_history(tmp_path: Path) -> None:
 def test_economics_are_never_invented(tmp_path: Path) -> None:
     config = five_spots(tmp_path)
 
-    with pytest.raises(DraftRefused, match="do not invent") as refused:
+    with pytest.raises(DraftRefused, match="never assumed") as refused:
         draft_optimization(_service(tmp_path), DraftRequest(
             case=str(config), forecast_end="1971-01-01", wop=283.0
         ), tmp_path / "drafts")  # fmt: skip
@@ -325,6 +325,7 @@ def test_an_optimization_request_never_gets_a_history_matching_study(tmp_path: P
     assert "call draft_optimization" in results[0]["error"]
     assert results[1]["ok"] is False
     assert "wwp, wwi, disc, producer_bhp" in results[1]["error"]
+    assert "ask the user; do not invent them" in results[1]["error"]  # to the model only
     drafted = json.loads(stub.requests[3].messages[-1].content)["result"]
     assert drafted["kind"] == "optimization"
     assert drafted["cost"] == 2 + 2 + 5 * (10 + 6 * 2)
@@ -490,6 +491,7 @@ def test_the_command_line_drafts_and_refuses_as_the_tool(tmp_path: Path) -> None
     refused = CliRunner().invoke(app, [*base, "--wop", "283"])
     assert refused.exit_code == 1
     assert "give wwp, wwi, disc, producer_bhp" in refused.output
+    assert "ask the user" not in refused.output  # said to the assistant's model only
 
     economics = ["--wop", "283", "--wwp", "37.7", "--wwi", "12.6", "--disc", "0.08",
                  "--producer-bhp", "50,300", "--members", "2", "--json"]  # fmt: skip
@@ -513,3 +515,46 @@ def test_field_totals_go_into_a_summary_written_with_a_banner() -> None:
     assert [v for v in ("FOPT", "FGPT", "FWPT", "FWIT") if v in summary] == [
         "FOPT", "FGPT", "FWPT", "FWIT"]  # FWIT in SCHEDULE does not count  # fmt: skip
     assert summary.count("FOPT") == 1
+
+
+def test_a_created_case_is_read_and_a_deck_stepping_by_tstep_alone_is_named(
+    tmp_path: Path,
+) -> None:
+    """The release tester's H20: a case from `apex agent convert create` was refused as a
+    deck whose "START and DATES cannot be read", which named neither cause (TSTEP, and its
+    producers on LRAT read as idle). Its schedule is read now; TSTEP alone is named."""
+    from apex.agents.converter import CaseConverter
+    from apex.services.settings import CaseConverterSection
+
+    service = _service(tmp_path)
+    CaseConverter(service, None, settings=CaseConverterSection(ensemble_size=10, iterations=1)
+                  ).create(tmp_path / "case", name="box")  # fmt: skip
+    request = DraftRequest(
+        case=str(tmp_path / "case" / "config.toml"), forecast_end="2040-12-31",
+        wop=70.0, wwp=5.0, wwi=2.0, disc=0.08, producer_bhp=(100.0, 250.0),
+    )  # fmt: skip
+
+    with pytest.raises(DraftRefused, match="no finished run of 'box'"):  # past the schedule
+        draft_optimization(service, request, tmp_path / "drafts")
+
+    [deck] = (tmp_path / "case").glob("*.mako")
+    text = deck.read_text()
+    start = text.index("DATES\n")
+    deck.write_text(text[:start] + "TSTEP\n 24*30 /\nEND\n")
+    with pytest.raises(DraftRefused, match="uses TSTEP: its end cannot be read; write"):
+        draft_optimization(service, request, tmp_path / "drafts")
+
+
+def test_a_producer_on_bottom_hole_pressure_is_active(tmp_path: Path) -> None:
+    """WCONPROD on BHP gives no rate, and such a producer still produces (the review of H20)."""
+    from apex.simulation.deck import schedule_summary
+
+    deck = tmp_path / "deck.mako"
+    deck.write_text(
+        "START\n 1 'JAN' 2025 /\nSCHEDULE\n"
+        "WELSPECS\n 'P' 'G' 1 1 1* 'OIL' /\n 'Q' 'G' 2 2 1* 'OIL' /\n/\n"
+        "WCONPROD\n 'P' 'OPEN' 'BHP' 5* 150 /\n 'Q' 'OPEN' 'ORAT' 0 /\n/\n"
+        "DATES\n 1 'FEB' 2025 /\n/\nEND\n"
+    )
+    summary = schedule_summary(deck, tmp_path)
+    assert summary["shut"] == ["Q"]  # no rate and not on pressure: idle

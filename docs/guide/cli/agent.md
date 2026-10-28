@@ -69,6 +69,8 @@ Most agent commands share the same model options:
 
 The commands `apex agent convert create`, `apex agent convert import`, `apex agent diagnose`, `apex agent geomodel`, `apex agent monitor`, `apex agent plan`, `apex agent plot` and `apex agent report` also accept `--no-llm`. It means rules only: no model is asked. Default: off, so a model is asked. `apex agent draft-optimization` never uses a model.
 
+**What the model receives.** An agent sends the model facts computed from your runs and cases: configuration settings, data-mismatch and metric values, well and data-type names, and paths. A hosted provider (`anthropic`, `claude_code`, or a `--base-url` outside your own machines) receives them on its servers, under its terms; a local server (Ollama, vLLM, llama.cpp on `localhost` or your network) keeps them on your machines, and `--no-llm` sends nothing. See [what a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
+
 **About `--root`.** All agent commands accept `--root` except `apex agent providers` and `apex agent convert skills`. Of the other commands in this lesson, `apex submit` and `apex approve` accept it too, but `apex run`, `apex resume`, `apex stop`, `apex optimize` and `apex report` do not: they work on the directory or configuration you give them.
 
 ## Step 3: Ask a question with `apex agent ask`
@@ -148,7 +150,7 @@ uv run apex agent report RUN_ID --out report.md
 - `--out` says where to write the Markdown.
 - `--no-llm` gives a rules-only report.
 
-A study is described in the `[study]` section; see Step 9 for how to write one.
+A study is described in the `[study]` section; see Step 8 for how to write one.
 
 ## Step 8: Plan a study with `apex agent plan`
 
@@ -274,7 +276,7 @@ uv run apex agent geomodel config.toml --request "Smooth permeability with a lon
 
 **Inputs.**
 
-- `case` (required): the history-matching case, a deck simulator. You need a deck; if you have none, create one with `apex agent convert create` (Step 9).
+- `case` (required): the history-matching case, a deck simulator, with a finished history match (its posterior is the model). You need a deck; if you have none, create a case with `apex agent convert create` (Step 9), observe its truth with `apex agent convert observe`, and run its history match first.
 - `--forecast-end` (required): the last date of the forecast, in ISO form (`YYYY-MM-DD`). It must come after the history, so look at the dates in your deck for where the history ends and choose a later date.
 
 **Economics.** APEX has no default for prices, so choose them yourself. Use your deck's units for volumes and your own currency:
@@ -291,7 +293,7 @@ uv run apex agent geomodel config.toml --request "Smooth permeability with a lon
 - `--producer-control`: put producers on `bhp` or `oil_rate`. Default: `bhp`.
 - `--producer-bhp`: the producers' pressure bounds as `LOW,HIGH`, used with bhp control, in your deck's pressure unit. Check that unit in your deck before choosing bounds.
 - `--control-periods`: the number of periods the forecast is split into. Default: 4.
-- `--run`: the history-matching run whose posterior is the model (id, name or path). The posterior holds the model realisations that agree with the history after matching. Give it when you want the draft to use your matched models.
+- `--run`: the history-matching run whose posterior is the model (id, name or path). The posterior holds the model realisations that agree with the history after matching. Without it, the case's latest finished run is used; with none, the draft is refused.
 - `--members`: how many posterior members are used. Default: 10.
 - `--optimizer`: the optimizer plugin. Default: `enopt`.
 

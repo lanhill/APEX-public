@@ -179,11 +179,15 @@ def draft_optimization(
     includes = case_folder(simulator.options) or template.resolve().parent
     summary = schedule_summary(template, includes)
     start, dates = summary["start"], summary["dates"]
+    if summary["tstep"]:
+        # TSTEP advances the schedule past the last DATES, so its end is not known here. Checked
+        # first: a deck stepping by TSTEP alone has no DATES, and that is not the cause to name.
+        raise DraftRefused(
+            "the deck's schedule uses TSTEP: its end cannot be read; write its report steps as "
+            "DATES"
+        )
     if not isinstance(start, dt.date) or not isinstance(dates, list) or not dates:
         raise DraftRefused("the deck's START and DATES cannot be read: no forecast can follow it")
-    if summary["tstep"]:
-        # TSTEP advances the schedule past the last DATES, so its end is not known here.
-        raise DraftRefused("the deck's schedule uses TSTEP: its end cannot be read from DATES")
     if dates != sorted(dates):
         raise DraftRefused("the deck's DATES (in the order its files are read) are not in order")
     if summary["unreadable"]:
@@ -202,7 +206,7 @@ def draft_optimization(
         missing.append("producer_bhp (the producers' pressure bounds: the history has none)")
     if missing:
         raise DraftRefused(
-            "give " + ", ".join(missing) + " (ask the user; do not invent them)", missing
+            "give " + ", ".join(missing) + ": prices and bounds are never assumed", missing
         )
     assumptions: list[str] = []
     wgp = request.wgp if request.wgp is not None else 0.0

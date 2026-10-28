@@ -1029,7 +1029,9 @@ class ChatAssistant:
             try:
                 made = draft_optimization(service, request, folder, visible=visible)
             except DraftRefused as error:
-                raise ValueError(str(error)) from error
+                # Said to the model only: the CLI's user is the one to give them.
+                asked = " (ask the user; do not invent them)" if error.missing else ""
+                raise ValueError(f"{error}{asked}") from error
             if access is not None:
                 loaded = load_optimization_config(made.config)
                 hidden = _optimization_hidden(access, loaded)

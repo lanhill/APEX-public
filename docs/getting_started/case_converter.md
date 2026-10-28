@@ -14,7 +14,7 @@ The case-converter reads an OPM Flow or Eclipse deck (`.DATA`) and writes an APE
 
 - APEX installed as the README describes. Run every command below from its folder.
 - [OPM Flow](https://opm-project.org) on `PATH`, for Step 4 and Step 5 only: converting needs no simulator, running the case does.
-- A language model is optional. Without one, add `--no-llm` and the converter decides by its rules. To set a model up, see Step 1 of [the agents from the command line](agents_cli.md).
+- A language model is optional. Without one, add `--no-llm` and the converter decides by its rules. To set a model up, see Step 1 of [the agents from the command line](agents_cli.md); for what a model then receives, see [what a provider receives, and how to keep it local](../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
 
 ## Step 1: convert the example deck
 

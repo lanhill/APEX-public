@@ -8,6 +8,7 @@ simulates each evaluation once and journals it.
 """
 
 import hashlib
+import inspect
 import json
 import tomllib
 from collections.abc import Callable, Mapping
@@ -385,6 +386,9 @@ def build(
             f"of simulated responses ({', '.join(response_objectives.names())})"
         )
     n_realizations: int | None = None
+    name = config.optimizer.name
+    if name in optimizers.names():
+        _known_options("optimizer", name, optimizers.factory(name), config.optimizer.options)
     try:
         optimizer = optimizers.create(config.optimizer.name, **config.optimizer.options)
         if simulated:
@@ -459,6 +463,29 @@ def build(
             + ": use an ensemble optimizer (enopt, genopt, smcopt), which estimates its gradient"
         )
     return optimizer, problem, cov
+
+
+def _known_options(
+    section: str, name: str, factory: Callable[..., object], options: Mapping[str, Any]
+) -> None:
+    """Refuse options ``factory`` does not take, naming the ones it does.
+
+    A copied configuration keeps the options of the plugin it was written for (``ne`` of
+    ``enopt`` under ``line_search``, a reported issue): Python's own ``unexpected keyword
+    argument`` names neither the section nor what would do.
+    """
+    parameters = inspect.signature(factory).parameters.values()
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+        return
+    accepted = [p.name for p in parameters
+                if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              inspect.Parameter.KEYWORD_ONLY)]  # fmt: skip
+    unknown = sorted(set(options) - set(accepted))
+    if unknown:
+        raise ConfigError(
+            f"[{section}.options]: {name!r} takes no option {', '.join(map(repr, unknown))}; "
+            f"its options are {', '.join(accepted) or 'none'} (see `apex plugins`)"
+        )
 
 
 def _simulated_objective(

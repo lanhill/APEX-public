@@ -12,8 +12,9 @@ run: a box grid (``DX``/``DY``/``DZ``/``TOPS``), ln PERMX and PORO from the memb
 (``permx``, ``poro``; PERMY = PERMX, PERMZ = ``kv_kh`` PERMX), Corey ``SWOF``, ``PVDO``,
 ``PVTW``, ``DENSITY``, ``ROCK``, equilibration with the oil-water contact below the box
 (all oil at connate water), wells on rate or pressure with their limits, and a report every
-``step_days`` (``TSTEP``). The summary has the field's and every well's rates and
-pressures, which the converter observes.
+``step_days`` (``DATES``, so that an optimization drafted from the case can read the
+schedule's end; ``TSTEP`` would give the same report steps). The summary has the field's
+and every well's rates and pressures, which the converter observes.
 """
 
 from apex.domain.deck_spec import Co2BrineSpec, DeckSpec, FluidSpec, WellSpec
@@ -119,10 +120,19 @@ def write_deck(spec: DeckSpec) -> str:
           for w in spec.wells),
         "/",
         *_controls(spec.wells),
-        "TSTEP", f" {spec.schedule.steps}*{spec.schedule.step_days} /",
+        *_dates(spec),
         "END",
     ]  # fmt: skip
     return "\n".join(lines) + "\n"
+
+
+def _dates(spec: DeckSpec) -> list[str]:
+    """Return the ``DATES`` keyword of the schedule's report dates."""
+    return [
+        "DATES",
+        *(f" {d.day} '{MONTHS[d.month - 1]}' {d.year} /" for d in spec.schedule.report_dates()),
+        "/",
+    ]
 
 
 def _summary(wells: list[WellSpec]) -> list[str]:
@@ -230,7 +240,7 @@ def write_co2_deck(spec: DeckSpec) -> str:
           for w in spec.wells),
         "/",
         *_co2_controls(spec.wells),
-        "TSTEP", f" {spec.schedule.steps}*{spec.schedule.step_days} /",
+        *_dates(spec),
         "END",
     ]  # fmt: skip
     return "\n".join(lines) + "\n"

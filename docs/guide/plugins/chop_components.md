@@ -95,7 +95,7 @@ Suppose you choose `gain_inflation` and set `transform = "logit"`, leaving every
 - The prior is uniform on `low = 0.5` to `high = 1.5`, so the range is 1.
 - `lower` and `upper` are null, so they are derived by widening the prior by its range. `lower` would be `0.5 - 1 = -0.5`, but it is never below 0, so it becomes `0`. `upper` is `1.5 + 1 = 2.5`.
 - The condition `lower < low <= high < upper` holds: `0 < 0.5 <= 1.5 < 2.5`. The updated factors therefore stay between 0 and 2.5.
-- With an ensemble of `N = 100` members and the default `threshold = 3.0`, the cut cut-off is `3 / sqrt(100) = 0.3`. A hyper-parameter's correlation with a datum is kept only if its absolute value exceeds 0.3.
+- With an ensemble of `N = 100` members and the default `threshold = 3.0`, the cut-off is `3 / sqrt(100) = 0.3`. A hyper-parameter's correlation with a datum is kept only if its absolute value exceeds 0.3.
 
 If you want to widen or narrow the allowed interval, set `lower` and `upper` yourself, keeping the inequality above.
 

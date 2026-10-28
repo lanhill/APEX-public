@@ -172,3 +172,18 @@ def test_derivative_optimizers_are_refused_on_an_objective_without_derivatives(
     )
     with pytest.raises(ConfigError, match=r"exact gradient and Hessian, and '\w+' has none: use"):
         optimization.build(optimization.load_optimization_config(path))
+
+
+def test_an_option_the_optimizer_does_not_take_is_named_with_those_it_does(
+    tmp_path: Path,
+) -> None:
+    """The release tester's H22: enopt's ``ne`` under line_search was Python's own message."""
+    path = _config(
+        tmp_path,
+        optimizer="line_search",
+        options="{ ne = 10, maxiter = 3 }",
+        objective="rosenbrock",
+    )
+    with pytest.raises(ConfigError, match=r"\[optimizer\.options\]: 'line_search' takes no option "
+                       r"'ne'; its options are method, step_size.*maxiter"):  # fmt: skip
+        optimization.build(optimization.load_optimization_config(path))

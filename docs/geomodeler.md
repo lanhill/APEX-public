@@ -13,6 +13,8 @@ uv run apex agent geomodel case/config.toml --reference ref.npz    # statistics 
 uv run apex agent geomodel case/config.toml --request "porosity correlated with ln PERMX, 0.7"
 ```
 
+With a model, the case's facts (its variables, grid and the request) go to it; see [what a provider receives, and how to keep it local](agents.md#what-a-provider-receives-and-how-to-keep-it-local).
+
 The same is the REST route `POST /v1/agents/geomodel` (`config`, `request`, `reference`, `data`), the web UI's *Give it a prior* in the editor, and the assistant's tool `draft_prior`.
 
 ## Skills

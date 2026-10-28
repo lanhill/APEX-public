@@ -618,6 +618,7 @@ def schedule_summary(template_path: Path, case_dir: Path | None = None) -> dict[
     status: dict[str, str] = {}
     unreadable: set[str] = set()
     tstep = False
+    on_pressure: set[str] = set()
 
     def number(value: str) -> float:
         try:
@@ -654,7 +655,12 @@ def schedule_summary(template_path: Path, case_dir: Path | None = None) -> dict[
                                                        "max_liquid_rate": 0.0})  # fmt: skip
                     best["max_oil_rate"] = max(best["max_oil_rate"], oil)
                     best["max_water_rate"] = max(best["max_water_rate"], water)
-                    best["max_liquid_rate"] = max(best["max_liquid_rate"], oil + water)
+                    # WCONPROD's LRAT: a producer on a liquid-rate target (as the deck writer's
+                    # synthetic cases) produces with no oil or water rate given.
+                    liquid = number(fields[6]) if keyword == "WCONPROD" and len(fields) > 6 else 0.0
+                    best["max_liquid_rate"] = max(best["max_liquid_rate"], oil + water, liquid)
+                    if keyword == "WCONPROD" and len(fields) > 2 and fields[2].upper() == "BHP":
+                        on_pressure.add(name)  # produces at its pressure, with no rate given
             elif keyword in ("WCONINJE", "WCONINJH"):
                 for record in records:
                     fields = _expand(record)
@@ -676,7 +682,7 @@ def schedule_summary(template_path: Path, case_dir: Path | None = None) -> dict[
         info_any["phase"] = phases.get(name, "OIL")
     # Shut: last set SHUT, or never producing or injecting (e.g. a completion shut in
     # COMPDAT, which the history's OPEN rows do not override).
-    idle = {n for n, i in producers.items() if i["max_liquid_rate"] <= 0.0}
+    idle = {n for n, i in producers.items() if i["max_liquid_rate"] <= 0.0 and n not in on_pressure}
     idle |= {n for n, i in injectors.items() if float(cast(float, i["max_rate"])) <= 0.0}
     shut = sorted({n for n, s in status.items() if s == "SHUT"} | idle)
     return {

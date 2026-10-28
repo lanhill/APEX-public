@@ -3,6 +3,7 @@
 import datetime as dt
 import itertools
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -143,3 +144,23 @@ def test_eclipse_refuses_a_co2_case() -> None:
 
     with pytest.raises(ConfigError, match="E300's compositional CO2STORE"):
         converter_skills.create("eclipse").create(co2_injection())
+
+
+@pytest.mark.parametrize("preset", ["five_spot", "co2_injection"])
+def test_the_schedule_is_dates_an_optimization_can_follow(tmp_path: Path, preset: str) -> None:
+    """The release tester's H20: a created case's TSTEP schedule, and its producers on LRAT
+    read as idle, left `apex agent draft-optimization` nothing to draft from."""
+    from apex.domain import deck_spec
+    from apex.simulation.deck import schedule_summary
+
+    spec = getattr(deck_spec, preset)("box", n=11, layers=2)
+    (tmp_path / "deck.mako").write_text(write_deck(spec))
+
+    summary = schedule_summary(tmp_path / "deck.mako", tmp_path)
+
+    assert summary["tstep"] is False
+    assert summary["start"] == spec.schedule.start
+    assert summary["dates"] == spec.schedule.report_dates()
+    producers = {w.name for w in spec.wells if w.kind == "producer"}
+    assert producers
+    assert not producers & set(cast(list[str], summary["shut"]))
