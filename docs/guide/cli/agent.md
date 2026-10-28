@@ -276,7 +276,7 @@ uv run apex agent geomodel config.toml --request "Smooth permeability with a lon
 
 **Inputs.**
 
-- `case` (required): the history-matching case, a deck simulator, with a finished history match (its posterior is the model). You need a deck; if you have none, create a case with `apex agent convert create` (Step 9), observe its truth with `apex agent convert observe`, and run its history match first.
+- `case` (required): the history-matching case, a deck simulator, with a finished history match (its posterior is the model). You need a deck; if you have none, create a case with `apex agent convert create` (Step 9), which also observes its truth; if you passed `--no-observe` or declined its question, run `apex agent convert observe` next. Then run its history match.
 - `--forecast-end` (required): the last date of the forecast, in ISO form (`YYYY-MM-DD`). It must come after the history, so look at the dates in your deck for where the history ends and choose a later date.
 
 **Economics.** APEX has no default for prices, so choose them yourself. Use your deck's units for volumes and your own currency:
