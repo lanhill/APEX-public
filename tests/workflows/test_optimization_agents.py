@@ -756,6 +756,39 @@ def test_a_planned_comparison_of_optimizers_matches_what_the_arms_leave_unset(
                 or "eta_c" in u]  # fmt: skip
 
 
+def test_a_given_comparison_of_optimizers_is_headed_as_one(tmp_path: Path) -> None:
+    """A reported issue: MOEA/D against NSGA-II, given by the assistant, was headed
+    "Which population size best finds the trade-off ...", the rules' wording for one
+    optimizer at two sizes. The heading follows the design's own methods."""
+    path = _dtlz_case(tmp_path, 2)
+    nsga2 = {"name": "nsga2", "options": {"pop_size": 8, "maxiter": 2}}
+    result, _ = _planned_comparison(tmp_path, path, {
+        "nsga2": nsga2, "moead": {"name": "moead", "options": {"maxiter": 2}},
+    })  # fmt: skip
+    hypothesis = result.proposal.hypothesis
+    assert hypothesis.startswith("Which optimizer (nsga2, moead) best finds the trade-off")
+    assert "population size" not in hypothesis
+    assert f"# Hypothesis: {hypothesis}" in result.toml(
+        ApexService(tmp_path / "service").workspace(), tmp_path
+    )
+
+
+def test_the_rules_heading_follows_their_own_methods() -> None:
+    from apex.agents.optimization_advice import OptimizationMethod, study_hypothesis
+
+    one = {"a": OptimizationMethod(name="nsga2"), "b": OptimizationMethod(name="nsga2")}
+    assert study_hypothesis(one, ["npv", "water"], "g", "nsga2").startswith(
+        "Which setting of nsga2 best finds the trade-off between npv, water"
+    )
+    assert study_hypothesis({}, ["npv", "water"], "g", "nsga2").startswith(
+        "How nsga2 as configured finds the trade-off"
+    )
+    two = {"a": OptimizationMethod(name="enopt"), "b": OptimizationMethod(name="smcopt")}
+    assert study_hypothesis(two, [], "g", "enopt") == (
+        "Which optimizer (enopt, smcopt) best serves the goal: g"
+    )
+
+
 def test_a_population_that_cannot_be_matched_is_reported(tmp_path: Path) -> None:
     """A reported issue (2026-10-24): moead has one member per direction, and three
     objectives have no 12 directions (10 or 15): the nearest is planned, and the difference

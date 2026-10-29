@@ -449,3 +449,31 @@ def test_uncommitted_changes_to_a_workspace_member_count(
     test.parent.mkdir(parents=True)
     test.write_text("edited = True\n")  # a member's tests are not code a copy runs
     assert code.uncommitted() == ["packages/apex-member/src/apex_member/x.py"]
+
+
+@pytest.mark.parametrize("given", [None, "/elsewhere/uv-cache"])
+def test_a_copy_s_sync_keeps_uv_s_cache_out_of_the_home_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None
+) -> None:
+    """Without UV_CACHE_DIR the cache goes beside the copies (it filled /home, 2026-10-29)."""
+    from apex.services import code as code_module
+
+    seen: dict[str, str] = {}
+
+    def run(
+        command: Sequence[str], *, env: dict[str, str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.update(env)
+        return subprocess.CompletedProcess(list(command), 0)
+
+    if given is None:
+        monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    else:
+        monkeypatch.setenv("UV_CACHE_DIR", given)
+    monkeypatch.setattr(subprocess, "run", run)
+    copy = tmp_path / "copies" / "0123456789ab"
+    copy.mkdir(parents=True)
+
+    code_module.uv_sync(copy, [], tmp_path / "sync.log")
+
+    assert seen["UV_CACHE_DIR"] == (given or str(tmp_path / "copies" / ".uv-cache"))

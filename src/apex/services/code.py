@@ -93,7 +93,11 @@ class CodeCopy:
 
 
 def uv_sync(copy: Path, extras: Sequence[str], log: Path) -> None:
-    """Sync ``copy``'s environment from its ``uv.lock`` (adding, never removing, packages)."""
+    """Sync ``copy``'s environment from its ``uv.lock`` (adding, never removing, packages).
+
+    uv's cache is ``$UV_CACHE_DIR``, else ``.uv-cache`` beside the copies (never the home
+    folder's default).
+    """
     uv = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
     # Every workspace package: a plain sync installs only the root project.
     command = [uv, "sync", "--frozen", "--no-dev", "--inexact", "--all-packages"]
@@ -103,6 +107,10 @@ def uv_sync(copy: Path, extras: Sequence[str], log: Path) -> None:
     env = {
         k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
     }
+    # uv's default cache is in the home folder, and each copy puts the whole lock in it
+    # (about 1.4 GB a commit; it filled a home file system twice): without UV_CACHE_DIR it
+    # goes beside the copies, on their file system, where uv can also link from it.
+    env.setdefault("UV_CACHE_DIR", str(copy.parent / ".uv-cache"))
     with log.open("a") as out:
         done = subprocess.run(
             command, cwd=copy, stdout=out, stderr=subprocess.STDOUT, env=env, check=False

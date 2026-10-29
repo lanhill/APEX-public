@@ -24,7 +24,7 @@ import logging
 import math
 import os
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -530,6 +530,39 @@ def _objective_names(config: OptimizationConfig) -> list[str]:
     return [str(n) for n in getattr(plugin, "objective_names", ())]
 
 
+def study_hypothesis(
+    methods: Mapping[str, OptimizationMethod],
+    objective_names: Sequence[str],
+    goal: str,
+    own: str,
+) -> str:
+    """Return what a study of these methods tests, in words that follow its methods.
+
+    Different optimizers are an optimizer comparison; one optimizer at several settings a
+    comparison of settings; no methods the case's own optimizer alone. Multi-objective
+    studies name the trade-off their fronts show. (A reported issue: a design comparing
+    MOEA/D with NSGA-II was headed "Which population size ...", the rules' wording.)
+    """
+    names = list(dict.fromkeys(m.name for m in methods.values()))
+    if len(names) > 1:
+        subject = f"Which optimizer ({', '.join(names)})"
+    elif methods:
+        subject = f"Which setting of {names[0]}"
+    else:
+        subject = f"How {own} as configured"
+    if objective_names:
+        text = f"{subject} best finds the trade-off between {', '.join(objective_names)}: {goal}"
+        if not methods:
+            text = f"{subject} finds the trade-off between {', '.join(objective_names)}: {goal}"
+    else:
+        text = (
+            f"{subject} best serves the goal: {goal}"
+            if methods
+            else f"{subject} serves the goal: {goal}"
+        )
+    return text[:300]
+
+
 def larger_setting(
     name: str, options: dict[str, Any], n_obj: int, pop_size: int | None = None
 ) -> tuple[dict[str, Any], str, str]:
@@ -605,8 +638,7 @@ def _front_plan(
     compared = compared_with if methods else f"{own.name} as configured"
     return OptimizationStudyProposal(
         name=f"{facts.case}_plan",
-        hypothesis=f"Which population size best finds the trade-off between "
-        f"{', '.join(facts.objective_names)}: {goal}"[:300],
+        hypothesis=study_hypothesis(methods, facts.objective_names, goal, own.name),
         methods=methods,
         variants=[OptimizationVariantProposal(name="base", rationale="the case as configured")],
         replicates=replicates,
@@ -1078,6 +1110,11 @@ class OptimizationPlanner:
                     "reasoning": "the design given by the web UI's assistant",
                 }
             )
+            if not given.get("hypothesis"):  # the rules' wording follows the rules' methods
+                proposal = proposal.model_copy(update={"hypothesis": study_hypothesis(
+                    proposal.methods, facts.objective_names, goal,
+                    str(facts.optimizer.get("name", "the case's optimizer")),
+                )})  # fmt: skip
         except ValidationError as error:
             raise ConfigError(f"not a study of optimizations: {error}") from error
         # Before the replicates are sized: a matched population changes the cost.
