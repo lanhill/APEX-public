@@ -202,6 +202,14 @@ The parity tests compare against stored reference results; `tests/data/reference
 
 </details>
 
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately, as [SECURITY.md](SECURITY.md) says.
+
+## Citing
+
+If you use APEX, please cite it: [CITATION.cff](CITATION.cff) (GitHub's *Cite this repository*). A paper describing APEX is in preparation; its reference will be added there.
+
 ## Disclaimer
 
 <details open>

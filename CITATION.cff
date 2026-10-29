@@ -1,0 +1,32 @@
+# How to cite APEX. A placeholder until the paper describing APEX is published: then fill in
+# preferred-citation below (and the authors' ORCIDs), so that GitHub's "Cite this
+# repository" offers the paper. There, year is an integer, doi has no https://doi.org/
+# prefix, and volume and start (the first page or article number) may be added.
+cff-version: 1.2.0
+message: "If you use APEX, please cite it as below."
+type: software
+title: "APEX: Agentic Platform for Ensemble eXploration"
+abstract: >-
+  An extensible platform for ensemble history matching, reservoir forecasting,
+  uncertainty quantification, optimization and agent-driven decision support.
+authors:
+  - family-names: Luo
+    given-names: Xiaodong
+version: 0.1.0
+license: GPL-3.0-or-later
+repository-code: "https://github.com/lanhill/APEX-public"
+keywords:
+  - history matching
+  - ensemble methods
+  - data assimilation
+  - reservoir simulation
+  - optimization
+# preferred-citation:
+#   type: article
+#   title: "TODO: the paper's title"
+#   authors:
+#     - family-names: Luo
+#       given-names: Xiaodong
+#   journal: "TODO"
+#   year: TODO
+#   doi: "TODO"

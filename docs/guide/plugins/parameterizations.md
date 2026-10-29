@@ -9,154 +9,156 @@ items:
   - cli:apex stop
   - config:history_match:parameterizations
   - config:optimization:parameterizations
+  - plugin:gmac_constraints:linear
   - plugin:parameterizations:control_scaling
   - plugin:parameterizations:control_schedule
   - plugin:parameterizations:facies_distance
   - plugin:parameterizations:pgs_truncation
+  - plugin:simulators:linear
 ---
 
 # Parameterizations
 
-A parameterization turns the quantities APEX updates into something your simulator can read. APEX ships four parameterization plugins in the `parameterizations` registry:
+A parameterization turns the quantities APEX updates (the state in a history match, the controls in an optimization) into the properties your simulator reads. The `parameterizations` section exists in both the `history_match` and the `optimization` configurations. It is a list of maps applied in order. If you leave it out, the state (or the controls) is passed to the simulator as is.
 
-- `control_scaling` maps normalized controls in [0, 1] linearly onto physical bounds.
-- `control_schedule` spreads a control block's values over the report steps of its periods.
-- `facies_distance` builds facies from signed distance fields (using `argmax`) and assigns properties by facies.
-- `pgs_truncation` builds facies from latent fields with a fixed truncation rule and assigns properties by facies.
+APEX ships four plugins in the `parameterizations` registry:
 
-The `parameterizations` section is a list of maps applied in order. If you leave it out, the state (or the controls) is passed to the simulator as is.
+- `control_scaling`: normalized controls in [0, 1], mapped linearly onto their physical bounds.
+- `control_schedule`: a control block's values spread over the report steps of its periods.
+- `facies_distance`: facies from signed distance fields (`argmax`), and properties by facies.
+- `pgs_truncation`: facies from latent fields by a fixed truncation rule, and properties by facies.
+
+Other registries also have a plugin called `linear` (in `gmac_constraints` and in `simulators`). They are not parameterizations and are not covered here.
 
 ## Goal
 
 By the end of this page you will be able to:
 
 - choose the right parameterization plugin;
-- write a complete configuration section for each one;
+- write a complete `[[parameterizations]]` entry for each one;
 - chain `control_schedule` and `control_scaling`;
 - give each facies its properties with `values` or `property_fields`;
-- check the plugin options with `apex plugins` and test a configuration with `apex run`.
+- check plugin options with `apex plugins` and test a configuration with `apex run`.
 
 ## Prerequisites
 
-- An APEX run configuration file in TOML.
-- For the control plugins: the name of the control variable, in an optimization configuration.
-- For the facies plugins: the state variables your history-matching configuration defines for the fields, and the facies you want.
+- A run configuration file in TOML.
+- For the control plugins: an optimization configuration with a control block.
+- For the facies plugins: a history-matching configuration whose state variables hold the fields you want to use (see "Key terms").
 
 ## Key terms
 
-- **Facies**: a named rock type, such as `channel` or `shale`.
-- **State variable**: a variable that APEX updates in a history-matching run. Every name you give in `fields`, and every variable name in `property_fields`, must be a state variable defined elsewhere in your configuration (`apex schema history_match` prints what that file accepts).
-- **Signed distance field**: a field giving, for each cell, a distance to a facies body. `facies_distance` picks, in each cell, the field with the largest value (`argmax`) to decide the facies. The i-th entry of `fields` belongs to the i-th entry of `facies`, so keep both lists in the same order.
-- **Latent field**: an underlying field that is not a facies itself. `pgs_truncation` cuts latent fields with a fixed truncation rule to get facies. Two fields can, for example, give three facies.
-- **Truncation rule**: the fixed rule that says which facies a cell gets, given the latent field values. See the `pgs_truncation` section below.
-- **Knot**: for `control_schedule`, a report step at which a value of the control block starts. The worked example uses `knots = [0, 4, 8]`: three values, starting at report steps 0, 4 and 8.
+- **Facies**: a named rock type, such as `channel` or `shale`. In the options, facies code `k` is `facies[k]`.
+- **State variable**: a variable APEX updates in a history-matching run. Every name in `fields`, and every variable named in `property_fields`, must be a state variable of your configuration. This page does not define state variables. Run `uv run apex schema history_match` to print the JSON Schema of what a history-matching file accepts, and define them there.
+- **Signed distance field**: for `facies_distance`, one distance state variable per facies. The cell gets the facies of the field with the largest value (`argmax`). `fields[k]` belongs to `facies[k]`, so keep both lists in the same order.
+- **Latent field**: for `pgs_truncation`, a state variable that is cut by a truncation rule to give facies.
+- **Knot**: for `control_schedule`, the first report step (0-based) of each value of the control block. The knots increase and start at 0.
 
 ## Choosing a plugin
 
 | Plugin | Use it when | Status |
 | --- | --- | --- |
-| `control_scaling` | You have normalized controls that must map onto physical lower and upper bounds. | stable |
+| `control_scaling` | Your controls are normalized in [0, 1] and must map onto physical bounds. | stable |
 | `control_schedule` | A control block's values must be spread over report steps. | stable |
-| `facies_distance` | Your model provides signed distance fields. | no status tag |
-| `pgs_truncation` | Your model provides latent fields and a truncation rule. | no status tag |
-
-If you cannot tell which kind of fields your model provides, ask whoever prepared the model set-up.
+| `facies_distance` | Your state holds one signed distance field per facies. | no status tag |
+| `pgs_truncation` | Your state holds latent fields and you have a truncation rule (or one field and target proportions). | no status tag |
 
 ## Options
 
-All four plugins reject any option not listed here, so a typo is an error instead of being ignored.
+All four plugins reject options they do not define, so a typo is an error.
 
 ### `control_scaling`
 
-| Option | Type | Default | Notes |
+| Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `variable` | string | required | The control variable to scale. |
-| `lower` | number or list of numbers | required | Lower physical bound. |
-| `upper` | number or list of numbers | required | Upper physical bound. |
-| `output` | string or none | none | Optional output name. |
+| `variable` | string | required | The normalized control block. |
+| `lower` | number or list of numbers | required | The physical value at 0: a scalar, or one per value of the block. |
+| `upper` | number or list of numbers | required | The physical value at 1: a scalar, or one per value of the block. |
+| `output` | string or none | none | The name the simulation reads. When omitted, it is `variable`. |
 
 ### `control_schedule`
 
-| Option | Type | Default | Notes |
+| Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `variable` | string | required | The control variable to spread. |
-| `knots` | list of integers | required | The report steps at which the values of the control block start. |
-| `n_steps` | integer | required | Number of report steps. |
-| `output` | string or none | none | Optional name under which the scheduled values are provided, so a later map can use it as its `variable`. |
-| `interpolation` | `hold` or `linear` | `hold` | How values are carried between knots. |
+| `variable` | string | required | The control block (or an earlier parameterization's output) of `len(knots)` values. |
+| `knots` | list of integers | required | The first report step of each value (0-based, increasing, starting at 0). |
+| `n_steps` | integer | required | The report steps of the schedule. |
+| `output` | string or none | none | The name the simulation reads, with `(n_steps,)` values. When omitted, it is `variable`. |
+| `interpolation` | `hold` or `linear` | `hold` | `hold` is piecewise constant. |
 
 ### `facies_distance`
 
-| Option | Type | Default | Notes |
+| Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `fields` | list of strings | required | Names of the signed distance fields (state variables), in the order of `facies`. |
-| `facies` | list of strings | required | Names of the facies. |
-| `values` | table of tables of numbers | none | Constant properties per facies: `{facies: {property: value}}`. |
-| `property_fields` | table of tables of strings | none | Properties taken cell by cell from a state variable per facies: `{property: {facies: variable}}`. |
+| `fields` | list of strings | required | One distance state variable per facies, in code order. |
+| `facies` | list of strings | required | Facies names. |
+| `values` | table of tables of numbers | none | Constant properties per facies, as for `pgs_truncation`. |
+| `property_fields` | table of tables of strings | none | Properties by facies taken from state variables, as for `pgs_truncation`. |
 
 ### `pgs_truncation`
 
-| Option | Type | Default | Notes |
+| Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `fields` | list of strings | required | Names of the latent fields (state variables). |
-| `facies` | list of strings | required | Names of the facies. |
-| `rule_file` | string (a path) | none | The truncation rule, a `.npy` array of facies codes. |
-| `proportions` | list of numbers | none | With one latent field, the facies' target proportions instead of `rule_file`. |
-| `extent` | number | `3.0` | The rule array covers `[-extent, extent]` standard deviations on each axis. |
-| `values` | table of tables of numbers | none | Constant properties per facies: `{facies: {property: value}}`. |
-| `property_fields` | table of tables of strings | none | Properties taken cell by cell from a state variable per facies: `{property: {facies: variable}}`. |
+| `fields` | list of strings | required | The latent state variables, one per rule axis, in order. |
+| `facies` | list of strings | required | Facies names; facies code `k` is `facies[k]`. |
+| `rule_file` | string (a path) or none | none | A lithotype array (see below). |
+| `proportions` | list of numbers or none | none | For one field, the facies' target proportions (a truncated Gaussian). |
+| `extent` | number | `3.0` | The rule array is laid over `[-extent, extent]` standard deviations on each axis. |
+| `values` | table of tables of numbers | none | Constant properties per facies. |
+| `property_fields` | table of tables of strings | none | Properties taken cell by cell from a state variable of the facies there. |
 
-### The truncation rule: `rule_file` and `proportions`
+### The truncation rule: `rule_file` or `proportions`
 
-`rule_file` names a NumPy `.npy` array of integer facies codes. Code `k` means `facies[k]`. The array has one axis per latent field: axis 0 belongs to the first entry of `fields`, axis 1 to the second, and so on. Each axis is laid over `[-extent, extent]` standard deviations, and the edge bins extend to infinity. A cell's latent values pick a bin on each axis, and the code stored there is the cell's facies.
+Both options default to none. You describe the rule with one of them: `rule_file`, or, for a single field, `proportions`. Give exactly one. This page does not describe what happens if you give both or neither, so do not rely on either.
 
-For two fields and three facies, a small rule could be a 3x3 array:
+`rule_file` is a lithotype array: an `.npy` file of integer codes with one axis per field. It is laid over `[-extent, extent]` standard deviations on each axis, and the edge bins extend to infinity. A relative path is not documented to resolve from the config file's folder, so use an absolute path if the run cannot find the file.
+
+For two fields and three facies, a small rule is a 3x3 array of codes 0, 1 and 2:
 
 ```python
 import numpy as np
 
-rule = np.array(
-    [
-        [0, 0, 1],
-        [0, 1, 2],
-        [1, 2, 2],
-    ],
-    dtype=int,
-)
+rule = np.array([[0, 0, 1], [0, 1, 2], [1, 2, 2]], dtype=int)
 np.save("truncation_rule.npy", rule)
 ```
 
-With one latent field, `proportions` can replace the file. List one proportion per facies, in the order of `facies`, summing to 1. They are the target proportions of a truncated Gaussian.
+With one field, `proportions` gives the facies' target proportions, one per facies in the order of `facies`.
 
 ### Property tables: `values` and `property_fields`
 
-Both options are tables of tables, nested the other way round:
+The two tables are nested in opposite ways:
 
-- `values` is `{facies: {property: value}}`: outer keys are facies names, inner keys property names, each with a number. Every cell of a facies gets that number.
-- `property_fields` is `{property: {facies: variable}}`: outer keys are property names, inner keys facies names, each naming a state variable that you define in your configuration. Every cell takes, from the variable of its facies, the value at that cell. APEX updates these variables as it updates the other state variables.
+- `values` is `{facies: {property: value}}`: constant properties per facies, for example `{sand = {poro = 0.25, permx = 500}, shale = {poro = 0.05, permx = 1}}`.
+- `property_fields` is `{property: {facies: state variable}}`: properties taken cell by cell from a state variable of the facies there, for example `{permx = {sand = "permx_sand", ...}}`. These variables are updated with the latent fields.
 
-The facies names must be those in `facies`, and the property names those the simulator reads (for example `poro`, `permx`). A property is given by `values` or by `property_fields`, not both. The plugin's outputs are `facies` (the codes) and every property.
+A property is in `values` or in `property_fields`, not both.
 
 ## Steps
 
-1. Pick the plugin that matches what you have.
-2. Add a `[[parameterizations]]` entry with the plugin's `name` and its options in `options`. `[[parameterizations]]` is an array of tables, so its brackets are doubled: one entry per map, applied in order. The control plugins go in an optimization configuration (`apex schema optimization`), the facies plugins in a history-matching one (`apex schema history_match`).
-3. Set the required options for that plugin (see the tables above).
+1. Pick the plugin that matches your fields (see the table above).
+2. Add a `[[parameterizations]]` entry with the plugin's `name` and its `options`. The brackets are doubled because it is an array of tables: one entry per map, applied in order. Control plugins go in an optimization configuration (`uv run apex schema optimization` prints what it accepts), facies plugins in a history-matching one.
+3. Set the required options of that plugin.
 4. Add optional options only where you need them. Omitted options keep their defaults.
-5. Run `apex plugins` to list every plugin with its options. Add `--json` for the full descriptions. Use it to check option names, types and defaults against your file.
-6. Test with `apex run config.toml --max-steps 1`. `--max-steps` stops the run after that many analysis steps. Add `--no-progress` to hide the progress display.
-7. To stop a run that is in progress, pass its run directory to `apex stop`. The run stops at its next checkpoint. Continue it later with `apex resume`, which also takes the run directory.
+5. Run `uv run apex plugins` to list every plugin with its options, and add `--json` for the full descriptions. Compare option names and types with your file.
+6. Test with `uv run apex run config.toml --max-steps 1`. `--max-steps` stops the run after that many analysis steps. `--no-progress` hides the progress display.
+7. To stop a running run, pass its run directory to `apex stop`. It stops at its next checkpoint. `apex resume` continues it from its last checkpoint.
 
 ```bash
-uv run apex stop RUN_DIR
-uv run apex resume RUN_DIR
+uv run apex stop runs/my_run
+uv run apex resume runs/my_run
 ```
 
-`RUN_DIR` stands for the directory of your run.
+`runs/my_run` is a placeholder for the directory of your run. `apex stop`, `apex resume` and `apex report` all take it as `run_dir`. Use the directory of the run you started.
+
+To see the data mismatch history and performance metrics of a run, use `apex report`. Add `--plots` to write figures; `--output` sets their directory (default: `RUN_DIR/report`) and `--font-size` their font size (default 12.0 points):
+
+```bash
+uv run apex report runs/my_run --plots
+```
 
 ## Worked example
 
-Control plugins first, in an optimization configuration. This scales a control onto physical bounds:
+Control plugins first, in an optimization configuration. This scales a normalized control block onto physical bounds:
 
 ```toml
 [[parameterizations]]
@@ -164,9 +166,9 @@ name = "control_scaling"
 options = { variable = "rate", lower = 0.0, upper = 500.0 }
 ```
 
-`lower` and `upper` can also be lists of numbers. `rate` is a placeholder; use your own control variable.
+`rate` is a placeholder for your control block. `lower` and `upper` can also be lists with one value per value of the block. Without `output`, the simulation reads the result under the name `rate`. To give it another name, set `output`, for example `output = "rate_physical"`.
 
-This spreads a control block of three values over 12 report steps, with linear interpolation between the knots:
+This spreads a block of three values over 12 report steps, starting at steps 0, 4 and 8, with linear interpolation:
 
 ```toml
 [[parameterizations]]
@@ -174,9 +176,7 @@ name = "control_schedule"
 options = { variable = "rate", knots = [0, 4, 8], n_steps = 12, interpolation = "linear" }
 ```
 
-Leave out `interpolation` to get the default, `hold`.
-
-To use both, list `control_schedule` first, because the maps apply in order. Give it `output = "rate_steps"`. Then give `control_scaling` `variable = "rate_steps"`, so it scales the scheduled values instead of the raw control:
+To use both, list `control_schedule` first, because maps are applied in order. Its `variable` may be the control block, and a later map may read an earlier map's output. So give `control_schedule` the `output` `rate_steps`, and make `control_scaling` read it:
 
 ```toml
 [[parameterizations]]
@@ -188,9 +188,9 @@ name = "control_scaling"
 options = { variable = "rate_steps", lower = 0.0, upper = 500.0 }
 ```
 
-The data flow is: `rate` goes into `control_schedule`, which provides `rate_steps`; `control_scaling` reads `rate_steps`. The name `rate_steps` is your choice; it only has to be the same in both entries. When `control_scaling` is used alone, its `variable` is the control itself, as in the first example.
+The data flow is: `rate` goes into `control_schedule`, which outputs `rate_steps` (12 values); `control_scaling` reads `rate_steps`. Since `control_scaling` has no `output`, the simulation reads the scaled values as `rate_steps`. The name `rate_steps` is your choice, but it must be the same in both entries.
 
-Now facies, in a history-matching configuration. This builds three facies from three signed distance fields and gives each a constant porosity. `d_channel`, `d_levee` and `d_shale` are state variables of your configuration, in the same order as the facies:
+Now facies, in a history-matching configuration. This builds three facies from three signed distance fields and gives each a constant porosity. `d_channel`, `d_levee` and `d_shale` are placeholders for state variables you define, in the same order as `facies`:
 
 ```toml
 [[parameterizations]]
@@ -206,7 +206,7 @@ levee = { poro = 0.20 }
 shale = { poro = 0.05 }
 ```
 
-`[parameterizations.options]` holds the options of the entry just above it. To take a property from state variables instead of fixed numbers, use `property_fields`. The variable names are placeholders for state variables you define yourself.
+`[parameterizations.options]` holds the options of the entry just above it. To take a property from state variables instead of fixed numbers, use `property_fields`:
 
 ```toml
 [[parameterizations]]
@@ -222,7 +222,7 @@ levee = "perm_levee"
 shale = "perm_shale"
 ```
 
-With `pgs_truncation`, two latent fields are cut by the rule in `rule_file` (the 3x3 array saved above, with codes 0, 1 and 2) to give three facies:
+With `pgs_truncation`, two latent fields are cut by the rule saved above to give three facies:
 
 ```toml
 [[parameterizations]]
@@ -231,7 +231,7 @@ name = "pgs_truncation"
 [parameterizations.options]
 fields = ["gaussian_1", "gaussian_2"]
 facies = ["sand", "silt", "clay"]
-rule_file = "truncation_rule.npy"
+rule_file = "/path/to/truncation_rule.npy"
 
 [parameterizations.options.values]
 sand = { poro = 0.28 }
@@ -239,7 +239,7 @@ silt = { poro = 0.15 }
 clay = { poro = 0.04 }
 ```
 
-With one latent field, use `proportions` instead of a file. The three proportions follow the order of `facies` and sum to 1:
+With one latent field, use `proportions` instead of a file, one per facies in the order of `facies`:
 
 ```toml
 [[parameterizations]]
@@ -256,27 +256,27 @@ silt = { poro = 0.15 }
 clay = { poro = 0.04 }
 ```
 
-Save a configuration as `config.toml`, then check the plugins and test the run:
+Put an entry in your `config.toml`, together with the other sections it needs, then check the plugins and test the run:
 
 ```bash
 uv run apex plugins
 uv run apex run config.toml --max-steps 1
 ```
 
-If the run reports an error about an option, fix the option named in the message and run again. The layout of the `apex plugins` listing can differ, so look for the plugin name and compare its options with your file.
+If the run reports an error about an option, fix the option named in the message and run again.
 
 ## Pitfalls
 
 - **Missing required options.** Each plugin has required options (see the tables). Leaving one out is an error.
 - **Misspelt or unknown options.** The plugins reject options they do not define.
-- **Mixing up the plugins' inputs.** `facies_distance` expects signed distance fields. `pgs_truncation` expects latent fields.
-- **Fields and facies in different orders.** For `facies_distance`, the i-th field belongs to the i-th facies.
-- **Undefined state variables.** Names in `fields` and `property_fields` must be state variables defined in your configuration.
-- **Inconsistent names.** Facies names in `values` and `property_fields` must match the names in `facies`.
-- **Nesting the property tables the wrong way.** `values` is keyed by facies first (`sand = { poro = 0.28 }`), `property_fields` by property first (`[parameterizations.options.property_fields.permx]`).
+- **Mixing up the inputs.** `facies_distance` expects one distance field per facies. `pgs_truncation` expects latent fields cut by a rule.
+- **Fields and facies in different orders.** For `facies_distance`, `fields[k]` belongs to `facies[k]`.
+- **Undefined state variables.** Names in `fields` and `property_fields` must be state variables of your configuration.
+- **Giving both `rule_file` and `proportions`, or neither.** Give exactly one.
+- **Nesting the property tables the wrong way.** `values` is keyed by facies first, `property_fields` by property first.
+- **The same property in both tables.** A property is in `values` or in `property_fields`, not both.
+- **Chaining with the wrong name.** When `control_schedule` has an `output`, the `variable` of the following `control_scaling` must be that name.
 - **Wrong value types.** `values` holds numbers, `property_fields` holds strings, `knots` holds integers.
-- **Chaining with the wrong name.** When `control_schedule` has an `output`, the `variable` of the following `control_scaling` must be that same name.
-- **Assuming optional settings are required.** `extent` is optional and defaults to `3.0`. `interpolation` is optional and defaults to `hold`. `output` is optional in both control plugins.
 
 ## What to read next
 
