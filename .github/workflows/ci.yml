@@ -1,13 +1,6 @@
 # The checks of every change: format, lint, types, architecture contracts, tests (unit,
-# workflow and PET parity; integration tests with real simulators are opt-in), the docs and
+# workflow and parity; integration tests with real simulators are opt-in), the docs and
 # the web UI. On GitHub's runners only.
-#
-# While the repository is private, pushes and pull requests skip the jobs (no Actions
-# minutes); a run started by hand (Actions > CI > Run workflow) always runs, and uses
-# minutes while the repository is private. Once the
-# repository is public, every push and pull request runs them. The event's
-# repository.private is GitHub's own record of the visibility, so the switch needs no change
-# here.
 name: CI
 
 on:
