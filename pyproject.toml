@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
 license-files = [
-    "LICENSE",
+    "LICENSE.txt",
     "LICENSES/Apache-2.0-pymoo.txt",
     "THIRD_PARTY_NOTICES.md",
 ]

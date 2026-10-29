@@ -1,6 +1,6 @@
 # Third-party notices
 
-APEX is GPL-3.0-or-later (`LICENSE`). Parts of it are adapted from other open-source projects,
+APEX is GPL-3.0-or-later (`LICENSE.txt`). Parts of it are adapted from other open-source projects,
 as each module docstring records.
 
 ## pymoo

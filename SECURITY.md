@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-Only the latest commit of `main` is supported. APEX is in early development and has no
-versioned releases yet, so fixes are made on `main` only.
+Only the latest commit of `main` is supported. APEX is in early development: fixes are made
+on `main` only and reach users in the next release, not as patches to earlier tagged releases
+(the first is v0.1.0).
 
 ## Reporting a vulnerability
 
