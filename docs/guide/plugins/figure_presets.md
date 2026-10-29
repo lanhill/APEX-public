@@ -1,44 +1,54 @@
 ---
 audience: public
 items:
+  - cli:apex agent plot
+  - cli:apex plugins
+  - cli:apex report
+  - cli:apex run
+  - cli:apex stop
   - plugin:figure_presets:brugge_classic
+  - plugin:metrics:model_change
 ---
 
 # Figure presets
 
 ## Goal
 
-By the end of this page you will know what the `figure_presets` registry is for, what the `brugge_classic` plugin produces, and how to set its three options: `histogram_variable`, `normalized` and `model_change`.
+By the end of this page you will know what the `figure_presets` registry is for, what the `brugge_classic` plugin draws, and how to switch on its options: `histogram_variable`, `normalized` and `model_change`. You will draw the figures of a run with `uv run apex agent plot`.
 
 ## Prerequisites
 
-- A finished or stopped history-matching run directory, `RUN_DIR`.
-- matplotlib, in APEX's default environment (`uv sync --locked`); when APEX is a dependency of your own project, name the `plots` extra.
+- APEX installed as the README describes. Type every command from the APEX folder, starting with `uv run apex`.
+- A finished or stopped run, which you can pass to the command as a run directory, a run id or a job id. A run starts with `uv run apex run CONFIG.toml`. A running run can be asked to stop at its next checkpoint with `uv run apex stop RUN_DIR`.
 
 ## What `brugge_classic` is
 
-`brugge_classic` is a plugin in the `figure_presets` registry. It produces the classic figure set of an ensemble history-matching study, organised in its folders. It is not part of a configuration file: the plotter agent draws it, `apex agent plot RUN_DIR --preset brugge_classic`, or the assistant's `plot_run`, or the REST route `POST /v1/agents/plot` with `"preset": "brugge_classic"`.
+`brugge_classic` is a plugin in the `figure_presets` registry. A figure preset is a named, ready-made set of result figures. `brugge_classic` is the classic figure set of an ensemble history-matching study, arranged in folders such as `nn_hist/`.
+
+A preset is not part of a run configuration file. You ask for it when you draw the figures of a run, with `uv run apex agent plot` and its `--preset` option. With `--preset`, no model is asked.
+
+To see every plugin with its options, run `uv run apex plugins`. Add `--json` for the full descriptions as JSON.
 
 ## Options
 
 The plugin accepts only the options below. Any other option name is rejected.
 
-| Option | Type | Default |
-| --- | --- | --- |
-| `histogram_variable` | string | `nn_params` |
-| `normalized` | boolean | `false` |
-| `model_change` | boolean | `false` |
+| Option | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `histogram_variable` | string | `nn_params` | The state variable of `nn_hist/`. |
+| `normalized` | boolean | `false` | Also draws `normalized_data_mismatch` (the objective, and per data type and well). |
+| `model_change` | boolean | `false` | Also draws `model_change`. |
 
-- `histogram_variable` is the variable used for the histogram figures. It defaults to `nn_params`.
-- `normalized` is a true/false setting and is off by default.
-- `model_change` is a true/false setting and is off by default.
+The `model_change` figure is based on the `model_change` plugin of the `metrics` registry. That metric measures the change of each member's parameters since the ensemble it was updated from.
 
 ## Steps
 
 1. Decide whether the defaults suit your run. If they do, name the preset alone.
-2. Switch on `normalized` or `model_change` with `--with`, once per option.
-3. Through REST, give the same switches as `preset_options`, e.g. `{"model_change": true}`. They take true or false only, so `histogram_variable` keeps its default, `nn_params`, when the preset is named.
-4. Look for the figures in the preset's folders under `RUN_DIR/report/plots/`.
+2. To switch on `normalized` or `model_change`, add `--with` followed by the option name. Repeat `--with` once per option.
+3. Optionally choose where the figures go with `--output`. Without it they go to `RUN_DIR/report/plots`.
+4. Open the output folder and look at the figures. The histogram figures are in `nn_hist/`.
+
+`--with` only switches an option on. The command line shows no way to give `histogram_variable` a value, so the default, `nn_params`, applies when you name the preset.
 
 ## Worked example
 
@@ -48,22 +58,28 @@ The classic set with every default:
 uv run apex agent plot RUN_DIR --preset brugge_classic
 ```
 
-With `normalized` and `model_change` switched on:
+The same set, with `normalized` and `model_change` switched on:
 
 ```bash
 uv run apex agent plot RUN_DIR --preset brugge_classic --with normalized --with model_change
 ```
 
-Through REST, the same: `POST /v1/agents/plot` with `{"run": "RUN_ID", "preset": "brugge_classic", "preset_options": {"normalized": true, "model_change": true}}`, where `RUN_ID` is the run's id from `GET /v1/runs` (not its folder).
+The same set, written to a folder of your choice:
+
+```bash
+uv run apex agent plot RUN_DIR --preset brugge_classic --output my_figures
+```
+
+Replace `RUN_DIR` with your run directory, run id or job id. If your runs are not in the default services root (`$APEX_HOME`, else `~/.apex/service`), add `--root` with the right folder.
 
 ## Pitfalls
 
-- **Booleans are not strings.** In `preset_options`, write `"normalized": true`, not `"normalized": "true"`.
+- **Defaults apply when you stay silent.** If you expect `normalized` or `model_change` to be on, switch them on with `--with`.
 - **Unknown options are rejected.** The plugin accepts only `histogram_variable`, `normalized` and `model_change`. A misspelled name is an error, not a silent no-op.
-- **`histogram_variable` is a string**, the name of a state variable of the run, as in `"nn_params"`.
-- **Defaults apply when you stay silent.** If you expect `normalized` or `model_change` to be on, switch them on explicitly.
+- **`--preset` and `--request` are different routes.** `--preset` draws a named preset without asking a model. `--request` describes in words what to draw.
+- **A preset name is not a file.** Do not put `brugge_classic` in a run configuration; it is only given to `apex agent plot`.
 
 ## What to read next
 
-- The other pages in the plugins section of this guide, for the remaining plugin registries.
 - [Figures](../../figures.md), for the plotter agent and the figure plugins.
+- `uv run apex report RUN_DIR --plots`, which prints the data mismatch history and performance metrics of a run and also writes its result figures (PNG and PDF).

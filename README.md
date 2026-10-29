@@ -10,20 +10,20 @@ Status: early development.
 
 <table>
 <tr>
-<td width="50%"><a href="docs/getting_started/first_run.md">Your first history-matching run, in a terminal</a><br>▶ <a href="videos/ep02_first_case/ep02_first_case.mp4">Ep. 2</a> · <a href="videos/ep03_cost_and_first_steps/ep03_cost_and_first_steps.mp4">3</a> · <a href="videos/ep04_resume_and_results/ep04_resume_and_results.mp4">4</a> · <a href="videos/ep05_figures_and_comparison/ep05_figures_and_comparison.mp4">5</a></td>
-<td width="50%"><a href="docs/getting_started/studies_and_approvals.md">Studies, the job service and approvals</a><br>▶ <a href="videos/ep08_hm_study/ep08_hm_study.mp4">Ep. 8</a> · <a href="videos/ep09_job_service/ep09_job_service.mp4">9</a> · <a href="videos/ep10_approvals/ep10_approvals.mp4">10</a></td>
+<td width="50%"><a href="docs/getting_started/first_run.md">Your first history-matching run, in a terminal</a><br>▶ <a href="https://www.youtube.com/watch?v=jG6MHnTf2xk&list=PLLxKDH7QwDR4">Ep. 2</a> · <a href="https://www.youtube.com/watch?v=u8VQ4Uhwso4&list=PLLxKDH7QwDR4">3</a> · <a href="https://www.youtube.com/watch?v=kM0PGoJBvgQ&list=PLLxKDH7QwDR4">4</a> · <a href="https://www.youtube.com/watch?v=wW_LfWk9Ndo&list=PLLxKDH7QwDR4">5</a></td>
+<td width="50%"><a href="docs/getting_started/studies_and_approvals.md">Studies, the job service and approvals</a><br>▶ <a href="https://www.youtube.com/watch?v=5YNVGWFs9so&list=PLLxKDH7QwDR4">Ep. 8</a> · <a href="https://www.youtube.com/watch?v=Uz-X9-zs9bA&list=PLLxKDH7QwDR4">9</a> · <a href="https://www.youtube.com/watch?v=aVxwv1UfrHQ&list=PLLxKDH7QwDR4">10</a></td>
 </tr>
 <tr>
-<td width="50%"><a href="docs/getting_started/agents_cli.md">Using agents from the command line</a><br>▶ <a href="videos/ep12_agents_cli/ep12_agents_cli.mp4">Ep. 12</a></td>
-<td width="50%"><a href="docs/getting_started/case_converter.md">Bringing your own case to APEX: one deck or one description</a><br>▶ <a href="videos/ep13_own_case/ep13_own_case.mp4">Ep. 13</a></td>
+<td width="50%"><a href="docs/getting_started/agents_cli.md">Using agents from the command line</a><br>▶ <a href="https://www.youtube.com/watch?v=6uxgW6glXHY&list=PLLxKDH7QwDR4">Ep. 12</a></td>
+<td width="50%"><a href="docs/getting_started/case_converter.md">Bringing your own case to APEX: one deck or one description</a><br>▶ <a href="https://www.youtube.com/watch?v=oG7PjETXrr8&list=PLLxKDH7QwDR4">Ep. 13</a></td>
 </tr>
 <tr>
-<td width="50%"><a href="docs/getting_started/web_ui.md">Setting up your web UI with an AI assistant</a><br>▶ <a href="videos/ep11_web_ui/ep11_web_ui.mp4">Ep. 11</a></td>
-<td width="50%"><a href="docs/getting_started/writing_a_plugin.md">Writing and registering your own plugin</a><br>▶ <a href="videos/ep14_plugin_metric/ep14_plugin_metric.mp4">Ep. 14</a> · <a href="videos/ep15_plugin_algorithm/ep15_plugin_algorithm.mp4">15</a></td>
+<td width="50%"><a href="docs/getting_started/web_ui.md">Setting up your web UI with an AI assistant</a><br>▶ <a href="https://www.youtube.com/watch?v=VzzOpVtuMGk&list=PLLxKDH7QwDR4">Ep. 11</a></td>
+<td width="50%"><a href="docs/getting_started/writing_a_plugin.md">Writing and registering your own plugin</a><br>▶ <a href="https://www.youtube.com/watch?v=9xCzzmq6yCk&list=PLLxKDH7QwDR4">Ep. 14</a> · <a href="https://www.youtube.com/watch?v=2SF3839UF7c&list=PLLxKDH7QwDR4">15</a></td>
 </tr>
 </table>
 
-▶ marks the videos of each page. [All the videos](videos/README.md), with subtitles, include a two-minute overview, the installation and optimization.
+▶ marks the videos of each page, on YouTube. [All the videos](https://www.youtube.com/playlist?list=PLLxKDH7QwDR4) ([list](videos/README.md)), with subtitles, include a two-minute overview, the installation and optimization.
 
 ## Installation
 

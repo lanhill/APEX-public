@@ -11,7 +11,8 @@ from apex.services.compatibility import strategy_compatibility
 
 @pytest.fixture(scope="module")
 def table() -> dict[str, dict[str, str | None]]:
-    return strategy_compatibility()
+    # Every plugin, private and experimental ones too: each must have an answer.
+    return strategy_compatibility(public_only=False)
 
 
 def test_every_strategy_and_method_has_an_answer(table: dict[str, dict[str, str | None]]) -> None:
