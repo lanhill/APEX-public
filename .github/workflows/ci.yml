@@ -1,0 +1,84 @@
+# The checks of every change: format, lint, types, architecture contracts, tests (unit,
+# workflow and PET parity; integration tests with real simulators are opt-in), the docs and
+# the web UI. On GitHub's runners only.
+#
+# While the repository is private, pushes and pull requests skip the jobs (no Actions
+# minutes); a run started by hand (Actions > CI > Run workflow) always runs, and uses
+# minutes while the repository is private. Once the
+# repository is public, every push and pull request runs them. The event's
+# repository.private is GitHub's own record of the visibility, so the switch needs no change
+# here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+
+jobs:
+  checks:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # Every action is pinned to a commit: a moved tag cannot run new code here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.12.24"
+          enable-cache: true
+      - name: Install
+        # The co2 extra (CoolProp, wheels only): CO₂'s equation of state is tested too.
+        run: uv sync --locked --python 3.12 --all-packages --extra co2
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Types
+        run: uv run mypy
+      - name: Architecture contracts
+        run: uv run lint-imports
+      - name: Tests
+        run: uv run pytest -n 4
+      - name: Docs
+        run: uv run mkdocs build --strict
+
+  ui:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: 22  # vitest 5 needs Node 22.12+
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Types
+        run: npm run typecheck
+      - name: Tests
+        run: npm test
+      - name: Build
+        run: npm run build
