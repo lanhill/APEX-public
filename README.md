@@ -208,7 +208,7 @@ Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Re
 
 ## Citing
 
-If you use APEX, please cite it: [CITATION.cff](CITATION.cff) (GitHub's *Cite this repository*). A paper describing APEX is in preparation; its reference will be added there.
+If you use APEX, please cite it: [CITATION.cff](CITATION.cff) (GitHub's *Cite this repository*). 
 
 ## Disclaimer
 
