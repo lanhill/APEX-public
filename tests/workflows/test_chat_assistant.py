@@ -1672,9 +1672,13 @@ def test_compared_algorithms_keep_their_own_base_and_say_what_differs(
     # Each algorithm is its own base: chop keeps its defaults; how it differs
     # comes back, for the assistant to state, propose, and offer to match (a reported issue).
     assert "max_iterations" not in result["methods"]["chop"]
-    assert "strategy" not in result["methods"]["chop"]
+    # Its own strategy, with only the setting both strategies take made the case's (#256).
+    assert result["methods"]["chop"]["strategy"] == {"name": "rlmmac", "options": {"energy": 0.98}}
+    assert any(m.startswith("chop: rlmmac energy")
+               and m.endswith("-> 0.98, as the case's algorithm")
+               for m in result["matched"])  # fmt: skip
     assert "chop runs to its own iteration limit, the case 4 steps" in result["differences"]
-    assert any(d.startswith("chop's strategy is rlmmac (its default); the case's is approx")
+    assert any(d.startswith("chop's strategy is rlmmac; the case's is approx")
                for d in result["differences"])  # fmt: skip
     # A reported issue: asked to propose, the assistant proposes the card and states what
     # differs; matching is an offer, not a stop.
@@ -1711,6 +1715,103 @@ def test_arms_the_model_set_stay_and_a_non_iterative_arms_schedule_is_named(
     assert result["methods"]["chop"]["max_iterations"] == 3
     assert "chop runs up to 3 iterations, the case 2 iterations" in result["differences"]
     assert "esmda runs 3 steps, the case 2 iterations" in result["differences"]
+
+
+def test_a_compared_arm_takes_the_cases_energy_unless_it_sets_its_own(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue, #256: ES-MDA at the case's energy 0.99 was compared with GN-EnRML
+    at its default 0.95, an avoidable confound. An arm whose strategy takes ``energy`` and
+    leaves it unset runs at the case's, and says so ('matched'); an arm that sets its own
+    keeps it, and every arm keeps its own strategy. #252: the cost comes as a
+    line to quote, its arithmetic done."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    linear_case(
+        name="esmda99", ensemble_size=20,
+        method='name = "esmda"\noptions = { inflation = [2, 2] }\n'
+        'strategy = { name = "approx", options = { energy = 0.99 } }',
+    )  # fmt: skip
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    result: dict[str, Any] = plan.handler(
+        plan.arguments(
+            case="esmda99/config.toml", goal="compare gn_enrml with the case's algorithm",
+            budget=20000, name="gn_vs_esmda", replicates=2,
+            methods={"esmda": {"name": "esmda", "options": {"inflation": [2, 2]},
+                               "strategy": {"name": "approx", "options": {"energy": 0.99}}},
+                     "gn": {"name": "gn_enrml", "max_iterations": 2},
+                     "lm": {"name": "lm_enrml", "max_iterations": 2,
+                            "strategy": {"name": "approx", "options": {"energy": 0.9}}}},
+        )
+    )  # fmt: skip
+    assert result["methods"]["gn"]["strategy"] == {"name": "approx", "options": {"energy": 0.99}}
+    assert "gn: approx energy 0.95 -> 0.99, as the case's algorithm" in result["matched"]
+    assert result["methods"]["lm"]["strategy"]["options"] == {"energy": 0.9}  # its own
+    assert not any(m.startswith(("lm:", "esmda:")) for m in result["matched"])
+    assert not any(d.startswith("gn's") for d in result.get("differences", []))
+    assert "'matched' lists" in result["next"]
+    # #252: the total is the plan's, its arithmetic spelled out per arm.
+    assert result["cost_line"].endswith(f"in total {result['cost']} simulator runs at most")
+    assert "esmda | baseline: 2 x " in result["cost_line"]
+    assert "quote 'cost_line'" in result["next"]
+
+
+def test_the_energy_matched_is_what_the_cases_own_arm_runs(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #256: an arm of the case's method given without a strategy runs the
+    method's default (an entry replaces every algorithm field), so the others
+    match that, not the case file's 0.99; a strategy without energy is left alone."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    linear_case(
+        name="esmda99b", ensemble_size=20,
+        method='name = "esmda"\noptions = { inflation = [2, 2] }\n'
+        'strategy = { name = "approx", options = { energy = 0.99 } }',
+    )  # fmt: skip
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    result: dict[str, Any] = plan.handler(
+        plan.arguments(
+            case="esmda99b/config.toml", goal="compare gn_enrml with the case's algorithm",
+            budget=20000, name="gn_vs_esmda_default",
+            methods={"esmda": {"name": "esmda", "options": {"inflation": [2, 2]}},
+                     "gn": {"name": "gn_enrml", "max_iterations": 2},
+                     "sub": {"name": "lm_enrml", "max_iterations": 2,
+                             "strategy": {"name": "subspace2"}}},
+        )
+    )  # fmt: skip
+    # The case's arm runs approx at its default 0.98: gn (0.95) is matched to that.
+    assert result["methods"]["gn"]["strategy"]["options"] == {"energy": 0.98}
+    assert result["methods"]["sub"]["strategy"] == {"name": "subspace2"}
+    assert not any(m.startswith("sub:") for m in result["matched"])
+
+
+def test_a_cost_line_multiplies_equal_arms(tmp_path: Path, linear_case: CaseFactory) -> None:
+    """#252: arms of one cost are said as arms x replicates x runs = the plan's total."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"},
+                {"name": "loc", "patch": {"method": {"localization": {"name": "adaptive"}}},
+                 "rationale": "localized"}]  # fmt: skip
+    result: dict[str, Any] = plan.handler(
+        plan.arguments(case="alpha/config.toml", goal="does localization help", budget=2000,
+                       name="loc", variants=variants, replicates=3)
+    )  # fmt: skip
+    per_run = result["cost"] // 6
+    assert result["cost_line"] == (f"2 arms x 3 replicates x {per_run} simulator runs = "
+                                   f"{result['cost']} simulator runs at most")  # fmt: skip
+
+
+def test_a_comparison_with_the_cases_own_algorithm_is_planned_not_asked() -> None:
+    """Reported issues #254/#255: asked to compare ES-MDA with the case's own algorithm,
+    also ES-MDA, the assistant stopped after case_info and asked, so nothing was costed or
+    checked against the cap. The prompt makes plan_study come first."""
+    assert "always ends in a plan_study call before you ask anything" in SYSTEM
+    assert "unless a rule here says to ask first" in SYSTEM
+    assert "still plan it" in SYSTEM
+    assert "seed replicates" in SYSTEM
+    assert "never instead of planning" in SYSTEM
 
 
 def test_a_configuration_with_plugin_names_as_strings_is_described(tmp_path: Path) -> None:

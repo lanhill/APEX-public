@@ -403,6 +403,108 @@ def method_differences(facts: PlanFacts, proposal: StudyProposal) -> list[str]:
     return notes
 
 
+#: Strategy options a compared arm takes from the case when both strategies have them: the
+#: truncation energy is not what an algorithm comparison tests (a reported issue, #256:
+#: ES-MDA at the case's 0.99 against GN-EnRML at its default 0.95).
+MATCHED_STRATEGY_OPTIONS = ("energy",)
+
+
+def _strategy_value(section: Mapping[str, Any] | None, key: str) -> Any:  # noqa: ANN401
+    """Return a strategy section's ``key``: given, else its plugin's default (``None``: none)."""
+    if section is None or not isinstance(section.get("name"), str):
+        return None
+    options = section.get("options") or {}
+    if key in options:
+        return options[key]
+    from apex.services.plugins import option_model
+
+    try:
+        field = option_model("update_strategies", section["name"]).model_fields.get(key)
+    except (KeyError, ApexError):
+        return None
+    if field is None or field.is_required():
+        return None
+    return field.get_default(call_default_factory=True)
+
+
+def match_strategies(facts: PlanFacts, proposal: StudyProposal) -> tuple[StudyProposal, list[str]]:
+    """Give each compared arm's strategy the case's :data:`MATCHED_STRATEGY_OPTIONS`.
+
+    An arm whose strategy (given, or its method's default as ``default_strategy`` names
+    it) has the option and does not set it itself runs with the case's value (given, or the
+    case's strategy's default) when the case's strategy has it too. The arm keeps its own
+    strategy and every other setting: each algorithm stays its own base; only a
+    setting both arms take is made equal, as optimizers' shared options are
+    (``optimization_advice.match_arms``). A value the arm's strategy refuses is left as it
+    was, and so are the case's own algorithm and engines' arms. Returns the proposal and
+    what was changed, for the assistant to state ("matched").
+    """
+    from apex.domain.config import PluginSection
+    from apex.services.compatibility import default_strategy
+    from apex.services.plugins import option_model
+
+    # The reference is what the case's own arm runs, when the study has one: a method entry
+    # replaces every algorithm field, so an entry of the case's method without a
+    # strategy runs the method's default, not the case's strategy (the review's finding).
+    own_arm = next((e for e in proposal.methods.values()
+                    if not e.external and _case_own(facts, e)), None)  # fmt: skip
+    ours: Mapping[str, Any] | None
+    if own_arm is not None:
+        given_own = own_arm.strategy
+        ours = (default_strategy(own_arm.name, own_arm.options) if given_own is None
+                else {"name": given_own.name, "options": given_own.options})  # fmt: skip
+    else:
+        case = facts.case_method.get("strategy")
+        ours = case if isinstance(case, Mapping) else None
+        if ours is None and facts.method is not None:
+            ours = default_strategy(facts.method, facts.case_method.get("options"))
+    if ours is None:
+        return proposal, []
+    methods: dict[str, MethodEntry] = {}
+    changes: list[str] = []
+    for label, entry in proposal.methods.items():
+        given = entry.strategy
+        theirs: dict[str, Any] | None = (
+            None
+            if entry.external or _case_own(facts, entry)
+            else default_strategy(entry.name, entry.options)
+            if given is None
+            else {"name": given.name, "options": dict(given.options)}
+        )
+        if theirs is None or not isinstance(theirs.get("name"), str):
+            methods[label] = entry
+            continue
+        name: str = theirs["name"]
+        own: dict[str, Any] = dict(theirs.get("options") or {})
+        options = dict(own)
+        for key in MATCHED_STRATEGY_OPTIONS:
+            if given is not None and key in given.options:
+                continue  # the arm's own choice
+            value, before = _strategy_value(ours, key), _strategy_value(theirs, key)
+            if value is None or before is None or value == before:
+                continue
+            try:
+                option_model("update_strategies", name).model_validate({**options, key: value})
+            except (ValidationError, KeyError, ApexError):
+                continue
+            options[key] = value
+            changes.append(f"{label}: {name} {key} {before!r} -> {value!r}, as the "
+                           "case's algorithm")  # fmt: skip
+        if options != own:
+            # Only what was given: TOML holds no null (diagnostics unset stays unset).
+            kept = (
+                {}
+                if given is None or given.diagnostics is None
+                else {"diagnostics": given.diagnostics}
+            )
+            strategy = PluginSection(name=name, options=options, **kept)
+            entry = entry.model_copy(update={"strategy": strategy})
+        methods[label] = entry
+    if not changes:
+        return proposal, []
+    return proposal.model_copy(update={"methods": methods}), changes
+
+
 #: What makes a fidelity level coarse, per simulator: the level's own model, among
 #: ``services.composition.LEVEL_SIMULATOR_KEYS``. A level without one runs the fine
 #: model; a simulator not listed has no coarser models.

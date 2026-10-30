@@ -55,6 +55,7 @@ from apex.agents.planner import (
     VariantProposal,
     ert_localization_goal,
     ert_localization_obstacle,
+    match_strategies,
     method_differences,
     place_cases,
     plan_facts,
@@ -564,7 +565,14 @@ SYSTEM = (
     "truncation are the same setting under two names (the fraction of the singular values' "
     "sum kept), so equal values compare the methods fairly; plan_study's rules do "
     "this for such a goal when you give no design. Plan early: look up only what the "
-    "design needs, and revise a refused plan from its error. plan_study and revise_draft "
+    "design needs, and revise a refused plan from its error. A request to plan or compare "
+    "history-matching methods always ends in a plan_study call before you ask anything "
+    "(unless a rule here says to ask first: a 'runs' cap that could mean either unit, an "
+    "optimization's economics, a multi-objective choice): when the requested method is "
+    "the case's own algorithm, still plan it, as that method against its variants (the "
+    "case's localization or strategy against none or another) or as seed replicates of the "
+    "case, and say which you chose and why; offer the other design afterwards, never "
+    "instead of planning. plan_study and revise_draft "
     "return held_fixed, differs and seeds from the study's cells: say which settings are "
     "shared and which differ from those, never from memory, and point out any difference "
     "beyond the one the user asked for. A setting is shared only when every arm has it at "
@@ -888,8 +896,10 @@ class ChatAssistant:
                     proposal = proposal.model_copy(update={"name": args.name})
                 if args.simulator:
                     proposal = proposal.model_copy(update={"simulator": args.simulator})
-            # How compared algorithms differ besides the algorithm, never changed here:
-            # each algorithm is its own base (a reported issue).
+            # A setting both arms' strategies take (the truncation energy) is the case's
+            # unless the arm sets it (#256); the rest of how compared algorithms differ is
+            # reported, never changed: each algorithm is its own base.
+            proposal, matched = match_strategies(facts, proposal)
             differences = method_differences(facts, proposal) if args.methods else []
             spec, _, total, errors = planner.check(facts, proposal)
             if errors or spec is None:
@@ -930,16 +940,29 @@ class ChatAssistant:
                 ),
                 **comparison,
                 "cost": total, "budget": facts.budget_simulator_runs,
+                **({"cost_line": line} if (line := _cost_line(
+                    cells, [p.max_simulator_runs for p in study_plan.validation.plans], total,
+                )) else {}),
                 "approval": _approval(service, len(cells), study_plan.max_simulator_runs),
+                **({"matched": matched} if matched else {}),
                 **({"differences": differences,
                     "next": "the compared algorithms differ in more than the algorithm "
-                            "(differences): state each to the user, then propose_action("
-                            "draft=...) as usual (the card launches nothing until they "
-                            "click), and offer to match them (revise_draft) if they want"
+                            "(differences): state each to the user in the answer, saying "
+                            "which cannot be matched (a method that cannot take the case's "
+                            "strategy, schedule or base method, e.g. chop runs only on "
+                            "GIES's loop: gies or lm_enrml), then propose_action(draft=...) "
+                            "as usual "
+                            "(the card launches nothing until they click), and offer to "
+                            "match them (revise_draft); where the arms' simulator runs "
+                            "differ, offer an equal-budget variant: revise_draft capping the "
+                            "iterative arm's max_iterations so its simulator runs do not "
+                            "exceed the other arm's"
+                            + COST_NEXT + MATCHED_NEXT * bool(matched)
                             + UNMATCHED_NEXT * bool(comparison.get("unmatched"))}
                    if differences else
                    {"next": "summarise the plan, then propose_action(draft=...) so the user "
                             "can review it in the editor and launch it"
+                            + COST_NEXT + MATCHED_NEXT * bool(matched)
                             + UNMATCHED_NEXT * bool(comparison.get("unmatched"))}),
             }  # fmt: skip
 
@@ -2278,6 +2301,12 @@ MATCHED_NEXT = (
     "option it left to its plugin's default, its population): tell the user each, and "
     "that options an arm sets itself were kept"
 )
+#: How the assistant states a plan's cost (a reported issue, #252: one arm's cost over its
+#: replicates was given as the study's total).
+COST_NEXT = (
+    "; for the cost, quote 'cost_line' (arms x replicates x runs = total) and 'cost' as the "
+    "study's total; never compute a total of your own"
+)
 #: Arms whose budgets differ by more than this fraction of the largest are "not matched in
 #: budget": a reported issue (2026-10-20) compared optimizers given 12 and 29 evaluations,
 #: so a gap could reflect the budget, not the optimizer. 25 % leaves room for optimizers
@@ -2456,6 +2485,36 @@ def _approval(service: ApexService, runs: int, simulator_runs: int | None) -> di
             "covers it; fewer replicates, methods or variants bring it within the limits"
         )
     return result
+
+
+def _cost_line(cells: Sequence[Any], runs: Sequence[int | None], total: int | None) -> str | None:
+    """Return a study's cost as one line to quote: arms x replicates x runs = total.
+
+    The assistant wrote one arm's cost over its replicates as the study's total (a reported
+    issue, #252: "500 in total" where the plan said 2000), so the arithmetic is done here.
+    ``runs`` are each cell's simulator runs (its upper bound), in the cells' order. ``None``
+    when a cell's cost is unknown.
+    """
+    if total is None or len(runs) != len(cells) or any(r is None for r in runs):
+        return None
+    arms: dict[str, list[int]] = {}
+    for cell, cost in zip(cells, runs, strict=True):
+        label = " | ".join(p for p in (cell.case, cell.method, cell.variant) if p)
+        arms.setdefault(label, []).append(int(cost or 0))
+    replicates = {len(c) for c in arms.values()}
+    per_arm = {label: set(c) for label, c in arms.items()}
+    if (
+        len(replicates) == 1
+        and len({frozenset(c) for c in per_arm.values()}) == 1
+        and all(len(c) == 1 for c in per_arm.values())
+    ):
+        (each,) = next(iter(per_arm.values()))
+        (n,) = replicates
+        return (f"{len(arms)} arm{'s' * (len(arms) != 1)} x {n} replicate{'s' * (n != 1)} x "
+                f"{each} simulator runs = {total} simulator runs at most")  # fmt: skip
+    parts = [f"{label}: {' + '.join(map(str, c)) if len(set(c)) > 1 else f'{len(c)} x {c[0]}'}"
+             f" = {sum(c)}" for label, c in arms.items()]  # fmt: skip
+    return "; ".join(parts) + f"; in total {total} simulator runs at most"
 
 
 def _study_plan(service: ApexService, spec: StudySpec) -> Any:  # noqa: ANN401 (StudyPlan)
