@@ -220,6 +220,44 @@ def test_robust_optimization_takes_the_realizations_from_the_model_file(
     assert realizations == {0, 1, 2}
 
 
+def test_a_robust_optimization_resumes_with_its_model_files_realizations(
+    tmp_path: Path, toy: type[ToyReservoir]
+) -> None:
+    """A reported issue: config.json wrote the default realizations = 1, which a resume took
+    as given, and refused against the three of the [model] file."""
+    np.savez(tmp_path / "models.npz", perm=np.array([[0.5, 1.0, 1.5]]))
+    extra = '[model]\nrealizations_file = "models.npz"\n'
+    whole = optimization.optimize(_config(tmp_path, "whole", 3, extra))
+    optimization.optimize(_config(tmp_path, "parts", 3, extra), max_iterations=1)
+    written = json.loads((tmp_path / "runs" / "parts" / "config.json").read_text())
+    assert "realizations" not in written["controls"]  # the default is not written out
+    resumed = optimization.resume(tmp_path / "runs" / "parts")
+    np.testing.assert_array_equal(resumed.result.x, whole.result.x)
+
+    # A run folder written before the fix holds realizations = 1: still resumed.
+    optimization.optimize(_config(tmp_path, "old", 3, extra), max_iterations=1)
+    old = tmp_path / "runs" / "old" / "config.json"
+    document = json.loads(old.read_text())
+    document["controls"]["realizations"] = 1
+    old.write_text(json.dumps(document))
+    np.testing.assert_array_equal(
+        optimization.resume(tmp_path / "runs" / "old").result.x, whole.result.x
+    )
+
+
+def test_a_given_realization_count_is_kept_in_config_json(
+    tmp_path: Path, toy: type[ToyReservoir]
+) -> None:
+    np.savez(tmp_path / "models.npz", perm=np.array([[0.5, 1.0, 1.5]]))
+    path = _config(tmp_path, "given", 1, '[model]\nrealizations_file = "models.npz"\n')
+    path.write_text(path.read_text().replace(
+        "[[controls.variables]]", "[controls]\nrealizations = 3\n\n[[controls.variables]]", 1
+    ))  # fmt: skip
+    run = optimization.optimize(path, max_iterations=1)
+    written = json.loads((run.run_dir / "config.json").read_text())
+    assert written["controls"]["realizations"] == 3
+
+
 def test_simulated_objectives_are_refused_without_their_parts(
     tmp_path: Path, toy: type[ToyReservoir]
 ) -> None:

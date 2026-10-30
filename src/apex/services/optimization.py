@@ -665,6 +665,12 @@ def resume(
         raw = layout.read_config(run_dir)
     except (OSError, ValueError) as error:
         raise ConfigError(f"no optimization run in {run_dir}: {error}") from error
+    controls, model = raw.get("controls"), raw.get("model")
+    if (isinstance(controls, dict) and isinstance(model, dict) and model.get("realizations_file")
+            and controls.get("realizations") == 1):  # fmt: skip
+        # Runs written before the default count was left out of config.json (a reported
+        # issue): with a [model] file, a 1 there was the default, never the user's.
+        controls.pop("realizations")
     config = OptimizationConfig.model_validate(raw)
     section = config.optimization.model_copy(update={"output_dir": run_dir.resolve()})
     return _run(
@@ -689,6 +695,10 @@ def _run(
     if run_dir is None:
         raise ConfigError("the optimization's output directory is not resolved")
     serialised: dict[str, Any] = config.model_dump(mode="json")
+    if "realizations" not in config.controls.model_fields_set:
+        # A default count written out would read as given on a resume, and with a [model]
+        # file of several realizations be refused as a contradiction (a reported issue).
+        serialised["controls"].pop("realizations", None)
     try:
         return run_optimization(
             run_dir,

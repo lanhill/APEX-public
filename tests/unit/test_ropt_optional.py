@@ -15,6 +15,12 @@ def test_the_registry_works_without_ropt(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setitem(sys.modules, "ropt", None)  # import ropt -> ImportError
     monkeypatch.setattr(optimizers, "_entry_points_loaded", False)
     monkeypatch.setattr(optimizers, "_factories", dict(optimizers._factories))
+    monkeypatch.setattr(optimizers, "_origins", dict(optimizers._origins))
+    # The reload re-registers every entry-point optimizer (another package's too), so they go
+    # first, not ropt alone.
+    for name in list(optimizers._origins):
+        optimizers._factories.pop(name, None)
+        optimizers._origins.pop(name, None)
     optimizers._factories.pop("ropt", None)
     import importlib.util
 

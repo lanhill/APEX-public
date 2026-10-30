@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.1.1"
+version = "0.1.2.dev0"
 description = "Agentic Platform for Ensemble eXploration: agent-driven ensemble history matching and optimization."
 readme = "README.md"
 requires-python = ">=3.12"
