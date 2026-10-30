@@ -50,6 +50,7 @@ This starts the job service of the root in the background.
 | --- | --- |
 | `--root` | The services root (default: `$APEX_HOME`, else `~/.apex/service`). |
 | `--http` | Also serves the REST API at `HOST:PORT`. Needs the `api` extra, installed by default. |
+| `--wait` | Seconds to wait for the service to be up: 60 by default, 120 with `--http` (the REST API must answer too). `$APEX_SERVICE_START_TIMEOUT` sets the default; `--wait` wins over it. |
 
 To serve the REST API too, give a host and port:
 
@@ -231,6 +232,7 @@ uv run apex service reindex --root /data/project-a
 
 - **Forgetting `--root`.** Without it, every command works on `$APEX_HOME`, or `~/.apex/service` if that is unset. If you use several roots, pass the same `--root` to every command.
 - **Exposing the API.** Keep `--http` on `127.0.0.1` unless a TLS proxy is in front of it.
+- **A slow start on a loaded machine.** If `apex service start` says the service was not up in time, start it again with a longer wait, for example `--wait 300`. The error says how long it waited, and `service.log` in the root records the attempt.
 - **Rotating the token.** `--rotate` replaces the token, and clients that hold the old one are refused. Give them the new one.
 - **Revoking is immediate.** After `--revoke`, the guest's token is refused at once.
 - **`--guest`, `--revoke` and `--owner` go with `--ui`.** They apply to UI tokens, not to the API token.
