@@ -260,4 +260,4 @@ APEX still draws the perturbations and inflates `C_d`; the library only computes
 ## What to read next
 
 - [Studies](guide/cli/study.md), for `apex study run` and `apex study compare`.
-- [Cross validation](guide/plugins/stopping_rules.md#cross-validation), for `[validation]` splits and their stopping rules.
+- [Cross validation](guide/plugins/stopping_rules.md#setting-up-cross-validation), for `[validation]` splits and their stopping rules.

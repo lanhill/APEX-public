@@ -38,6 +38,8 @@ uv run apex service stop
 uv run apex service reindex          # rebuild the run catalogue from the run directories
 ```
 
+`start` waits up to 60 s for the service to be up, or 120 s with `--http`, because the REST API must answer too. Change the wait with `--wait SECONDS`, or with `$APEX_SERVICE_START_TIMEOUT`. A loaded machine may need more. A service that is not up in time is stopped. The exception is a service whose REST API alone did not answer in time: it is left running, and the error says so. Check it with `apex service status`, or stop it. The error says why, and `service.log` records the attempt.
+
 `stop` waits up to 30 s (change it with `--timeout`). If the service is still stopping by then, it says so and exits with code 2 (not 1, which is an error). A script can then wait longer and check with `apex service status`:
 
 ```bash

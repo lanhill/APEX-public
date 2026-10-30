@@ -488,8 +488,17 @@ def service_start(
             "Keep 127.0.0.1 unless a TLS proxy is in front."
         ),
     ] = None,
+    wait: Annotated[
+        float | None,
+        typer.Option(
+            help="Seconds to wait for the service to be up (default 60, 120 with --http, or "
+            "$APEX_SERVICE_START_TIMEOUT); a loaded machine may need more.",
+            min=1.0,
+        ),
+    ] = None,
 ) -> None:
     """Start the job service of a root in the background (one per root)."""
+    import datetime as dt
     import sys
     import time
 
@@ -507,7 +516,14 @@ def service_start(
     command = [sys.executable, "-m", "apex.cli.service_daemon", str(home)]
     if http is not None:
         command = [sys.executable, "-m", "apex.api.server", str(home), "--http", http]
+    timeout = wait if wait is not None else _start_timeout(http is not None)
     with (home / "service.log").open("a") as log:
+        # A line before the service's own: a start that never gets as far as logging still
+        # leaves a trace (the release tester's H27: an empty log after a timeout).
+        log.write(f"{dt.datetime.now().isoformat(timespec='seconds')} apex service start: "
+                  f"launching the service{' with --http ' + http if http else ''}, waiting "
+                  f"up to {timeout:.0f} s\n")  # fmt: skip
+        log.flush()
         process = subprocess.Popen(
             command,
             stdout=log,
@@ -518,7 +534,7 @@ def service_start(
     # It writes its pid once started: a few seconds, more on a loaded machine (its imports
     # and agents took ~30 s while a test suite ran; it waited 10 s, gave up and left the
     # service running unattended, 2026-10-06).
-    deadline = time.monotonic() + _start_timeout()
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         pid = service_pid(home)
         # With --http, started only once its own server answers: the pid comes before the
@@ -535,31 +551,50 @@ def service_start(
     pid = service_pid(home)
     if pid is not None and process.poll() is None and address is not None:
         # Ours runs, but its REST API did not answer in time: say so, not "started".
+        with (home / "service.log").open("a") as log:
+            log.write(f"{dt.datetime.now().isoformat(timespec='seconds')} apex service start: "
+                      f"the REST API did not answer within {timeout:.0f} s; the service "
+                      "runs on\n")  # fmt: skip
         raise _fail(ApexError(
             f"the service of {home} runs (pid {pid}), but its REST API did not answer at "
-            f"http://{http}/v1 in time; see {home / 'service.log'} (stop it with apex "
-            "service stop)"
+            f"http://{http}/v1 within {timeout:.0f} s; it may still be starting. See "
+            f"{home / 'service.log'}; check again with apex service status, or stop it with "
+            "apex service stop"
         ))  # fmt: skip
     if pid is not None:  # another start won the race: that one runs
         typer.echo(f"service of {home} already running (pid {pid})")
         return
+    code = process.poll()
     _stop_unready(process)
-    raise _fail(ApexError(f"the service did not start; see {home / 'service.log'}"))
+    if code is None:
+        why = (f"it was not up within {timeout:.0f} s and was stopped (no process is left); "
+               "a loaded machine may need longer: --wait SECONDS or "
+               "$APEX_SERVICE_START_TIMEOUT")  # fmt: skip
+    else:
+        why = f"it exited with code {code}"
+    with (home / "service.log").open("a") as log:
+        log.write(f"{dt.datetime.now().isoformat(timespec='seconds')} apex service start: "
+                  f"the service did not start: {why}\n")  # fmt: skip
+    raise _fail(ApexError(f"the service did not start: {why}; see {home / 'service.log'}"))
 
 
 #: How long ``service start`` waits for the service to write its pid (seconds; overridden by
-#: ``$APEX_SERVICE_START_TIMEOUT``).
+#: ``--wait`` and ``$APEX_SERVICE_START_TIMEOUT``).
 START_TIMEOUT_S = 60.0
+#: With ``--http`` it also waits for the REST API to answer: its imports take longer (61 s
+#: and more under a load average of 15-20, the release tester's H27).
+HTTP_START_TIMEOUT_S = 120.0
 
 
-def _start_timeout() -> float:
+def _start_timeout(http: bool = False) -> float:
     import os
 
+    default = HTTP_START_TIMEOUT_S if http else START_TIMEOUT_S
     try:
-        value = float(os.environ.get("APEX_SERVICE_START_TIMEOUT", START_TIMEOUT_S))
+        value = float(os.environ.get("APEX_SERVICE_START_TIMEOUT", default))
     except ValueError:
-        return START_TIMEOUT_S
-    return value if value > 0 else START_TIMEOUT_S  # 0 would stop a healthy service at once
+        return default
+    return value if value > 0 else default  # 0 would stop a healthy service at once
 
 
 def _free_address(http: str) -> tuple[str, int]:

@@ -71,7 +71,7 @@ None of these plugins has any options. Each one's option set is empty and accept
    uv run apex plugins --json
    ```
 
-4. Put the plugin name (for example `max`) where your run configuration names its AVO attribute, and give it no options. The run configuration is the TOML file you pass to `apex run`. The facts this page is built on do not say which section or key of that file holds the attribute, so this page cannot show a complete configuration. The safe route is to start from a history-matching configuration that already runs for you and change only the attribute's plugin name, leaving everything else as it is.
+4. Put the plugin name (for example `max`) where your run configuration names its AVO attribute, and give it no options. The run configuration is the TOML file you pass to `apex run`, and the attribute is the `attribute` option of an AVO datum: `[geophysics.data.options] attribute = "max"` under a `[[geophysics.data]]` entry with `kind = "avo"`. The configurations in `examples/3dbox_production_avo/` show a complete `[geophysics]` section; start from one of them and change only the attribute.
 5. Start the run:
 
    ```

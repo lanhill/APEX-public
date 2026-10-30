@@ -347,8 +347,52 @@ def test_a_service_that_does_not_start_in_time_is_stopped(
     result = CliRunner().invoke(app, ["service", "start", "--root", str(tmp_path / "svc")])
     assert result.exit_code != 0
     assert "did not start" in result.output
+    # The release tester's H27: the error names the wait and the way to give more, and the
+    # log is not empty.
+    assert "within 1 s" in result.output
+    assert "--wait" in result.output
+    assert "no process is left" in result.output
+    log = (tmp_path / "svc" / "service.log").read_text()
+    assert "launching the service" in log
+    assert "did not start" in log
     assert started
     assert started[0].wait(timeout=15) is not None  # stopped, not left running
+
+    started.clear()
+    monkeypatch.setenv("APEX_SERVICE_START_TIMEOUT", "300")  # --wait comes first
+    waited = CliRunner().invoke(app, ["service", "start", "--root", str(tmp_path / "svc"),
+                                      "--wait", "1"])  # fmt: skip
+    assert "within 1 s" in waited.output
+    assert started[0].wait(timeout=15) is not None
+
+
+def test_a_service_that_exits_at_once_says_its_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import sys
+
+    real = subprocess.Popen
+
+    def exits(command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        return real([sys.executable, "-c", "raise SystemExit(3)"], start_new_session=True)
+
+    monkeypatch.setattr("apex.cli.services_commands.subprocess.Popen", exits)
+    result = CliRunner().invoke(app, ["service", "start", "--root", str(tmp_path / "svc"),
+                                      "--wait", "10"])  # fmt: skip
+    assert result.exit_code != 0
+    assert "exited with code 3" in result.output
+    assert "exited with code 3" in (tmp_path / "svc" / "service.log").read_text()
+
+
+def test_the_start_wait_is_longer_with_the_rest_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    from apex.cli import services_commands
+
+    monkeypatch.delenv("APEX_SERVICE_START_TIMEOUT", raising=False)
+    assert services_commands._start_timeout() == services_commands.START_TIMEOUT_S
+    assert services_commands._start_timeout(True) == services_commands.HTTP_START_TIMEOUT_S
+    monkeypatch.setenv("APEX_SERVICE_START_TIMEOUT", "300")
+    assert services_commands._start_timeout(True) == 300.0
 
 
 def test_a_free_reuse_that_must_run_after_all_is_gated(

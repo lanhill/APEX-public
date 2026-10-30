@@ -117,7 +117,7 @@ Starts a history-matching run.
 
 Runs a configuration, or resumes a run, in the background of the job service, so the command does not have to stay open while the work goes on. Without `--wait` the command returns at once and the job carries on in the background. With `--wait` it waits for the job to end.
 
-This page cannot tell you that `apex submit` prints the run directory. To look at the result, point `apex summary` at the folder where you keep your runs: it searches folders for runs. Once you know the run directory, use `apex report` on it.
+`apex submit` prints the run directory (`folder: ...`), followed, while the job runs, by the commands that follow or stop it (`apex jobs show JOB`, `apex jobs stop JOB`). Use `apex report` on that directory to look at the result, or point `apex summary` at the folder where you keep your runs: it searches folders for runs.
 
 - `config` (optional): a run, prediction or optimization configuration.
 - `--resume`: resume this run directory instead of starting a configuration.
@@ -293,7 +293,7 @@ Some submissions need a person's approval before they run. The `[approval]` sect
 - `max_runs`: a limit on the number of runs in a submission. Default: `20`.
 - `max_simulator_runs`: a limit on the number of simulator runs in a submission. Default: `20000`.
 
-A submission that goes beyond these limits counts as a large job and waits for approval. The sections the service configuration accepts are printed by `uv run apex schema service`. The location of the service configuration file is not given in the facts this page is built from, so check your installation for it.
+A submission that goes beyond these limits counts as a large job and waits for approval. The sections the service configuration accepts are printed by `uv run apex schema service`. The service configuration is `service.toml` in the services root: by default `~/.apex/service/service.toml`, or `$APEX_HOME/service.toml` when `APEX_HOME` is set (see [Studies, the job service and approvals](../../getting_started/studies_and_approvals.md)).
 
 ```toml
 [approval]
