@@ -345,7 +345,9 @@ def _inside(value: str | Path, roots: list[str]) -> bool:
 
 
 #: What a tool client's ``overrides`` may not set: what runs, not only what is read.
-UNSAFE_OVERRIDES = frozenset({"code", "executable", "arguments", "undeclared", "host"})
+UNSAFE_OVERRIDES = frozenset(
+    {"code", "executable", "arguments", "undeclared", "host", "remote_program"}
+)
 
 
 def _confine(session: ToolSession, path: Path, what: str) -> None:

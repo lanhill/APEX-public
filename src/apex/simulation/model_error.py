@@ -22,7 +22,7 @@ Differences: the schedule is read with a general record tokenizer (PET-fork spli
 """
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -437,6 +437,21 @@ class ModelErrorSimulator:
     def executable(self) -> str | None:
         """The inner simulator's program, which an executor checks on its hosts."""
         return getattr(self.inner, "executable", None)
+
+    @property
+    def version_command(self) -> Callable[[str], str] | None:
+        """The inner simulator's shell command for its version on a host, if it has one.
+
+        An executor probing its hosts runs it in place of ``<program> --version`` (ADR
+        0060; PFLOTRAN has no ``--version``).
+        """
+        found = getattr(self.inner, "version_command", None)
+        return found if callable(found) else None
+
+    @property
+    def required_programs(self) -> tuple[str, ...]:
+        """The inner simulator's other programs (an MPI launcher), which hosts must have."""
+        return tuple(getattr(self.inner, "required_programs", ()))
 
     def version(self) -> str | None:
         """Return the inner simulator's version, for provenance."""

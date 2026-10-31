@@ -357,6 +357,10 @@ class Access:
                 problems.append(f"{key}: web-UI users may not set a program's arguments")
             elif kind == "host" and value != "local":
                 problems.append(f"{key} = {value!r}: web-UI users may not run on other machines")
+            elif kind == "remote_program":
+                problems.append(
+                    f"{key} = {value!r}: web-UI users may not name programs on other machines"
+                )
         return problems
 
     def hidden_plugins(self, config: HistoryMatchConfig) -> list[str]:

@@ -28,9 +28,13 @@ from typing import Annotated, Any, Literal
 #: What an option's strings are: a file or folder APEX reads (``input``), a template it
 #: renders (``code``; Mako templates are Python), a folder it writes (``output``), a program
 #: it runs (``executable``), that program's arguments (``arguments``), another machine its
-#: runs go to (``host``), or data that names nothing on disk (``text``: variable
-#: and well names, labels, patterns, values).
-RoleKind = Literal["input", "code", "output", "executable", "arguments", "host", "text", "mapping"]
+#: runs go to (``host``), a program on such a machine (``remote_program``: its path
+#: there, which nothing here can check), or data that names nothing on disk (``text``:
+#: variable and well names, labels, patterns, values).
+RoleKind = Literal[
+    "input", "code", "output", "executable", "arguments", "host", "remote_program", "text",
+    "mapping",
+]  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ OUTPUT = Role("output")
 EXECUTABLE = Role("executable")
 ARGUMENTS = Role("arguments")
 HOST = Role("host")
+REMOTE_PROGRAM = Role("remote_program")
 TEXT = Role("text")
 
 

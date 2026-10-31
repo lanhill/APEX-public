@@ -66,7 +66,10 @@ SOURCE_KEYS = ("run_dir",)
 #: Where a program named in ``executables`` may resolve, besides the code roots.
 SYSTEM_PROGRAM_ROOTS = ("/usr", "/bin", "/sbin", "/opt")
 
-Kind = Literal["input", "code", "output", "source", "executable", "arguments", "host", "undeclared"]
+Kind = Literal[
+    "input", "code", "output", "source", "executable", "arguments", "host", "remote_program",
+    "undeclared",
+]  # fmt: skip
 
 
 class PolicyViolation(ConfigError):
@@ -151,7 +154,7 @@ def _role_items(role: Role | None, key: str, value: object) -> Iterator[tuple[Ki
     else:
         kinds: dict[str, Kind] = {
             "input": "input", "code": "code", "output": "output", "executable": "executable",
-            "host": "host",
+            "host": "host", "remote_program": "remote_program",
         }  # fmt: skip
         for text in _strings(value):
             yield kinds[role.kind], key, text
@@ -306,6 +309,12 @@ def violations(config: BaseModel, rules: PolicySection, root: Path) -> list[str]
         elif kind == "host" and value != "local" and value not in rules.hosts:
             problems.append(
                 f"{key} = {value!r}: runs go to other machines only when [policy] hosts lists them"
+            )
+        elif kind == "remote_program":
+            problems.append(
+                f"{key} = {value!r} names a program on another machine, which [policy] cannot "
+                "check from here: refused under a policy (only [policy] hosts confines where "
+                "runs go)"
             )
         elif kind == "arguments":
             problems.append(
