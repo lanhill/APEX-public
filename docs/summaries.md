@@ -6,7 +6,7 @@ audience: public
 
 ## Goal
 
-`apex summary` reports what every run under a folder did, step by step. For each performance metric at every step, it gives statistics over the ensemble. After this lesson you can summarise one run or many, read the Markdown and CSV output, and interpret the history-matching, prediction and optimization summaries.
+`apex summary` reports what every run under a folder did, step by step. For each performance metric at every step, it gives statistics over the ensemble. After this lesson you can summarise one run or many, read the Markdown and CSV output, and interpret the history-matching, prediction, optimization and surrogate-build summaries.
 
 ## Prerequisites
 
@@ -67,6 +67,16 @@ An optimization directory (from `apex optimize`, or a job's folder under `optimi
 - With several objectives, `objective` also has one label per objective, and `hypervolume` and `front_size` describe the front.
 - A finished robust optimization adds the objective's statistics over the realizations at its last step (label `realizations`).
 - The result is the last step of a finished run. A run that has not finished has no result yet.
+
+## Reading a surrogate build's summary
+
+A surrogate build's directory (from `apex surrogate build`, see [Surrogate models](surrogates.md)) is summarised in two steps: the training runs (`training`) and the held-out runs (`held-out`).
+
+- **members** is the number of runs in each set; **forecasts** the full simulator runs the build took (0 when its design reused a history-matching run's forecasts).
+- At the held-out step: `gate_error` and `gate_tolerance` per datatype, and `gate_passed` (1 or 0).
+- At the training step: `failed_runs`, the validated domain's size (`domain_coordinates`, `domain_points`), the fit's time (`fit_seconds`), one prediction's time (`prediction_seconds`), the simulator's median run (`simulator_median_seconds`) and their ratio (`speedup`).
+- After `apex surrogate check`, the latest complete check of the model: `check_passed` (1 or 0) and `check_gated` (the runs it gated), label `latest`, and a note with its id and source.
+- The result is the held-out step of a finished build; a failed gate is listed in the notes.
 
 ## Worked example
 

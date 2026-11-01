@@ -4,7 +4,8 @@
 with the first registered summarizer (:data:`apex.core.plugins.summaries`) that applies.
 History matching is summarised one step per accepted iterate (the prior is step 0), a
 prediction one step per ensemble forecast, an optimization one step
-per row of its history (the start, each accepted step, each EPF update).
+per row of its history (the start, each accepted step, each EPF update), a surrogate build
+its training and its held-out runs, with the gate.
 
 Every workflow that writes a result directory has a summarizer (the user's rule,
 2026-10-10; future ones such as risk assessment too): register one here, and
@@ -28,11 +29,12 @@ from apex.core.summaries import Summarizer
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.summary import MetricStatistics, RunSummary, StepSummary
-from apex.services import composition, optimization, prediction
+from apex.services import composition, optimization, prediction, surrogates
 from apex.storage.prediction_directory import PredictionDirectory
 from apex.storage.priors import read_array
 from apex.storage.run_directory import RunDirectory
 from apex.storage.run_results import RunResults
+from apex.storage.surrogate_directory import SurrogateDirectory
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +267,89 @@ class OptimizationSummarizer:
             metrics=tuple(rows),
             selected_iteration=last if summary.result is not None else None,
             forecasts=max(evaluated, 0),
+            notes=tuple(notes),
+        )
+
+
+@summaries.register("surrogate")
+class SurrogateSummarizer:
+    """Summarise a surrogate build: its runs, its gate, its cost.
+
+    Two steps: the training runs (step 0) and the held-out runs (step 1). As single values:
+    at step 1, the gate's error and tolerance per datatype (``gate_error``,
+    ``gate_tolerance``, label the datatype) and its verdict (``gate_passed``, 1 or 0); at
+    step 0, the failed runs, the domain's size (``domain_coordinates``,
+    ``domain_points``), the fit's time, one prediction's time, the simulator's median run
+    and their ratio (``speedup``). With checks (``apex surrogate check``), the latest
+    complete one of the model at step 1: ``check_passed`` and ``check_gated`` (label
+    ``latest``), and a note. The result is the held-out step of a finished build.
+    """
+
+    def applies(self, path: Path) -> bool:
+        """Whether ``path`` holds a surrogate build."""
+        return SurrogateDirectory.holds_build(path)
+
+    def summarize(self, path: Path) -> RunSummary:
+        """Summarise the build in ``path``.
+
+        Raises
+        ------
+        ConfigError
+            If it has not finished a batch of runs yet.
+        """
+        summary = surrogates.build_summary(path)
+        failed = set(summary.failed)
+        steps = (
+            StepSummary(0, summary.training_runs, label="training"),
+            StepSummary(1, summary.held_out_runs, label="held-out"),
+        )
+        rows = [_single("failed_runs", "all", 0, float(len(failed)))]
+        notes = []
+        if summary.domain is not None:
+            rows.append(_single("domain_coordinates", "all", 0, summary.domain.coordinates))
+            rows.append(_single("domain_points", "all", 0, summary.domain.points))
+        timing = {
+            "fit_seconds": summary.fit_seconds,
+            "prediction_seconds": summary.prediction_seconds,
+            "simulator_median_seconds": summary.simulator_median_seconds,
+        }
+        for metric, value in timing.items():
+            if value is not None:
+                rows.append(_single(metric, "all", 0, value))
+        if summary.prediction_seconds and summary.simulator_median_seconds:
+            speedup = summary.simulator_median_seconds / summary.prediction_seconds
+            rows.append(_single("speedup", "all", 0, speedup))
+        if summary.gate is not None:
+            for entry in summary.gate.datatypes:
+                error = math.inf if entry.error is None else entry.error
+                rows.append(_single("gate_error", entry.datatype, 1, error))
+                rows.append(_single("gate_tolerance", entry.datatype, 1, entry.tolerance))
+            rows.append(_single("gate_passed", "all", 1, float(summary.gate.passed)))
+            notes += [f"gate failed: {line}" for line in summary.gate.failures()]
+        if summary.model is not None:
+            latest = surrogates.last_check(path / summary.model, summary.identity)
+            if latest is not None:
+                rows.append(_single("check_passed", "latest", 1, float(latest.passed)))
+                rows.append(_single("check_gated", "latest", 1, float(latest.inside)))
+                verdict = "passed" if latest.passed else "FAILED"
+                notes.append(
+                    f"latest check {latest.id} ({latest.source}, {latest.created}): {verdict}, "
+                    f"{latest.inside} of {latest.runs} runs gated"
+                )
+        if summary.pending:
+            notes.append(f"{summary.pending} run(s) still to go")
+        if failed:
+            notes.append(f"{len(failed)} design run(s) failed")
+        return RunSummary(
+            workflow="surrogate",
+            name=summary.name,
+            path=path,
+            method=f"{summary.plugin} ({summary.plan} design)",
+            status=summary.status,
+            steps=steps,
+            metrics=tuple(rows),
+            selected_iteration=1 if summary.status == "complete" else None,
+            forecasts=summary.simulator_runs,
             notes=tuple(notes),
         )
 

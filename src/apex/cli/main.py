@@ -17,6 +17,7 @@ from apex.cli.job_commands import register as register_jobs
 from apex.cli.progress import progress_display
 from apex.cli.services_commands import gc_app, register_tools
 from apex.cli.services_commands import register as register_services
+from apex.cli.surrogate_commands import register as register_surrogate
 from apex.core.errors import ApexError, RunStopped
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.results import HistoryMatchResult
@@ -492,6 +493,7 @@ register_tools(app)
 register_agent(app)
 register_ert(app)
 register_jobs(app)
+register_surrogate(app)
 # Commands installed packages contribute: NORCE's hosts' commands, their agents'
 # (under `apex agent`, §2 revision 1), ...
 install_extensions({"": app, "agent": agent_app, "code": code_app, "gc": gc_app})

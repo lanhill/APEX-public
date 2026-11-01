@@ -37,6 +37,28 @@ class TransientSimulationError(SimulationError):
     """
 
 
+class SurrogateDomainError(ApexError):
+    """A surrogate model was asked for members, keys or times outside its validated domain.
+
+    Deliberately *not* a :class:`SimulationError`: executors turn only those
+    into dropped members, and dropping the members a surrogate cannot predict would bias an
+    ensemble silently. It propagates, and a run stops at its last checkpoint.
+
+    Attributes
+    ----------
+    members
+        The ids of the members outside the domain (empty when keys or times are).
+    """
+
+    def __init__(self, message: str, members: tuple[int, ...] = ()) -> None:
+        super().__init__(message)
+        self.members = tuple(members)
+
+    def __reduce__(self) -> tuple[type["SurrogateDomainError"], tuple[str, tuple[int, ...]]]:
+        """Pickle with the members (a process executor's workers send it back)."""
+        return (type(self), (str(self), self.members))
+
+
 class WorkflowError(ApexError):
     """Raised when a workflow cannot continue (e.g. too many failed members)."""
 

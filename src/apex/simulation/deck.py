@@ -374,6 +374,9 @@ class FidelityLevels:
 #: Included files larger than this are not scanned for wells (grid geometry files).
 _SCAN_MAX_BYTES = 5_000_000
 _KEYWORD = re.compile(r"^([A-Z][A-Z0-9_]{0,7})\s*$")
+#: A section keyword with other text after it on its line ("PROPS  ====="): Eclipse reads a
+#: keyword's first 8 columns only, so the rest is a comment (a ruler).
+_SECTION_RULER = re.compile(r"^(RUNSPEC|GRID|EDIT|PROPS|REGIONS|SOLUTION|SUMMARY|SCHEDULE)\s+\S")
 _INCLUDE_PATH = re.compile(r"""['"]([^'"]+)['"]|(\S+)""")
 
 
@@ -505,6 +508,10 @@ def _keyword_records(
         if not line or line.startswith(("%", "<%", "##")):
             continue
         keyword = _KEYWORD.match(line)
+        # A ruler after a section keyword, but not in a TITLE's free text ("GRID test") or
+        # in a record continued onto this line.
+        if keyword is None and not parts and not (current == "TITLE" and records == []):
+            keyword = _SECTION_RULER.match(line)
         if keyword and not (current in single_record and records == []):
             current = keyword.group(1)
             # A keyword starts afresh (some, such as TITLE, take a record with no "/").

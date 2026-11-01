@@ -56,6 +56,15 @@ def _fail(error: ApexError) -> typer.Exit:
     return typer.Exit(1)
 
 
+def _validate_surrogate(config: Path, as_json: bool) -> None:
+    """Validate a surrogate build and print its plan; nothing runs."""
+    from apex.cli.surrogate_commands import surrogate_plan_lines
+    from apex.services import surrogates
+
+    plan = surrogates.plan_build(surrogates.load_surrogate_config(config))
+    typer.echo(plan.model_dump_json(indent=2) if as_json else "\n".join(surrogate_plan_lines(plan)))
+
+
 def optimization_plan_lines(plan: OptimizationPlan) -> list[str]:
     """Format an optimization's plan for the terminal."""
     bound = "unknown" if plan.max_evaluations is None else f"{plan.max_evaluations:,}"
@@ -135,7 +144,10 @@ def register(app: typer.Typer) -> None:
     @app.command()
     def validate(
         config: Annotated[
-            Path, typer.Argument(help="A run, prediction, optimization or study (TOML).")
+            Path,
+            typer.Argument(
+                help="A run, prediction, optimization, study or surrogate build (TOML)."
+            ),
         ],
         as_json: Annotated[bool, typer.Option("--json", help="The validation, as JSON.")] = False,
         root: Root = None,
@@ -151,7 +163,12 @@ def register(app: typer.Typer) -> None:
         kind = next(iter(document), "")
         if "optimization" in document and "optimizer" in document:
             kind = "optimization"  # as the REST API tells them
+        if "surrogate" in document and "design" in document:
+            kind = "surrogate"  # a surrogate build, planned locally
         try:
+            if kind == "surrogate":
+                _validate_surrogate(config, as_json)
+                return
             if kind == "optimization":
                 result = service.validate_optimization(config)
             elif kind == "study":

@@ -28,6 +28,10 @@ class FilePrior:
     #: A stored ensemble is used as is, not clipped to the state bounds (as PET's
     #: ``importstate``).
     clip = False
+    #: It draws nothing: the same columns whatever the random stream (a surrogate's design
+    #: from the prior is refused for it, its held-out runs would repeat the
+    #: training runs).
+    stored = True
 
     def __init__(self, ensemble_file: InputFile, key: Text | None = None) -> None:
         self.path = Path(ensemble_file)

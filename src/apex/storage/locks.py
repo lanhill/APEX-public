@@ -67,6 +67,24 @@ def exclusive(directory: Path, what: str = "run") -> Iterator[None]:
         handle.close()  # closing releases the lock
 
 
+@contextmanager
+def serialized(directory: Path, name: str = ".serial.lock") -> Iterator[None]:
+    """Hold ``directory/name`` exclusively for the ``with`` block, waiting for it if taken.
+
+    For short critical sections shared by processes and threads alike (each opens the file
+    itself, so their ``flock`` s exclude one another), e.g. numbering the checks of one
+    surrogate. Unlike :func:`exclusive` it waits, and it is not a run's lock.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / name).open("a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def locked(directory: Path) -> bool:
     """Return whether a process holds the directory's lock now (e.g. a running run)."""
     path = Path(directory) / LOCK_FILE

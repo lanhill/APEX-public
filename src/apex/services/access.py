@@ -25,7 +25,8 @@ affected. Example::
     executors = ["*"]
     priors = ["*"]
     metrics = ["*"]
-    # converter_skills, geomodeling_skills, variogram_estimators, chop_components:
+    # converter_skills, geomodeling_skills, variogram_estimators, chop_components,
+    # simulation_skills:
     # display only (the Plugins page), not enforced (the user's decision, 2026-10-25)
 
     [agents]

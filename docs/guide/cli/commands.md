@@ -14,6 +14,7 @@ items:
   - cli:apex resume
   - cli:apex run
   - cli:apex schema
+  - cli:apex service token
   - cli:apex stop
   - cli:apex submit
   - cli:apex summary
@@ -23,6 +24,7 @@ items:
   - config:service:approval
   - config:service:chat
   - config:service:guests
+  - config:service:service
   - plugin:simulators:opm_flow
 ---
 
@@ -30,12 +32,12 @@ items:
 
 ## Goal
 
-This page is a tour of the `apex` commands: `apex approve`, `apex data-split`, `apex gc`, `apex mcp`, `apex optimize`, `apex pet-import`, `apex plugins`, `apex predict`, `apex qaqc`, `apex report`, `apex resume`, `apex run`, `apex schema`, `apex stop`, `apex submit`, `apex summary`, `apex validate` and `apex version`. By the end you will know what each command does, which arguments it needs, and which flags change its behavior.
+This page is a tour of the `apex` commands: `apex approve`, `apex data-split`, `apex gc`, `apex mcp`, `apex optimize`, `apex pet-import`, `apex plugins`, `apex predict`, `apex qaqc`, `apex report`, `apex resume`, `apex run`, `apex schema`, `apex service token`, `apex stop`, `apex submit`, `apex summary`, `apex validate` and `apex version`. By the end you will know what each command does, which arguments it needs, and which flags change its behavior.
 
 ## Prerequisites
 
 - APEX installed, with the commands run from the APEX folder as `uv run apex ...`. Check with `uv run apex version`.
-- For most commands, a TOML configuration of your case. This page does not describe the contents of a configuration. To see what a configuration kind accepts, use `uv run apex schema`.
+- For most commands, a TOML configuration of your case. To see what a configuration kind accepts, use `uv run apex schema`.
 
 ## How the options work
 
@@ -75,6 +77,7 @@ This page is a tour of the `apex` commands: `apex approve`, `apex data-split`, `
 | `apex pet-import` | Convert a PET history-matching configuration into an APEX case. |
 | `apex approve` | Approve a pending submission. |
 | `apex gc` | Forget runs whose folder is gone, and prune what the service keeps. |
+| `apex service token` | Print the REST API's bearer token, or manage guests' web-UI tokens. |
 | `apex mcp` | Serve APEX's tools to an MCP host. |
 
 ## Inspecting APEX
@@ -101,9 +104,13 @@ uv run apex schema prediction
 
 Validates a configuration and plans its cost. Nothing is simulated, so it is a safe first step.
 
-- `config` (required): a run, prediction, optimization or study (TOML).
+- `config` (required): a run, prediction, optimization, study or surrogate build (TOML).
 - `--json`: print the validation as JSON.
 - `--root`: the services root.
+
+```bash
+uv run apex validate case/run.toml
+```
 
 ### `apex run`
 
@@ -117,12 +124,12 @@ Starts a history-matching run.
 
 Runs a configuration, or resumes a run, in the background of the job service, so the command does not have to stay open while the work goes on. Without `--wait` the command returns at once and the job carries on in the background. With `--wait` it waits for the job to end.
 
-`apex submit` prints the run directory (`folder: ...`), followed, while the job runs, by the commands that follow or stop it (`apex jobs show JOB`, `apex jobs stop JOB`). Use `apex report` on that directory to look at the result, or point `apex summary` at the folder where you keep your runs: it searches folders for runs.
+`apex submit` prints the run directory (`folder: ...`). Use `apex report` on that directory to look at the result, or point `apex summary` at the folder where you keep your runs: it searches folders for runs.
 
 - `config` (optional): a run, prediction or optimization configuration.
 - `--resume`: resume this run directory instead of starting a configuration.
 - `--kind`: `run`, `prediction` or `optimization`. Default: taken from the file.
-- `--max-steps`: stop after this many steps (iterations of an optimization). For a run these are analysis steps. For an optimization, the help does not say whether every iteration or only accepted ones count; if you need to stop after a number of accepted iterations, use `--max-iterations` of `apex optimize`.
+- `--max-steps`: stop after this many steps (iterations of an optimization). For a run these are analysis steps. To stop an optimization after a number of accepted iterations, run it with `apex optimize --max-iterations` instead.
 - `--code`: which copy of the APEX code the job runs with. It takes one value: `live`, `frozen` or a commit. `live` uses the code as it is now. `frozen` uses the copy of the last commit (for a resume, the run's own copy), so later edits do not affect the job. A commit uses the code of that commit. Default: the `[jobs]` setting `cli_code`, which is `frozen`.
 - `--priority`: `high`, `normal` or `low`. Default: `normal`.
 - `--yes`: approve a large job without asking.
@@ -140,6 +147,18 @@ uv run apex submit case/run.toml --code live
 
 The first command submits the run in `case/run.toml` with low priority and waits for the job to end. The second runs the job with the code as it is now instead of the frozen copy.
 
+The job service itself is set up in the `[service]` section of the service configuration (see `apex approve` below for where that file lives). Its options are `max_concurrent_jobs` (integer, at least 1, default `2`), `poll_s` (number greater than 0, default `1.0`), `max_retries` (integer, at least 0, default `2`) and `routines` (boolean, default `true`).
+
+```toml
+[service]
+max_concurrent_jobs = 2
+poll_s = 1.0
+max_retries = 2
+routines = true
+```
+
+This is the section with all four options at their defaults.
+
 ### `apex stop`
 
 Asks a running run to stop at its next checkpoint. The run therefore stops when it reaches that checkpoint, not necessarily at the moment you type the command. `apex resume` continues it. The one argument, `run_dir` (required), is the directory of a running run.
@@ -154,12 +173,12 @@ Continues a stopped or interrupted run from its last checkpoint.
 
 ### `apex predict`
 
-Forecasts the ensembles of a history-matching run beyond history. Do the history matching first with `apex run`, because the forecast is of such a run.
+Forecasts the ensembles of a history-matching run beyond history. Do the history matching first with `apex run`, because the forecast is of such a run. The prediction configuration identifies the run to forecast; the output of `apex schema prediction` shows which fields it takes.
 
 - `config` (required): the prediction configuration (TOML).
 - `--progress` / `--no-progress`: show or hide progress (default: on).
 
-This page does not list the contents of a prediction configuration. To write one, print what it accepts with `apex schema prediction`. Save your file (below it is called `case/predict.toml`), check it, then forecast:
+Save your file (below it is called `case/predict.toml`), check it, then forecast:
 
 ```bash
 uv run apex schema prediction
@@ -208,14 +227,14 @@ Because folders are searched, `apex summary` is also a way to find the run direc
 
 ### `apex qaqc`
 
-QA/QC (quality assurance and quality control) of an iterate of a history-matching run, with PET's checks. In short, the report shows:
+QA/QC (quality assurance and quality control) of an iterate of a history-matching run, with PET's checks. The report shows:
 
 - **coverage**: whether the observations fall within the spread of the ensemble;
 - **Mahalanobis scores**: a measure of how far the ensemble's data are from the observations, scaled by the uncertainties;
 - **Kalman gains**: the weights the update gives to the data mismatch when it changes the parameters;
 - **movement**: how far the parameters have moved.
 
-Use it after a run to see how an iterate behaves; by default it checks the posterior, the result of the run.
+Use it after a run to see how an iterate behaves; by default it checks the posterior, the result of the run. When you read the report, look first at coverage: observations that lie far outside the ensemble spread, or large Mahalanobis scores, mean the ensemble does not describe the data well. Then look at movement: parameters that moved very far may be overfitting, and parameters that hardly moved were not constrained by the data.
 
 - `run_dir` (required): the directory of a history-matching run.
 - `--iteration`: the iterate to check. Default: the posterior. To see which iterates your run has, look at the steps listed by `apex report` or `apex summary` for that run.
@@ -233,11 +252,11 @@ This checks the posterior of the run in `runs/case_run` with a damping of `0.5` 
 
 ### `apex data-split`
 
-Explores how to split production data for cross validation. In cross validation you hold back a group of wells (a CV set), match the model to the rest, and check how well it predicts the held-back wells. This command explores candidate CV sets and writes results and figures.
+Explores how to split production data for cross validation. In cross validation you hold back a group of wells (a CV set), match the model to the rest, and check how well it predicts the held-back wells. This command explores candidate CV sets and writes results and figures. It needs only the run configuration of your case; you do not have to write a `[validation]` section first.
 
 - `config` (required): the run configuration (TOML) of the case.
 - `--prior-run`: optional. A run of the same case that has a prior forecast, used for ensemble redundancy, that is, how much the ensemble members repeat each other.
-- `--max-cv`: the largest candidate CV set, in wells.
+- `--max-cv`: optional, with no default. The largest candidate CV set, in wells.
 - `--output`: the directory for the results. Default: `CONFIG dir/data_split`, that is, a `data_split` folder in the directory of the configuration.
 - `--font-size`: font size of the figures in points. Default: `12.0`.
 
@@ -248,14 +267,14 @@ uv run apex data-split case/run.toml --prior-run runs/prior_forecast --max-cv 3
 
 The first command explores candidate splits of at most 3 wells for the case in `case/run.toml` and writes results and figures (font size 14) to `case/split`. The second also passes a run with a prior forecast; replace `runs/prior_forecast` with the directory of your own such run.
 
-The `[validation]` section of a run configuration selects the cross-validation data (`cv`), the data only scored (`test`) and the data matched (`history_matching`). Each is a data selection with `wells`, `datatypes`, `keywords` and optionally `times`. The `stopping` option sets the CV stopping rule; its default is the `patience` rule with `patience = 2`. Only iterative methods take CV. Field data, such as seismic, are always history-matching data. A section like this holds back one well:
+Once you have chosen a split, you apply it in the `[validation]` section of the run configuration (for example `case/run.toml`). The section selects the cross-validation data (`cv`), the data only scored (`test`) and the data matched (`history_matching`). Each is a data selection with `wells`, `datatypes`, `keywords` and optionally `times`; at least one of `wells`, `datatypes` and `keywords` must be given. The `stopping` option sets the CV stopping rule; its default is the `patience` rule with `patience = 2`, and `"select"` runs to the usual criteria. It needs `cv`. Only iterative methods take CV. Field data, such as seismic, are always history-matching data. Add a section like this to hold back one well:
 
 ```toml
 [validation]
 cv = { wells = ["PRO3"] }
 ```
 
-This is only the `[validation]` part; the rest of a run configuration is not shown here.
+This is only the `[validation]` part; the rest of the run configuration stays as it is.
 
 ### `apex pet-import`
 
@@ -338,7 +357,15 @@ uv run apex gc --code --dry-run
 
 This lists the frozen copies the clean-up would remove, without removing anything. Run it first, then repeat without `--dry-run` if the list is what you expect.
 
-The chat history limits are set in the `[chat]` section of the service configuration. Two of its options are `retention_days` (default `92.0`) and `max_history_mb` (default `200.0`).
+The `[chat]` section of the service configuration covers the chat assistant of the web UI. Two of its options set the history limits: `retention_days` (default `92.0`) and `max_history_mb` (default `200.0`). Others include `max_turns_per_chat` (default `500`), `context_turns` (default `20`), `max_model_calls` (default `10`), `tool_timeout_s` (default `120.0`), `isolate_tools` (default `true`) and `stream` (default `true`).
+
+```toml
+[chat]
+retention_days = 92.0
+max_history_mb = 200.0
+```
+
+This is the section with the two history limits at their defaults.
 
 The guests' limits are set in the `[guests]` section. They apply only to work that a guest of the web UI submitted; the owner's work and that of other local programs (the CLI, the Python client) is never pruned. The section has two options, both numbers greater than 0:
 
@@ -353,17 +380,37 @@ max_storage_mb = 500.0
 
 This is the section with both options at their defaults.
 
+### `apex service token`
+
+Prints the REST API's bearer token. The token is created on first use and readable by you only. A client that talks to the API sends this token as its bearer token.
+
+- `--root`: the services root.
+- `--rotate` / `--no-rotate`: replace the token; old clients are refused. Default: off.
+- `--ui`: print a guest's web-UI token instead. A guest sees only their own work, within `<root>/ui_access.toml`. Default: off.
+- `--guest`: the guest, used with `--ui`; each guest has a token of their own. Default: `guest`.
+- `--revoke` / `--no-revoke`: delete the guest's token (with `--ui`); it is refused at once. Default: off.
+- `--list-guests`: list the guests who have a token, and when each expires.
+- `--owner`: with `--ui`, print the owner's web-UI token. It expires, unlike the API token, which the web UI refuses. Default: off.
+
+```bash
+uv run apex service token
+uv run apex service token --ui --guest alice
+uv run apex service token --list-guests
+```
+
+The first command prints the API token. The second prints the web-UI token of the guest `alice`. The third lists the guests who have a token.
+
 ### `apex mcp`
 
 Serves APEX's tools to an MCP host, that is, a client such as Claude Code that calls those tools. MCP support is the `mcp` extra, which is installed by default.
 
-- `--http`: serve Streamable HTTP at `HOST:PORT`, behind the API token of `apex service token`. Default: stdio.
+- `--http`: serve Streamable HTTP at `HOST:PORT`, behind the API token printed by `apex service token`. Default: stdio.
 - `--client`: the client name, for quotas and the call log. Default: `mcp`.
 - `--model`: the model driving the calls, for the log.
 - `--budget-runs`: the number of simulator runs this session may submit.
 - `--root`: the services root.
 
-With stdio (the default), the host starts the command itself and talks to it through standard input and output, so no address is needed. With `--http`, the command runs as a server that listens at `HOST:PORT`, and a host connects to that address. How to register either kind of server is set in the host's own settings.
+With stdio (the default), the host starts the command itself and talks to it through standard input and output, so no address and no token are needed. With `--http`, the command runs as a server that listens at `HOST:PORT`. Print the token with `uv run apex service token` and give it to the host in the host's own settings, where you also register the server.
 
 ```bash
 uv run apex mcp --http 127.0.0.1:8770 --client myclient --budget-runs 10
@@ -402,12 +449,14 @@ If a run is still going and you want it to pause, use `apex stop runs/case_run`,
 - `--dry-run` only has an effect together with `--code`.
 - `--code` of `apex submit` takes one value (`live`, `frozen` or a commit); it is not the same switch as `--code` of `apex gc`.
 - `--max-cv` counts wells, not data points.
+- `--rotate` of `apex service token` refuses every client that still uses the old token.
 - `--truth` is for synthetic cases and expects one array per variable.
 - `--avo-angles-checked` is only for data you know holds each angle's own traces. Leave it off for SimulatorWrap's data.
 - `apex submit` returns at once unless you add `--wait`.
 
 ## What to read next
 
+- [Studies, the job service and approvals](../../getting_started/studies_and_approvals.md), for the service configuration that `apex submit`, `apex approve` and `apex gc` rely on.
 - The pages of this guide on the configuration sections, to understand the TOML files that `apex run`, `apex predict` and `apex validate` take.
 - The output of `uv run apex schema` for the kind of configuration you want to write.
 - The output of `uv run apex plugins` to see which plugins and options are available.

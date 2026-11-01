@@ -51,7 +51,8 @@ GEOMETRY = frozenset({"DX", "DY", "DZ", "TOPS", "COORD", "ZCORN", "ACTNUM", "DEP
 #: Operations that set a property from another (``COPY 'PERMX' 'PERMY' /``) or modify it.
 OPERATIONS = frozenset({"COPY", "MULTIPLY", "ADD", "EQUALS", "MINVALUE", "MAXVALUE"})
 UNITS = frozenset({"METRIC", "FIELD", "LAB", "PVT-M"})
-PHASES = ("OIL", "WATER", "GAS", "DISGAS", "VAPOIL", "CO2STORE", "SOLVENT")
+#: RUNSPEC keywords listed as the deck's phases; COMPS marks a compositional (E300) deck.
+PHASES = ("OIL", "WATER", "GAS", "DISGAS", "VAPOIL", "CO2STORE", "SOLVENT", "COMPS")
 #: History items: WCONHIST's rates (items 4-6) and BHP (item 10); WCONINJH's rate (4), BHP (5).
 _PRODUCER_VECTORS = (("WOPR", 3), ("WWPR", 4), ("WGPR", 5))
 _INJECTED = {"WATER": "WWIR", "WAT": "WWIR", "GAS": "WGIR", "OIL": "WOIR"}

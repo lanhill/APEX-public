@@ -86,6 +86,12 @@ REGISTRIES: dict[str, Registry[Any]] = {
     "converter_skills": plugins.converter_skills,
     "geomodeling_skills": plugins.geomodeling_skills,
     "variogram_estimators": plugins.variogram_estimators,
+    # What an agent running simulations knows of each simulator and technique; registered
+    # by other packages' entry points (apex.simulation_skills).
+    "simulation_skills": plugins.simulation_skills,
+    # fitted models standing in for a simulator stack; registered by other
+    # packages' entry points (apex.surrogate_models).
+    "surrogate_models": plugins.surrogate_models,
 }
 
 #: The workflow each registry serves, for front ends that group plugins (the web UI).
@@ -119,6 +125,8 @@ WORKFLOWS: dict[str, str] = {
     ),
     "simulators": "simulation",
     "executors": "simulation",
+    "simulation_skills": "simulation",
+    "surrogate_models": "simulation",
     **dict.fromkeys(
         ("petro_elastic_models", "reflectivity", "avo_attributes", "displacement_kernels"),
         "simulation",

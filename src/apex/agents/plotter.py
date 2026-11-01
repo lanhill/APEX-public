@@ -40,6 +40,7 @@ from apex.services.figures import (
     check_request,
     draw,
     preset_requests,
+    queue_drawing,
     start_drawing,
 )
 from apex.services.settings import PlotterSection
@@ -321,6 +322,8 @@ class PlotStarted:
     decided_by: str
     reason: str | None
     trace: Path | None
+    #: Waiting behind the run's drawing in progress, drawn when it ends.
+    queued: bool = False
 
 
 class Plotter:
@@ -429,17 +432,27 @@ class Plotter:
         request: str | None = None,
         preset: str | None = None,
         preset_options: Mapping[str, Any] | None = None,
+        queue: bool = False,
     ) -> PlotStarted:
         """Choose a run's figures, and draw them in a background process (the web UI's).
+
+        With ``queue`` a request made while the run's figures are being drawn waits
+        behind that drawing (``PlotStarted.queued``) instead of being refused.
 
         Raises
         ------
         ConfigError
-            If the run cannot be read, the preset is unknown or too large, or its figures
-            are already being drawn.
+            If the run cannot be read, the preset is unknown or too large, or (without
+            ``queue``) its figures are already being drawn.
         """
         choice = self.choose(run, request=request, preset=preset, preset_options=preset_options)
-        output = start_drawing(choice.run_path, choice.requests, dpi_scale=choice.dpi_scale,
-                               max_drawings=self.settings.max_drawings)  # fmt: skip
+        queued = False
+        if queue:
+            output, queued = queue_drawing(choice.run_path, choice.requests,
+                                           dpi_scale=choice.dpi_scale,
+                                           max_drawings=self.settings.max_drawings)  # fmt: skip
+        else:
+            output = start_drawing(choice.run_path, choice.requests, dpi_scale=choice.dpi_scale,
+                                   max_drawings=self.settings.max_drawings)  # fmt: skip
         return PlotStarted(output, len(choice.requests), choice.plan, choice.decided_by,
-                           choice.reason, choice.trace)  # fmt: skip
+                           choice.reason, choice.trace, queued)  # fmt: skip

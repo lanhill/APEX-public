@@ -262,7 +262,7 @@ def test_the_assistant_uses_an_agent_and_keeps_the_conversation(
     offered = [t.name for t in request.tools]
     assert offered == [
         *READ_TOOLS, "list_agents", "find_cases", "case_info", "monitor_run", "diagnose_run",
-        "write_report", "plot_run",
+        "write_report", "plot_run", "figure_status",
         "plan_study", "draft_optimization", "draft_run", "convert_case", "create_case",
         "draft_prior", "read_draft", "revise_draft", "propose_action",
     ]  # fmt: skip
@@ -1030,6 +1030,9 @@ def test_apex_against_erts_localization_is_planned_within_the_turns(
             "case": "alpha/config.toml", "goal": goal, "budget": 2000}),)),
         _answer("I planned ES-MDA with adaptive_rows against ert_adaptive."),
     ])  # fmt: skip
+    # Ten turns of lookups and two plans fill the stub's 32k context to its edge; this
+    # test checks the turns, not the context (the figure_status tool tipped it, 2026-10-31).
+    stub.max_context = 40_000
     _, service, store, assistant = _planning(tmp_path, linear_case, stub)
     chat = store.create("ert")
 

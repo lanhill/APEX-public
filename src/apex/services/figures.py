@@ -237,16 +237,18 @@ def drawing_state(output: Path) -> dict[str, Any]:
     ``drawing`` summary then means the process was killed (out of memory) before its end.
     The probe holds the lock for an instant: a drawing started at that instant is refused
     and can be started again. The lock is ``flock``: on NFS it is a whole-file POSIX lock,
-    reliable on one host.
+    reliable on one host. ``queued`` is true while a redraw waits behind the drawing
+    (:func:`queue_drawing`).
     """
     import os
 
+    queued = (output / QUEUED_PLAN).is_file()
     try:
         fd = _try_lock(output) if output.is_dir() else None
     except OSError:  # the folder cannot be written: nothing was drawn by the service
         return {"state": "none"}
     if output.is_dir() and fd is None:
-        return {"state": "drawing"}
+        return {"state": "drawing", "queued": queued}
     try:
         try:
             found: dict[str, Any] = json.loads((output / "summary.json").read_text())
@@ -296,9 +298,9 @@ def start_drawing(
     wait. The figures appear as they are drawn; ``summary.json`` says ``drawing`` until
     the process ends (:func:`drawing_state` reads it). The process inherits the folder's
     lock and holds it until it exits, so a second drawing into the folder is refused
-    meanwhile, and a crash releases it. It also holds one of the machine's
-    ``max_drawings`` slots, so that drawings for many runs at once cannot exhaust the
-    memory the simulations need.
+    meanwhile (:func:`queue_drawing` queues it instead), and a crash releases it. It also
+    holds one of the machine's ``max_drawings`` slots, so that drawings for many runs at
+    once cannot exhaust the memory the simulations need.
 
     Raises
     ------
@@ -306,19 +308,147 @@ def start_drawing(
         If the run's figures are already being drawn into that folder, the machine is
         drawing ``max_drawings`` runs' figures already, or ``dpi_scale`` is out of range.
     """
+    # Under the queue's lock as a queued start (review): a start failing after a request
+    # queued behind it would strand that request.
+    output, _ = queue_drawing(run_path, requests, output_dir=output_dir, dpi_scale=dpi_scale,
+                              max_drawings=max_drawings, queue=False)  # fmt: skip
+    return output
+
+
+#: A redraw waiting behind the folder's drawing, run by that drawing's process when it
+#: ends; only the latest waits (a newer request replaces it).
+QUEUED_PLAN = ".plot_queued.json"
+#: Taken by a request deciding to queue and by a drawer deciding to end, so that a redraw
+#: is never queued just after the drawer last looked (it would wait for ever).
+QUEUE_LOCK = "queue.lock"
+
+
+def queue_drawing(
+    run_path: Path,
+    requests: Sequence[FigureRequest],
+    *,
+    output_dir: Path | None = None,
+    dpi_scale: float = 1.0,
+    max_drawings: int = 2,
+    queue: bool = True,
+) -> tuple[Path, bool]:
+    """Start a drawing as :func:`start_drawing`, or queue it behind the one running.
+
+    A user asking for a redraw while the first figures are drawn is not refused (a
+    reported issue, 2026-10-31): the request waits in ``QUEUED_PLAN`` and the running
+    drawer draws it next, in the same process, slot and lock. A second redraw while one
+    waits replaces it. Returns the output folder and whether the request was queued
+    (never without ``queue``: :func:`start_drawing`'s refusal).
+
+    Raises
+    ------
+    ConfigError
+        As :func:`start_drawing`, except when the folder is being drawn into.
+    """
+    import fcntl
+    import os
+
+    output = _output(run_path, output_dir, dpi_scale)
+    try:
+        lock = os.open(output / QUEUE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as error:  # its text names the server's path
+        raise ConfigError(f"the drawing could not start: {error.strerror}") from None
+    try:
+        # Held until the drawer has started (review: a request queued while an earlier
+        # one was still starting stayed queued for ever when that start failed).
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fd = _try_lock(output)
+            running = fd is not None or _drawer_running(output)
+        except OSError as error:
+            raise ConfigError(f"the drawing could not start: {error.strerror}") from None
+        if fd is None:
+            if not (queue and running):
+                # The folder is drawn into in the foreground (apex agent plot), or probed
+                # by drawing_state: nothing would read the queue (review).
+                raise ConfigError(
+                    "this run's figures are being drawn: try again when they are done"
+                )
+            _write_queued(output, _plan(run_path, requests, output, dpi_scale))
+            return output, True
+        try:
+            # No drawer: a plan left by one that was killed is stale, never drawn later.
+            (output / QUEUED_PLAN).unlink(missing_ok=True)
+        except OSError as error:
+            os.close(fd)  # never kept: the run would read as drawing for the service's life
+            raise ConfigError(f"the drawing could not start: {error.strerror}") from None
+        _spawn(run_path, requests, output, fd, dpi_scale, max_drawings)
+        return output, False
+    finally:
+        os.close(lock)
+
+
+#: Held by a background drawer (not the foreground ``draw``, nor ``drawing_state``'s
+#: probe) as long as it may still read the queue.
+DRAWER_LOCK = "drawer.lock"
+
+
+def _drawer_running(output: Path) -> bool:
+    """Return whether a background drawer holds the folder (and will read the queue)."""
+    import os
+
+    fd = _try_lock(output, DRAWER_LOCK)
+    if fd is None:
+        return True
+    os.close(fd)
+    return False
+
+
+def _write_queued(output: Path, plan: dict[str, Any]) -> None:
+    """Write ``plan`` as the queued redraw (replacing one), whole or not at all."""
+    import os
+
+    waiting = output / f"{QUEUED_PLAN}.{os.getpid()}"
+    try:
+        waiting.write_text(json.dumps(plan, default=str))
+        waiting.replace(output / QUEUED_PLAN)
+    except OSError as error:
+        waiting.unlink(missing_ok=True)
+        raise ConfigError(f"the drawing could not be queued: {error.strerror}") from None
+
+
+def _output(run_path: Path, output_dir: Path | None, dpi_scale: float) -> Path:
+    """Return the drawing's output folder, made; check ``dpi_scale``."""
+    if not 0 < dpi_scale <= MAX_DPI_SCALE:
+        raise ConfigError(f"dpi_scale must be in (0, {MAX_DPI_SCALE:g}], got {dpi_scale}")
+    output = (output_dir or Path(run_path) / DEFAULT_SUBDIR).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    return output
+
+
+def _plan(
+    run_path: Path, requests: Sequence[FigureRequest], output: Path, dpi_scale: float
+) -> dict[str, Any]:
+    """Return a drawing's plan, as the detached process reads it."""
+    return {
+        "run": str(Path(run_path).resolve()),
+        "requests": [{"figure": r.figure, "options": dict(r.options), "subdir": r.subdir}
+                     for r in requests],
+        "output": str(output),
+        "dpi_scale": dpi_scale,
+    }  # fmt: skip
+
+
+def _spawn(
+    run_path: Path,
+    requests: Sequence[FigureRequest],
+    output: Path,
+    fd: int,
+    dpi_scale: float,
+    max_drawings: int,
+) -> None:
+    """Start the detached drawer with the folder's lock ``fd`` (closed here either way)."""
     import os
     import subprocess
     import sys
     import threading
     import uuid
 
-    if not 0 < dpi_scale <= MAX_DPI_SCALE:
-        raise ConfigError(f"dpi_scale must be in (0, {MAX_DPI_SCALE:g}], got {dpi_scale}")
-    output = (output_dir or Path(run_path) / DEFAULT_SUBDIR).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    fd = _try_lock(output)
-    if fd is None:
-        raise ConfigError("this run's figures are being drawn: try again when they are done")
     try:
         slot = _take_slot(max_drawings)
     except BaseException:
@@ -328,15 +458,26 @@ def start_drawing(
         os.close(fd)
         raise ConfigError(f"the server is drawing {max_drawings} runs' figures already: "
                           "try again when one is done")  # fmt: skip
+    try:
+        drawer = _try_lock(output, DRAWER_LOCK)
+    except OSError as error:
+        drawer, failure = None, error.strerror
+    else:
+        # Under the folder's lock no other drawer can hold it: one that let the folder
+        # go has let this go first (main).
+        failure = None if drawer is not None else "another drawer has not ended"
+    if drawer is None:
+        os.close(fd)
+        os.close(slot)
+        raise ConfigError(f"the drawing could not start: {failure}")
     plan_file = output / f".plot_plan_{uuid.uuid4().hex}.json"
     try:
-        plan_file.write_text(json.dumps({
-            "run": str(Path(run_path).resolve()),
-            "requests": [{"figure": r.figure, "options": dict(r.options), "subdir": r.subdir}
-                         for r in requests],
-            "output": str(output),
-            "dpi_scale": dpi_scale,
-        }, default=str))  # fmt: skip
+        # The locks' descriptor numbers survive pass_fds: the drawer releases them by
+        # number before it lets go of the queue (main).
+        plan_file.write_text(json.dumps({**_plan(run_path, requests, output, dpi_scale),
+                                         "lock_fd": fd, "drawer_fd": drawer,
+                                         "slot_fd": slot},
+                                        default=str))  # fmt: skip
         # Written before the process starts: its own end ("done", "failed") comes after.
         (output / "summary.json").write_text(
             json.dumps({"state": "drawing", "requests": len(requests)})
@@ -344,6 +485,7 @@ def start_drawing(
     except OSError as error:
         os.close(fd)
         os.close(slot)
+        os.close(drawer)
         plan_file.unlink(missing_ok=True)
         raise ConfigError(f"the drawing could not start: {error.strerror}") from None
     try:
@@ -352,7 +494,7 @@ def start_drawing(
                 process = subprocess.Popen(
                     [sys.executable, "-m", "apex.services.figures", str(plan_file)],
                     stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-                    start_new_session=True, pass_fds=(fd, slot),
+                    start_new_session=True, pass_fds=(fd, slot, drawer),
                 )  # fmt: skip
         except OSError as error:
             plan_file.unlink(missing_ok=True)
@@ -361,15 +503,20 @@ def start_drawing(
             )
             raise ConfigError(f"the drawing could not start: {error.strerror}") from None
     finally:
-        os.close(fd)  # the process keeps its inherited copies of the lock and the slot
+        os.close(fd)  # the process keeps its inherited copies of the locks and the slot
         os.close(slot)
+        os.close(drawer)
     # Reaped when it ends: a long-lived service would otherwise keep it as a zombie.
     threading.Thread(target=process.wait, name="plot-reaper", daemon=True).start()
-    return output
 
 
 def main(plan_file: str) -> int:
-    """Draw a plan written by :func:`start_drawing` (the detached process); return its code."""
+    """Draw a plan written by :func:`start_drawing` (the detached process); return its code.
+
+    Then each redraw queued meanwhile (:func:`queue_drawing`), in the same lock and slot;
+    the process ends once none waits, the folder's lock given back before the queue's.
+    """
+    import fcntl
     import os
     import signal
 
@@ -378,6 +525,9 @@ def main(plan_file: str) -> int:
     path = Path(plan_file)
     output = path.parent
     run_path = Path("<run>")
+    lock_fd: int | None = None
+    drawer_fd: int | None = None
+    slot_fd: int | None = None
 
     def failed(error: str) -> None:
         # Server paths masked: the run's, the output's and the plan's (it reaches the web UI).
@@ -388,19 +538,50 @@ def main(plan_file: str) -> int:
         raise SystemExit(f"stopped by signal {signum}")
 
     signal.signal(signal.SIGTERM, terminated)
+    code = 0
     try:
         os.nice(10)  # behind the simulations and the service on a shared machine
-        plan = json.loads(path.read_text())
-        run_path = Path(plan["run"])
-        draw(run_path,
-             [FigureRequest(r["figure"], r["options"], r["subdir"]) for r in plan["requests"]],
-             output_dir=output, dpi_scale=float(plan["dpi_scale"]), locked=True)  # fmt: skip
-    except (Exception, SystemExit) as error:  # noqa: BLE001 (recorded for the reader)
+        while True:
+            try:
+                plan = json.loads(path.read_text())
+                lock_fd = plan.get("lock_fd", lock_fd)
+                drawer_fd = plan.get("drawer_fd", drawer_fd)
+                slot_fd = plan.get("slot_fd", slot_fd)
+                run_path = Path(plan["run"])
+                draw(run_path, [FigureRequest(r["figure"], r["options"], r["subdir"])
+                                for r in plan["requests"]],
+                     output_dir=output, dpi_scale=float(plan["dpi_scale"]),
+                     locked=True)  # fmt: skip
+            except (Exception, SystemExit) as error:  # noqa: BLE001 (recorded for the reader)
+                failed(f"{type(error).__name__}: {error}")
+                code = 1
+                if isinstance(error, SystemExit):
+                    return code  # stopped: a queued redraw is stale, dropped by the next start
+            finally:
+                path.unlink(missing_ok=True)
+            queue = os.open(output / QUEUE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+            fcntl.flock(queue, fcntl.LOCK_EX)
+            try:
+                queued = output / QUEUED_PLAN
+                if not queued.is_file():
+                    # Given back before the queue: a request that takes the queue next
+                    # finds the folder free and a slot for its own drawer.
+                    for held in (slot_fd, drawer_fd, lock_fd):
+                        if held is not None:
+                            os.close(held)
+                    slot_fd = lock_fd = drawer_fd = None
+                    return code
+                queued.replace(path)
+                plan = json.loads(path.read_text())
+                (output / "summary.json").write_text(
+                    json.dumps({"state": "drawing", "requests": len(plan["requests"])})
+                )
+            finally:
+                os.close(queue)
+    except (Exception, SystemExit) as error:  # noqa: BLE001 (the queue could not be read)
         failed(f"{type(error).__name__}: {error}")
-        return 1
-    finally:
         path.unlink(missing_ok=True)
-    return 0
+        return 1
 
 
 if __name__ == "__main__":

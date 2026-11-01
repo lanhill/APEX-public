@@ -308,3 +308,53 @@ def test_shutting_connections_does_not_shut_the_well(tmp_path: Path) -> None:
 
     assert data.history[(dt.date(2020, 3, 31), "WOPR:PROD")] == 90.0
     assert any("connections" in u for u in data.facts.unread)
+
+
+def test_a_compositional_deck_runs_on_e300(tmp_path: Path) -> None:
+    """E100, the eclipse simulator's default, cannot run COMPS (E300's CO2STORE included)."""
+    deck = write_deck(tmp_path)
+    deck.write_text(deck.read_text().replace("OIL\nWATER\n", "METRIC\nCOMPS\n 2 /\nCO2STORE\n", 1))
+    converter = converter_skills.create("eclipse")
+    facts = converter.read(deck)
+
+    draft = converter.write_config(deck, facts, choices())
+
+    assert "COMPS" in facts.phases
+    assert draft.config["simulator"]["options"]["version"] == "e300"  # type: ignore[index]
+    assert any("E300" in note for note in draft.notes)
+
+
+def test_a_section_keyword_with_a_ruler_after_it(tmp_path: Path) -> None:
+    """``PROPS  =====`` is the keyword PROPS (Eclipse reads a keyword's first 8 columns),
+    as in 3dBox's deck: the sections after it were read as GRID (reported 2026-10-31)."""
+    plain = write_deck(tmp_path / "plain")
+    ruled = write_deck(tmp_path / "ruled")
+    text = ruled.read_text()
+    for section in ("GRID", "PROPS", "SCHEDULE"):
+        assert f"\n{section}\n" in text, section
+        text = text.replace(f"\n{section}\n", f"\n{section}  ==============\n", 1)
+    ruled.write_text(text)
+
+    a, b = read_deck(plain, skill="opm_flow"), read_deck(ruled, skill="opm_flow")
+
+    assert sorted(b.arrays) == sorted(a.arrays)
+    for name in a.arrays:
+        np.testing.assert_array_equal(b.arrays[name], a.arrays[name], name)
+    assert b.facts.phases == a.facts.phases
+    assert b.facts.wells == a.facts.wells
+    assert b.facts.report_dates == a.facts.report_dates
+
+
+def test_a_title_starting_with_a_section_word_is_not_a_section(tmp_path: Path) -> None:
+    """TITLE's free-text record (no "/") may start with a section's name: not a ruler."""
+    plain = write_deck(tmp_path / "plain")
+    titled = write_deck(tmp_path / "titled")
+    text = titled.read_text()
+    assert "TITLE\n test case\n" in text
+    titled.write_text(text.replace("TITLE\n test case\n", "TITLE\nGRID refinement test\n"))
+
+    a, b = read_deck(plain, skill="opm_flow"), read_deck(titled, skill="opm_flow")
+
+    assert b.facts.phases == a.facts.phases
+    assert b.facts.grid == a.facts.grid
+    assert sorted(b.arrays) == sorted(a.arrays)

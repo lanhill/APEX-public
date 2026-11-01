@@ -141,6 +141,7 @@ nav:
   - CHOP, hyper-parameters estimated as the run goes: chop.md
   - MEC, model error characterization: mec.md
   - Optimization: optimization.md
+  - Surrogate models: surrogates.md
   - Examples and toy problems: examples.md
   - Run summaries: summaries.md
   - Figures and the plotter: figures.md

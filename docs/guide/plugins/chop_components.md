@@ -2,7 +2,9 @@
 audience: public
 items:
   - cli:apex plugins
+  - cli:apex resume
   - cli:apex run
+  - cli:apex stop
   - config:history_match:prior
   - plugin:chop_components:data_weights
   - plugin:chop_components:gain_inflation
@@ -19,7 +21,7 @@ By the end of this page you will know what the three plugins in the `chop_compon
 - `gain_inflation`: per-member multiplicative inflation of the gain.
 - `length_scale`: P-AutoAdaLoc, per-member Gaspari-Cohn length scales of a correlation-based taper.
 
-In each case every ensemble member `j` carries its own hyper-parameters. They are drawn from a uniform prior, and a hyper-parameter update then adjusts them as the run proceeds.
+In each case every ensemble member `j` carries its own hyper-parameters (extra numbers that tune the update, not model parameters). They are drawn from a uniform prior, and a hyper-parameter update then adjusts them as the run proceeds.
 
 ### Symbols used below
 
@@ -29,15 +31,21 @@ In each case every ensemble member `j` carries its own hyper-parameters. They ar
 | `r_j` | the innovation of member `j`: the mismatch between the observed data and that member's simulated data |
 | `dm_j` | the update applied to member `j` |
 | `w_j` | member `j`'s weights (`data_weights`) |
-| `D_j` | member `j`'s inflation factors (`gain_inflation`) |
+| `D_j` | member `j`'s inflation factors (`gain_inflation`), applied element by element to `K` |
 | `o` | element-wise product |
+| `N` | the ensemble size |
 
 The plugins act as follows:
 
-- `data_weights`: `dm_j = K diag(w_j) r_j`
-- `gain_inflation`: `dm_j = (D_j o K) r_j`
+- `data_weights`: `dm_j = K diag(w_j) r_j`. Each datum's innovation is scaled by a weight before the gain is applied.
+- `gain_inflation`: `dm_j = (D_j o K) r_j`. The gain itself is scaled by member `j`'s factors. The `mode` decides what a factor belongs to: the whole gain (`scalar`), a state variable (`variable`), or a state variable and a data type (`variable_datatype`).
+- `length_scale`: a taper multiplies the correlations used in the update. See the next section.
 
 A *datum* is a single observed value. A *data type* is a group of data of the same kind.
+
+### What localization and the taper are
+
+With a limited number of members, the ensemble shows spurious correlations between a state variable and data that have nothing to do with it. *Localization* damps these by multiplying correlations with a *taper*, a number between 0 and 1 that falls off with distance. The Gaspari-Cohn function is a standard taper shape. In `length_scale` the taper is computed from correlations (not from physical distance), and each member gets its own length scale. A longer length scale lets more correlations through. A shorter one cuts more of them.
 
 ## Prerequisites
 
@@ -47,7 +55,7 @@ A *datum* is a single observed value. A *data type* is a group of data of the sa
 
 ## How you select a component
 
-`chop_components` is a plugin registry, not a configuration section, so do not write a `[chop_components]` section. You choose the plugin with `name = "..."` in the plugin section of the role that uses it, and you give its options there too. The valid names are `data_weights`, `gain_inflation` and `length_scale`. Take the section's name from the configuration reference for that role.
+You choose the plugin with `name` in the plugin section of the role that uses it, and you give its options in that section's `options` table. For example, the section holds `name = "gain_inflation"` and `options = { transform = "logit" }`. The valid names are `data_weights`, `gain_inflation` and `length_scale`. The configuration reference for the role shows the section's exact name.
 
 Every option below has a default, so a plugin works with only its `name` set.
 
@@ -69,21 +77,34 @@ uv run apex plugins --json
    - `data_weights` for how strongly each datum's innovation enters the update.
    - `gain_inflation` for scaling the gain itself.
    - `length_scale` for how far localization reaches.
-2. **Pick the `mode`**, which sets how many hyper-parameters each member gets. A finer mode (`datum`, `variable_datatype`, `data`) gives more freedom but more hyper-parameters to estimate from `N` members. A coarser mode (`datatype`, `scalar`) gives fewer. With a small ensemble, start with the coarser mode.
+2. **Pick the `mode`**, which sets how many hyper-parameters each member gets. A finer mode gives more freedom but more hyper-parameters to estimate from `N` members. Order of the modes for each plugin, from coarse to fine:
+   - `data_weights`: `datatype` < `datum`
+   - `gain_inflation`: `scalar` < `variable` < `variable_datatype`
+   - `length_scale`: `scalar` < `data`
+
+   With a small ensemble, start with a coarser mode.
 3. **Keep or change the prior range** `low` and `high`. Each member's values are drawn uniformly from it.
 4. **Choose the `transform`**, the scale on which the hyper-parameter update works:
-   - `none`: natural values, floored at `floor` (default `1e-06`). A reasonable default.
-   - `log`: suits strictly positive quantities; needs `low > 0`.
-   - `logit`: suits values that must stay inside an interval, between `lower` and `upper`.
-5. **Set `lower` and `upper`** only if you use `logit` and the defaults do not suit you. They must satisfy `lower < low <= high < upper`. By default, with `range = high - low`, `lower = max(0, low - range)` and `upper = high + range`. The clamp at 0 keeps the lower bound non-negative.
-6. **Tune `threshold`** (for `data_weights` and `gain_inflation`). The update keeps a hyper-parameter's correlation with a datum only when `abs(corr) > threshold / sqrt(N)`. A larger `threshold` keeps fewer correlations. A smaller one keeps more, including weak ones that may be sampling noise. For `length_scale`, tune `correlation` and `factor` instead.
+   - `none`: natural values. Any value that falls below `floor` (default `1e-06`) is raised to `floor`. This is the default and fine for most cases.
+   - `log`: the update works on the logarithm, so values stay positive. Prefer it for strictly positive quantities that may vary by factors; needs `low > 0`.
+   - `logit`: the update keeps values inside the interval between `lower` and `upper`. Prefer it when values must never leave a known range.
+5. **Set `lower` and `upper`** only if you use `logit` and the defaults do not suit you. They must satisfy `lower < low <= high < upper`. By default they are `low` and `high` widened by their range (`high - low`), with `lower` never below 0.
+6. **Tune `threshold`** (for `data_weights` and `gain_inflation`). The update keeps the correlation between a hyper-parameter and a datum, computed across the members, only when `abs(corr) > threshold / sqrt(N)`. Correlations estimated from `N` members carry sampling noise of roughly `1/sqrt(N)`, so the cut-off shrinks as the ensemble grows. A larger `threshold` keeps fewer correlations. A smaller one keeps more, including weak ones that may be noise. For `length_scale`, tune `correlation` and `factor` instead.
 7. **Run** as usual, for example:
 
 ```
 uv run apex run config.toml --max-steps 2
 ```
 
-   `--max-steps` stops after that many analysis steps, and you continue later with `apex resume`. Progress is shown on standard error by default; `--no-progress` turns it off.
+   `--max-steps` stops the run after that many analysis steps (an analysis step is one update of the ensemble against the data). Progress is shown on standard error by default; `--no-progress` turns it off.
+
+8. **Continue later** from the last checkpoint by giving `apex resume` the run directory:
+
+```
+uv run apex resume path/to/run_dir
+```
+
+   `apex resume` accepts `--max-steps` and `--no-progress` too. To ask a running run to stop at its next checkpoint, use `uv run apex stop path/to/run_dir`; `apex resume` continues it.
 
 ## Options of `data_weights`
 
@@ -96,7 +117,7 @@ uv run apex run config.toml --max-steps 2
 | `floor` | number | `1e-06` | Smallest value kept with `transform = "none"`. |
 | `lower` | number or null | null | `logit` lower bound. |
 | `upper` | number or null | null | `logit` upper bound. |
-| `threshold` | number | `3.0` | The update keeps a hyper-parameter's correlation with a datum only when `abs(corr) > threshold / sqrt(N)`. |
+| `threshold` | number | `3.0` | Cut-off in `abs(corr) > threshold / sqrt(N)`. |
 
 ## Options of `gain_inflation`
 
@@ -117,7 +138,7 @@ uv run apex run config.toml --max-steps 2
 |---|---|---|---|
 | `mode` | `data` or `scalar` | `data` | One length scale per datum, or one for all data, for each member. |
 | `correlation` | `prior` or `current` | `prior` | Taper computed from the initial ensemble's correlations, or from correlations recomputed before each update. |
-| `factor` | number | `2.0` | Multiplier of the length scales in the taper. It must be positive. The default 2 is the published code's value; 1 gives the paper's formula. |
+| `factor` | number | `2.0` | Positive multiplier of the length scales in the taper. The default 2 is the value in the published code of the method; 1 gives the formula as written in the paper. |
 | `low` | number | `0.23` | Lower end of the uniform prior. |
 | `high` | number | `0.43` | Upper end of the uniform prior. |
 | `transform` | `none`, `log` or `logit` | `none` | Scale of the hyper-parameter update. |
@@ -127,15 +148,15 @@ uv run apex run config.toml --max-steps 2
 
 `length_scale` has no `threshold` option.
 
-Keep `factor = 2` to match the published code. Set `factor = 1` if you want the paper's formula.
+Keep `factor = 2` unless you want to reproduce the paper's formula, in which case set `factor = 1`.
 
 ## Worked example: `gain_inflation` with `logit`
 
-Suppose you choose `gain_inflation` and set `transform = "logit"`, leaving everything else at its default.
+Suppose you choose `gain_inflation` and set `transform = "logit"`, leaving everything else at its default. In the role's plugin section that is `name = "gain_inflation"` with `options = { transform = "logit" }`.
 
 - `mode` is `variable`, so each member gets one inflation factor per state variable.
-- The prior is uniform on `low = 0.5` to `high = 1.5`, so `range = 1`.
-- `lower` and `upper` are null, so they are derived: `lower = max(0, 0.5 - 1) = 0` and `upper = 1.5 + 1 = 2.5`.
+- The prior is uniform on `low = 0.5` to `high = 1.5`, so the range is 1.
+- `lower` and `upper` are null, so they are derived by widening `low` and `high` by that range: `lower = max(0, 0.5 - 1) = 0` and `upper = 1.5 + 1 = 2.5`.
 - The condition `lower < low <= high < upper` holds: `0 < 0.5 <= 1.5 < 2.5`. The updated factors therefore stay between 0 and 2.5.
 - With `N = 100` members and the default `threshold = 3.0`, the cut-off is `3 / sqrt(100) = 0.3`. A hyper-parameter's correlation with a datum is kept only if its absolute value exceeds 0.3.
 
@@ -143,7 +164,6 @@ To widen or narrow the allowed interval, set `lower` and `upper` yourself, keepi
 
 ## Pitfalls
 
-- **Writing a `[chop_components]` section.** It is a registry, not a section. Select the plugin with `name` in its role's section.
 - **`transform = "log"` with `low <= 0`.** `log` needs `low > 0`.
 - **Bad `logit` bounds.** `lower` and `upper` must satisfy `lower < low <= high < upper`.
 - **Expecting `floor` to act on every transform.** It applies only with `transform = "none"`.

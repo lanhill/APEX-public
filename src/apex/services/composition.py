@@ -1737,7 +1737,9 @@ def build_method(
     return methods.create(section.name, **options)
 
 
-def _draw_groups(run: Run) -> dict[str, np.ndarray]:
+def _draw_groups(
+    config: HistoryMatchConfig, layout: StateLayout, n_members: int | None, rng: np.random.Generator
+) -> dict[str, np.ndarray]:
     """Draw the variables of ``[prior.groups]`` with their joint generators.
 
     Groups are drawn in name order, before the per-variable generators, from the same
@@ -1748,10 +1750,9 @@ def _draw_groups(run: Run) -> dict[str, np.ndarray]:
     ConfigError
         If a group names an unknown variable, or its generator is not a joint one or fails.
     """
-    layout = run.workflow.layout
     variables = {v.name: v for v in layout.variables}
     blocks: dict[str, np.ndarray] = {}
-    for name, section in sorted(run.config.prior.groups.items()):
+    for name, section in sorted(config.prior.groups.items()):
         context = f"prior group {name!r} ({section.name})"
         unknown = sorted(set(section.variables) - set(variables))
         if unknown:
@@ -1764,9 +1765,7 @@ def _draw_groups(run: Run) -> dict[str, np.ndarray]:
             raise ConfigError(f"{context}: {section.name!r} draws one variable at a time")
         members = [variables[v] for v in section.variables]
         try:
-            drawn = generator.generate_joint(
-                members, run.config.prior.ensemble_size, run.workflow.streams["prior"]
-            )
+            drawn = generator.generate_joint(members, n_members, rng)
         except ValueError as error:
             raise ConfigError(f"{context}: {error}") from error
         for variable in members:
@@ -1789,12 +1788,36 @@ def draw_prior(run: Run) -> np.ndarray:
     ConfigError
         If a generator is unknown or misconfigured, or variables disagree in ensemble size.
     """
-    prior = run.config.prior
-    layout = run.workflow.layout
+    return draw_prior_ensemble(
+        run.config,
+        run.workflow.layout,
+        run.config.prior.ensemble_size,
+        run.workflow.streams["prior"],
+    )
+
+
+def draw_prior_ensemble(
+    config: HistoryMatchConfig,
+    layout: StateLayout,
+    n_members: int | None,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Draw ``n_members`` from the configuration's prior with ``rng`` (:func:`draw_prior`).
+
+    Returns the stacked ensemble ``(n_state, n)``; ``n`` is ``n_members`` unless a generator
+    gives a stored ensemble of its own size (``file``). A surrogate's design draws its runs
+    from the case's prior through here.
+
+    Raises
+    ------
+    ConfigError
+        If a generator is unknown or misconfigured, or variables disagree in ensemble size.
+    """
+    prior = config.prior
     unknown = sorted(set(prior.variables) - set(layout.names))
     if unknown:
         raise ConfigError(f"[prior.variables] names unknown state variables: {', '.join(unknown)}")
-    blocks = _draw_groups(run)
+    blocks = _draw_groups(config, layout, n_members, rng)
     for variable in layout.variables:
         if variable.name in blocks:
             continue
@@ -1816,7 +1839,7 @@ def draw_prior(run: Run) -> np.ndarray:
                 "[prior.groups.<name>] variables"
             )
         try:
-            block = generator.generate(variable, prior.ensemble_size, run.workflow.streams["prior"])
+            block = generator.generate(variable, n_members, rng)
         except ValueError as error:
             raise ConfigError(f"{context}: {error}") from error
         if getattr(generator, "clip", True):
@@ -2001,18 +2024,55 @@ def prepare_remote(executor: object, simulator: Simulator, config: HistoryMatchC
 
     template = config.simulator.options.get("deck_template_file")
     includes = None if template is None else case_dir_files(Path(str(template)))
+    document = json.loads(config.model_dump_json())
+    programs = _program_options(config, document)
     attach(
         RemoteSpec(
             simulator=simulator,
-            config=json.loads(config.model_dump_json()),
+            config=document,
             includes=None if includes is None else tuple(includes),
             code=run_code,
             # A job's stop while the executor waits for a verified copy.
             stopped=None
             if config.run.output_dir is None
             else RunDirectory(config.run.output_dir).stop_requested,
+            programs=programs,
         )
     )
+
+
+def _program_options(
+    config: HistoryMatchConfig, document: dict[str, Any]
+) -> tuple[tuple[str, ...], ...]:
+    """Return where the simulator's options name programs or their arguments.
+
+    The trails of the ``[simulator.options]`` whose declared role is ``executable`` or
+    ``arguments``: the only options of a forecast stack that name programs (geophysics,
+    model error and the multilevel levels run none). Those left at their default are
+    written into ``document`` (the spec's configuration) with that default, so that an
+    executor can map a default program too (``executable = "pflotran"``); the stack the
+    hosts build from it is the same.
+    """
+    from pydantic_core import PydanticUndefined
+
+    from apex.services.plugins import option_model, option_roles  # plugins imports us
+
+    name = config.simulator.name
+    roles = option_roles("simulators", name)
+    fields = option_model("simulators", name).model_fields
+    options = document.setdefault("simulator", {}).setdefault("options", {})
+    trails: list[tuple[str, ...]] = []
+    for option, role in roles.items():
+        if role is None or role.kind not in ("executable", "arguments"):
+            continue
+        if option not in options:
+            field = fields.get(option)
+            default = None if field is None else field.default
+            if default is None or default is PydanticUndefined:
+                continue  # no program to map (e.g. mpiexec unset)
+            options[option] = list(default) if isinstance(default, list | tuple) else default
+        trails.append(("simulator", "options", option))
+    return tuple(trails)
 
 
 def check_executor(executor: object, simulator: Simulator) -> None:

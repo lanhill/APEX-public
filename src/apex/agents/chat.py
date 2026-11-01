@@ -535,7 +535,9 @@ SYSTEM = (
     "never guess a number a tool can give. The agents are tools: monitor_run checks a "
     "run's health, diagnose_run explains its problems and what to change, write_report "
     "writes its narrative, plot_run draws its result figures (a request in words, or a "
-    "preset such as brugge_classic; they appear on the run's page), plan_study plans a "
+    "preset such as brugge_classic; they appear on the run's page; say what its options "
+    "cannot set; if the run cannot give a figure, offer the latest run that can), "
+    "plan_study plans a "
     "study as a draft (revise_draft changes it); "
     "in a study the algorithm is the base: compare algorithms as methods (each a complete "
     "entry from its own schema), with auxiliary techniques such as localization and the "
@@ -1434,15 +1436,39 @@ class ChatAssistant:
             check_run(args.run)
             started = Plotter(service, None).start(args.run, request=args.request,
                                                    preset=args.preset,
-                                                   preset_options=args.preset_options)  # fmt: skip
+                                                   preset_options=args.preset_options,
+                                                   queue=True)  # fmt: skip
             return {
-                "state": "drawing in the background: the figures appear as they are drawn",
+                # Queued, not refused, behind a drawing in progress (a reported issue,
+                # 2026-10-31: the user's redraw was refused and never drawn).
+                "state": "queued: drawn when the run's current drawing ends (figure_status "
+                "says how it stands)"
+                if started.queued
+                else "drawing in the background: the figures appear as they are drawn",
                 "requests": started.requests,
                 "figures": [f"{c.figure} ({c.subdir})" for c in started.plan.figures],
                 "preset": started.plan.preset,
                 "where": "the run's page (Figures), under report/plots",
                 "chosen_by": started.plan.reason,
             }
+
+        def figure_status(args: RunArgument) -> dict[str, Any]:
+            from apex.services.figures import DEFAULT_SUBDIR, drawing_state
+
+            check_run(args.run)
+            path, _ = RunMonitor(service, None).resolve(args.run)
+            output = Path(path) / DEFAULT_SUBDIR
+            state = drawing_state(output)
+            # The PNGs on disk: while a drawing runs, summary.json does not list them yet.
+            files = (
+                sorted(str(f.relative_to(output)) for f in output.rglob("*.png"))
+                if output.is_dir()
+                else []
+            )
+            shown = ("state", "queued", "requests", "written", "skipped", "error")
+            found = {k: v for k, v in state.items() if k in shown}
+            return {**found, "files": files[:200], "file_count": len(files),
+                    "where": "the run's page (Figures), under report/plots"}  # fmt: skip
 
         def report(args: ReportArgument) -> dict[str, Any]:
             if (args.run is None) == (args.study is None):
@@ -1492,7 +1518,7 @@ class ChatAssistant:
             return [a.__dict__ for a in shown if access is None or access.agent(a.name)]
 
         by_agent = {"monitor_run": "monitor", "diagnose_run": "diagnosis", "write_report": "report",
-                    "plot_run": "plotter"}  # fmt: skip
+                    "plot_run": "plotter", "figure_status": "plotter"}  # fmt: skip
         tools = [
             LocalTool("list_agents", "List APEX's agents, what each does and its command.",
                       NoArguments, agents),
@@ -1523,8 +1549,11 @@ class ChatAssistant:
                       "background into its report/plots folder, shown on the run's page as "
                       "they are drawn: what the request asks for (metric box/violin plots, "
                       "forecast bands per well, layer maps, histograms) or a preset "
-                      "(brugge_classic: the whole classic set, minutes for a large case).",
+                      "(brugge_classic: the whole classic set, minutes for a large case); "
+                      "queued behind a drawing in progress.",
                       PlotArgument, plot),
+            LocalTool("figure_status", "A run's drawing state, queued redraw and PNGs "
+                      "written. Read-only.", RunArgument, figure_status),
         ]  # fmt: skip
         shown = [
             t for t in tools

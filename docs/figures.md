@@ -62,7 +62,7 @@ The decision is recorded in `RUN_DIR/agents/`, like every agent's.
 - The assistant's tool `plot_run` draws a run's figures for a request or a preset, e.g. *"Draw the box plots of my run's RMSE"*.
 - REST: `POST /v1/agents/plot` with `run`, and optionally `request`, `preset`, `preset_options` and `model`.
 
-These three draw in the background: they answer once the figures are chosen, and the figures appear as they are drawn. `report/plots/summary.json` says `drawing` until all are done. A second drawing of the same run is refused until the first ends. So is a drawing beyond `[agents.plotter] max_drawings` on the machine. The command line draws in the foreground.
+These three draw in the background: they answer once the figures are chosen, and the figures appear as they are drawn. `report/plots/summary.json` says `drawing` until all are done. A second drawing of the same run is refused until the first ends, except from the assistant: its `plot_run` queues the request, and the running drawing draws it next (only the latest queued request waits). The assistant's `figure_status` tells whether a run's figures are being drawn, whether a redraw is queued, and which PNG files are already written. A drawing beyond `[agents.plotter] max_drawings` on the machine is refused. The command line draws in the foreground.
 
 Guests use the plotter only if their access list names it (`[agents] names = ["plotter"]`), and only on their own runs.
 

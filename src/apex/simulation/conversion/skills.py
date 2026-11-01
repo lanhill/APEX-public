@@ -308,7 +308,9 @@ class OpmFlowSkill(DeckSkill):
         "OPM Flow reads Eclipse-format decks. Permeability (PERMX, often with PERMY/PERMZ "
         "copied from it) is usually matched as its logarithm (transform 'log'); porosity and "
         "net-to-gross as they are. Rates and pressures of wells under history control "
-        "(WCONHIST, WCONINJH) are the usual observations. CO2STORE decks are OPM-only."
+        "(WCONHIST, WCONINJH) are the usual observations. OPM's CO2STORE decks (gas-water, "
+        "WATER/GAS/DISGASW) run on opm_flow; E300's compositional CO2STORE (COMPS) runs on "
+        "eclipse."
     )
 
 
@@ -324,8 +326,29 @@ class EclipseSkill(DeckSkill):
     guidance = (
         "Eclipse decks (E100 black oil, E300 compositional) are converted the same way as "
         "OPM Flow's; choose opm_flow instead unless the user needs Eclipse, which uses "
-        "licences. Permeability is matched as its logarithm; porosity as it is."
+        "licences. Permeability is matched as its logarithm; porosity as it is. A "
+        "compositional deck (COMPS, e.g. E300's CO2STORE) runs on E300 (version e300)."
     )
+
+    def write_config(
+        self,
+        source: Path,
+        facts: CaseFacts,
+        choices: ConversionChoices,
+        history: Path | None = None,
+    ) -> ConversionDraft:
+        """Return the deck's case on ``eclipse``: E300 for a compositional deck (``COMPS``).
+
+        E100 cannot run ``COMPS`` (nor E300's ``CO2STORE``), and the simulator's default is
+        E100, so a compositional deck's case names ``version = "e300"``.
+        """
+        draft = super().write_config(source, facts, choices, history)
+        if "COMPS" in facts.phases:
+            simulator = draft.config["simulator"]
+            assert isinstance(simulator, dict)
+            simulator["options"]["version"] = "e300"
+            draft.notes.append("a compositional deck (COMPS): run on E300 (version e300)")
+        return draft
 
     def _simulator_options(self) -> dict[str, object]:
         return {"deck_template_file": TEMPLATE, "licenses": 3}

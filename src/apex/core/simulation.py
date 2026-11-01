@@ -143,6 +143,12 @@ class RemoteSpec:
         Whether the run was asked to stop, for waits outside its steps: its folder's stop
         request (``apex stop``, or a job's stop while its worker holds the run); ``None``:
         never asked.
+    programs
+        Where in ``config`` the stack's options name programs or their arguments (option
+        roles ``executable`` and ``arguments``), as key trails such as
+        ``("simulator", "options", "executable")``: an executor whose hosts have a
+        program at another path rewrites those values, and only those, in the
+        configuration it sends them.
     """
 
     simulator: object
@@ -150,6 +156,7 @@ class RemoteSpec:
     includes: tuple[str, ...] | None
     code: Callable[[Sequence[str]], RemoteCode]
     stopped: Callable[[], bool] | None = None
+    programs: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

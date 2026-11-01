@@ -214,6 +214,21 @@ def test_list_runs_puts_the_later_of_two_runs_of_one_second_first(tmp_path: Path
     assert [row["name"] for row in listed["runs"]] == ["run2", "run1", "run0"]
 
 
+def test_list_runs_finds_a_cases_runs_by_part_of_the_name(tmp_path: Path) -> None:
+    """A reported issue (2026-10-31): the latest run could not give the figure asked for, and
+    the assistant could not look for a run of the user's case among 122 runs."""
+    entries = [
+        SimpleNamespace(run_id=f"{i:016d}", name=name, created=f"2026-10-2{i}T10:00:00",
+                        path=tmp_path / name, annotations={})
+        for i, name in enumerate(["History_Match-a", "study-cell", "history_match-b"])
+    ]  # fmt: skip
+    store = SimpleNamespace(entries=lambda: entries)
+    session = cast(ToolSession, SimpleNamespace(service=SimpleNamespace(store=store), access=None))
+    listed = call_handler("list_runs", session, {"name": "HISTORY_match"})
+    assert [row["name"] for row in listed["runs"]] == ["history_match-b", "History_Match-a"]
+    assert listed["total"] == 2
+
+
 def call_handler(name: str, session: ToolSession, arguments: dict[str, Any]) -> Any:  # noqa: ANN401
     tool = TOOLS[name]
     return tool.handler(session, tool.arguments.model_validate(arguments))

@@ -54,7 +54,8 @@ Registry = Literal[
     "metrics", "stopping_rules", "forecast_scores", "optimizers", "objectives",
     "response_objectives", "step_rules", "figures", "figure_presets", "petro_elastic_models",
     "reflectivity", "avo_attributes", "displacement_kernels", "chop_components",
-    "converter_skills", "geomodeling_skills", "variogram_estimators",
+    "converter_skills", "geomodeling_skills", "variogram_estimators", "simulation_skills",
+    "surrogate_models",
 ]  # fmt: skip
 
 
@@ -198,6 +199,7 @@ class ListRuns(_Arguments):
     """Arguments of ``list_runs``."""
 
     annotations: dict[str, str] = Field(default_factory=dict, description="Only runs with these.")
+    name: str | None = Field(default=None, max_length=200, description="Part of the name.")
     limit: int = Field(default=50, ge=1, le=500, description="At most this many, newest first.")
     offset: int = Field(default=0, ge=0, description="Skip this many newest runs (next_offset).")
 
@@ -1118,6 +1120,7 @@ def _list_runs(session: ToolSession, args: ListRuns) -> Any:  # noqa: ANN401
             enumerate(_entries(session)), key=lambda p: (p[1].created, p[0]), reverse=True
         )
         if all(e.annotations.get(k) == v for k, v in args.annotations.items())
+        and (args.name is None or args.name.casefold() in e.name.casefold())
     ]
     # Newest first, and the page cut here to what fits a result: bound() would halve it
     # from the end, and a model then could not tell whether a newer run was cut (a
@@ -1165,7 +1168,7 @@ DESCRIPTIONS = {
     "compare_study": "Compare a study's methods and variants at each run's posterior.",
     "prediction_summary": "Get a finished prediction's statistics and scores.",
     "list_runs": "List runs, newest first (the first is the latest), optionally by "
-    "annotation; next_offset gives the next page. "
+    "annotation or name; next_offset gives the next page. "
     'Example: list_runs(annotations={"study": "loc"}).',
     "submit_optimization": "Run an optimization (e.g. maximise NPV) in the background. Needs "
     "the token from validate for the same file.",

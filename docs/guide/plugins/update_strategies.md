@@ -8,6 +8,8 @@ items:
   - cli:apex validate
   - config:history_match:method
   - plugin:damping_schemes:rlmmac
+  - plugin:gmac_norms:l2sq
+  - plugin:gmac_transforms:identity
   - plugin:localizations:adaptive
   - plugin:localizations:adaptive_per_update
   - plugin:localizations:distance
@@ -38,7 +40,7 @@ items:
 
 ## Goal
 
-This page shows how to choose and configure an update strategy, the `[method.strategy]` part of the `[method]` section of a run configuration (`history_match:method`). By the end you will be able to:
+This page shows how to choose and configure an update strategy, the `[method.strategy]` part of the `[method]` section of a run configuration. By the end you will be able to:
 
 - list the available plugins with `apex plugins`,
 - pick a strategy that your method accepts,
@@ -120,8 +122,8 @@ A method refuses a strategy it cannot run when the configuration is checked (`ap
 The reasons for a "no":
 
 - `full`, `subspace`, `subspace2` and `margis` include the prior-increment term of an iterative method (each member is pulled back towards its prior). ES-MDA's steps have no such term: each step updates the current ensemble. With `es` and `esmda`, use `approx`.
-- `rlmmac`, `local_rlmmac` and `gmac` need the forecast at the mean state, which only the methods built on the loop of `gies` make. `gn_enrml` runs at damping 0, which leaves them unregularised.
-- **Localized updates with `gies`:** choose `local_rlmmac`. `gies` refuses `local_analysis` and `adaptive_rows`. (`adaptive_rows` has no RLM-MAC variant; with `lm_enrml` it is accepted.)
+- `rlmmac`, `local_rlmmac` and `gmac` need the forecast at the mean state, which only the methods built on the loop of `gies` make (`gies` and `lm_enrml`). `es` and `esmda` do not make it, so they refuse these strategies. `gn_enrml` refuses them for a different reason: it runs at damping 0, and RLM-MAC needs a damping above 0 to regularise its step. With `gn_enrml`, use `approx`, `full`, `subspace`, `subspace2` or `margis`.
+- **Localized updates with `gies`:** choose `local_rlmmac`. `gies` refuses `local_analysis` and `adaptive_rows` (`adaptive_rows` has no RLM-MAC variant; with `lm_enrml` it is accepted).
 - The ERT strategies do not support damped updates, so `gies` and `lm_enrml` refuse them. Use them with `es`, `esmda` or `gn_enrml`.
 - `chop` needs the `rlmmac` strategy, because it tapers that strategy's gain per member.
 - `multilevel_esmda` runs only the `hybrid` update. Leave out `[method.strategy]`, or name `hybrid`. In turn, `hybrid` needs fidelity levels, which only `multilevel_esmda` defines (see the example below).
@@ -138,7 +140,12 @@ The reasons for a "no":
 uv run apex validate config.toml
 ```
 
-   Add `--json` to get the validation as JSON, or `--root` to set the services root (default: `$APEX_HOME`, else `~/.apex/service`).
+   Add `--json` to get the validation as JSON. `--root` sets the services root, the folder that holds your APEX service setup (including `service.toml`). The default is `$APEX_HOME`, else `~/.apex/service`; you only need `--root` if your services live elsewhere:
+
+```bash
+uv run apex validate config.toml --root /path/to/services
+```
+
 6. Start the run:
 
 ```bash
@@ -163,9 +170,23 @@ uv run apex resume path/to/run_dir
 
 ### Localization
 
-`approx`, `gmac`, `local_analysis`, `local_rlmmac` and `rlmmac` take a localization. Do not put it in the strategy's `options`: choose it in its own section, `[method.localization]`, and APEX passes it to the strategy. Localization plugins include `adaptive` (taper built once from the prior), `adaptive_per_update` (recomputed at every update) and `distance` (around well locations). Their `block_sizes` come from the state layout. With no `[method.localization]`, nothing is localized, except that `local_analysis`, `local_rlmmac` and `adaptive_rows` select data by prior correlation.
+`approx`, `gmac`, `local_analysis`, `local_rlmmac` and `rlmmac` take a localization. Do not put it in the strategy's `options`: choose it in its own section, `[method.localization]`, which has a `name` and optional `options`, and APEX passes it to the strategy. Localization plugins include `adaptive` (taper built once from the prior), `adaptive_per_update` (recomputed at every update) and `distance` (around well locations). Their `block_sizes` come from the state layout. With no `[method.localization]`, nothing is localized, except that `local_analysis`, `local_rlmmac` and `adaptive_rows` select data by prior correlation.
 
-`gmac` also receives `property_map` and `state_variables` from APEX; you do not set them.
+A localized `gies` run, with a soft taper and a fixed correlation cutoff of 0.3:
+
+```toml
+[method]
+name = "gies"
+
+[method.strategy]
+name = "local_rlmmac"
+
+[method.localization]
+name = "adaptive"
+options = { taper = "soft", threshold = "fixed", cutoff = 0.3 }
+```
+
+With `threshold = "fixed"`, `cutoff` is the threshold on the absolute correlation, in `(0, 1)`; by default it is `3/sqrt(N)` for `N` members. The localization plugins' own options are listed by `apex plugins`.
 
 ### Options
 
@@ -210,17 +231,20 @@ uv run apex resume path/to/run_dir
 
 **`gmac`**
 
-- `terms`: list of tables, unset by default. Each table has `transform = {name, options}`, `norm = {name, options}` and `weight`, which is `{rule = "trace", alpha = ...}` or `{rule = "fixed", value = ...}`.
-- `code`: string, unset by default. The paper's shorthand used instead of `terms`, for example `"10100"`. With neither `terms` nor `code`, the metric is one identity `l2sq` term (`code = "100"`), which is `rlmmac`.
-- `variables`: list of strings, unset by default (all variables). The variables that the TV and histogram terms of the code use.
+`gmac` replaces the single step metric of `rlmmac` by a sum of terms, each a transform of the state, a norm, and a weight. Use `terms` to write them out, or `code` as a shorthand.
+
+- `terms`: list of tables, unset by default. Each table has:
+  - `transform = {name, options}`: how the state is transformed before the norm is taken. `identity` is the ensemble-whitened state (the paper's I term).
+  - `norm = {name, options}`: the norm of the transformed state. `l2sq` is the squared L2 norm; its metric is the same for every member.
+  - `weight`: how strongly the term counts, either `{rule = "trace", alpha = ...}` or `{rule = "fixed", value = ...}`.
+- `code`: string, unset by default. A shorthand used instead of `terms`. With neither `terms` nor `code`, the metric is one identity `l2sq` term, which is `code = "100"` and gives the same update as `rlmmac`. Other codes are best read from the paper that introduced GMAC; if you are unsure, write `terms` explicitly.
+- `variables`: list of strings, unset by default (all variables). The variables that the total-variation and histogram terms of the code use.
 - `energy`: number, default `0.95`.
 - `form`: `"subspace"` (the paper's algorithm, default) or `"direct"` (`M_D + alpha M_j`, inverted whole).
 - `metric_floor`: number, default `1e-10`. Eigenvalues of the step metric below this fraction of the largest are dropped (subspace form).
 - `metric_energy`: number in `(0, 1)`, unset by default. Keeps only the eigenvalues up to the first whose cumulative share exceeds this fraction. When unset, it is 0.99 if no term is `identity`, and off otherwise.
-- `constraints`: list of tables, unset by default. Soft constraints (C-GIES): each has `function = {name, options}`, `metric = {name, options}` and `weight` (`{rule = "trace", w = ...}` or `{rule = "fixed", value = ...}`). The regularisation then defaults to the identity.
-- `localize_constraints`: true or false, default `true`. With a localization, the constraint terms are tapered too.
-
-The names inside `transform`, `norm`, `function` and `metric` come from registries that `apex plugins` lists in your installation. The simplest start is `code`, as in the example below.
+- `constraints`: list of tables, unset by default. Soft constraints on the model itself (C-GIES): each pulls the update towards satisfying an inequality or equality. Each table has `function = {name, options}` (the constraint, from the `gmac_constraints` registry), `metric = {name, options}` (from `gmac_constraint_metrics`; the default is `log_barrier` for inequalities and `log_channel` for equalities) and `weight` (`{rule = "trace", w = ...}` or `{rule = "fixed", value = ...}`). When you set `constraints`, the regularisation term defaults to the identity (`code = "100"`). `apex plugins` lists the registered function and metric names.
+- `localize_constraints`: true or false, default `true`. With a localization, the constraint terms are tapered too, each with its own taper. Set it to false to taper only the data terms.
 
 **`hybrid`**
 
@@ -314,7 +338,7 @@ name = "gies"
 name = "subspace2"
 ```
 
-`gmac` with the paper's shorthand:
+`gmac` with one explicit term: the identity transform, the `l2sq` norm and a fixed weight of 1. This is the same metric as the default, written out so you can add further terms next to it:
 
 ```toml
 [method]
@@ -322,7 +346,9 @@ name = "gies"
 
 [method.strategy]
 name = "gmac"
-options = { code = "10100", energy = 0.95, form = "subspace" }
+options = { energy = 0.95, form = "subspace", terms = [
+  { transform = { name = "identity", options = {} }, norm = { name = "l2sq", options = {} }, weight = { rule = "fixed", value = 1.0 } },
+] }
 ```
 
 `ert_localized` with its required `taper_file` (the path is a placeholder for your own `.npy` or `.npz` file):
@@ -336,7 +362,12 @@ name = "ert_localized"
 options = { taper_file = "path/to/taper.npy", truncation = 0.99 }
 ```
 
-`multilevel_esmda` defines the fidelity levels that `hybrid` needs. Levels are listed coarsest first; the `members` of all levels must add up to the ensemble size of your prior (here 100); the `weight`s are normalised to sum 1. Leaving out `[method.strategy]` gives `hybrid`:
+`multilevel_esmda` defines the fidelity levels that `hybrid` needs. Its options are:
+
+- `inflation`: the ES-MDA inflation factors, one per assimilation step. The values of `1 / alpha_i` must sum to 1, so `[2.0, 2.0]` means two steps.
+- `levels`: one table per level, coarsest first. `members` is the number of members of the level and `weight` its weight in the combined gain; the weights are normalised to sum 1. The `members` of all levels must add up to the ensemble size of your prior (here 100).
+
+Leaving out `[method.strategy]` gives `hybrid`:
 
 ```toml
 [method]
@@ -368,6 +399,7 @@ uv run apex validate config.toml
 - **Different defaults.** `energy` is `0.95` in `gmac`, `local_rlmmac` and `rlmmac`, and `0.98` elsewhere. The ERT strategies use `truncation` with `0.99`.
 - **Small ensembles and `threshold`.** The default `3 / sqrt(N)` is refused below ten members for `adaptive_rows` and `ert_adaptive`.
 - **`es` and `esmda` refuse `full`.** Use `approx` with them.
+- **`gn_enrml` refuses `rlmmac`, `local_rlmmac` and `gmac`.** It runs at damping 0; use `approx`, `full`, `subspace`, `subspace2` or `margis`.
 - **Localization with `gies`.** Use `local_rlmmac`; `local_analysis` and `adaptive_rows` are refused.
 - **Do not put `localization` among the strategy options.** Use `[method.localization]`.
 - **Two things called `rlmmac`.** `[method.strategy]` and `[method.damping]` with `name = "rlmmac"` have different options.

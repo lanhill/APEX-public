@@ -4,7 +4,7 @@ front ends (CLI, REST, the assistant's tool), on a whole linear-Gaussian run."""
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import pytest
 
@@ -164,10 +164,15 @@ def test_the_route_and_the_assistants_tool(tmp_path: Path, linear_case: CaseFact
 
 
 def _finished(run_dir: Path, timeout_s: float = 120.0) -> dict[str, object]:
-    """Wait for a background drawing to finish; return its summary."""
+    """Wait for a background drawing to finish and its process to end; return its summary.
+
+    The process ends after its summary: until then it holds the machine's slot, which a
+    next test's drawing may need (``done`` alone left it held, a flaky slot test).
+    """
+    import os
     import time
 
-    from apex.services.figures import drawing_state
+    from apex.services.figures import _try_lock, drawing_state
 
     output = run_dir / "report" / "plots"
     deadline = time.monotonic() + timeout_s
@@ -175,7 +180,10 @@ def _finished(run_dir: Path, timeout_s: float = 120.0) -> dict[str, object]:
         found = drawing_state(output)
         if found["state"] in ("done", "failed"):
             assert found["state"] == "done", found
-            return found
+            fd = _try_lock(output)
+            if fd is not None:  # the drawer has exited, its slot with it
+                os.close(fd)
+                return found
         time.sleep(0.2)
     raise AssertionError(f"the drawing did not finish: {drawing_state(output)}")
 
@@ -377,3 +385,146 @@ def test_a_failed_start_releases_the_runs_lock(
     fd = service_figures._try_lock(run_dir / "report" / "plots")
     assert fd is not None  # free again
     os.close(fd)
+
+
+def test_a_redraw_asked_while_a_drawing_runs_is_queued_and_drawn_after_it(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue (2026-10-31): a redraw asked while the run's first figures were drawn
+    was refused ("figures are being drawn") and never drawn. It now waits behind the
+    drawing, which draws it next; the assistant's figure_status lists what is written."""
+    import os
+    import subprocess
+    import sys
+
+    from apex.agents.chat import ChatAssistant
+    from apex.core.figures import FigureRequest
+    from apex.services.figures import (
+        DRAWER_LOCK,
+        QUEUED_PLAN,
+        _try_lock,
+        drawing_state,
+        queue_drawing,
+    )
+    from apex.storage.chat_store import ChatStore
+
+    run_dir = _run(linear_case)
+    output = run_dir / "report" / "plots"
+    output.mkdir(parents=True)
+    held = _try_lock(output)  # as a background drawer about to start holds them
+    drawer = _try_lock(output, DRAWER_LOCK)
+    assert held is not None
+    assert drawer is not None
+    (output / "summary.json").write_text('{"state": "drawing", "requests": 1}')
+
+    queued_at, queued = queue_drawing(
+        run_dir, [FigureRequest("metric_distribution", {"metric": "rmse"}, "rmse")],
+        dpi_scale=0.05,
+    )  # fmt: skip
+    assert (queued_at, queued) == (output.resolve(), True)
+    assert drawing_state(output) == {"state": "drawing", "queued": True}
+    assistant = ChatAssistant(ApexService(tmp_path / "service"), ChatStore(tmp_path / "chats"),
+                              None)  # fmt: skip
+    tools = {t.name: t for t in assistant.local_tools(isolate=False)}
+    status = tools["figure_status"].handler(tools["figure_status"].arguments(run=str(run_dir)))
+    assert (status["state"], status["queued"], status["files"]) == ("drawing", True, [])
+
+    # The drawer, as _spawn starts it: its plan names the lock it inherited.
+    plan = output / ".plot_plan_test.json"
+    plan.write_text(json.dumps({
+        "run": str(run_dir.resolve()), "output": str(output.resolve()), "dpi_scale": 0.05,
+        "requests": [{"figure": "objective_distribution", "options": {}, "subdir": "obj"}],
+        "lock_fd": held, "drawer_fd": drawer,  # no slot: the test takes none
+    }))  # fmt: skip
+    with (output / "plot.log").open("ab") as log:
+        process = subprocess.Popen([sys.executable, "-m", "apex.services.figures", str(plan)],
+                                   stdout=log, stderr=log, pass_fds=(held, drawer))  # fmt: skip
+    os.close(held)
+    os.close(drawer)
+    assert process.wait(timeout=300) == 0, (output / "plot.log").read_text()
+
+    summary = _finished(run_dir)
+    drawn = cast(list[dict[str, object]], summary["figures"])
+    assert [f["figure"] for f in drawn] == ["metric_distribution"]
+    assert not (output / QUEUED_PLAN).exists()
+    status = tools["figure_status"].handler(tools["figure_status"].arguments(run=str(run_dir)))
+    assert status["state"] == "done"
+    assert "obj/obj_func_boxplot.png" in status["files"]  # the first drawing's, kept
+    assert any(f.startswith("rmse/") for f in status["files"])  # and the queued one's
+    for name in ("plot.lock", DRAWER_LOCK):
+        fd = _try_lock(output, name)
+        assert fd is not None  # the drawer gave the folder back
+        os.close(fd)
+
+
+def test_a_redraw_is_not_queued_behind_a_drawing_that_never_reads_the_queue(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Review (2026-10-31): the foreground drawing (apex agent plot) and drawing_state's probe
+    hold the folder's lock but never read the queue; a request is refused, not lost."""
+    import os
+
+    from apex.core.errors import ConfigError
+    from apex.core.figures import FigureRequest
+    from apex.services.figures import QUEUED_PLAN, _try_lock, queue_drawing
+
+    run_dir = _run(linear_case)
+    output = run_dir / "report" / "plots"
+    output.mkdir(parents=True)
+    held = _try_lock(output)  # as the foreground draw() holds it
+    assert held is not None
+    try:
+        with pytest.raises(ConfigError, match="being drawn"):
+            queue_drawing(run_dir, [FigureRequest("objective_distribution")], dpi_scale=0.05)
+        assert not (output / QUEUED_PLAN).exists()
+    finally:
+        os.close(held)
+
+
+def test_a_queued_plan_left_by_a_killed_drawer_is_never_drawn(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Review (2026-10-31): with no drawer, a queued plan is stale; a new request starts at once."""
+    from apex.core.figures import FigureRequest
+    from apex.services.figures import QUEUED_PLAN, queue_drawing
+
+    run_dir = _run(linear_case)
+    output = run_dir / "report" / "plots"
+    output.mkdir(parents=True)
+    (output / QUEUED_PLAN).write_text('{"requests": []}')
+
+    _, queued = queue_drawing(run_dir, [FigureRequest("objective_distribution")], dpi_scale=0.05)
+
+    assert not queued
+    assert not (output / QUEUED_PLAN).exists()
+    assert _finished(run_dir)["written"] == 2
+
+
+def test_the_assistants_plot_run_queues_behind_a_drawing(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue (2026-10-31): the assistant's plot_run queues behind a drawing."""
+    import os
+
+    from apex.agents.chat import ChatAssistant
+    from apex.services.figures import DRAWER_LOCK, QUEUED_PLAN, _try_lock
+    from apex.storage.chat_store import ChatStore
+
+    run_dir = _run(linear_case)
+    output = run_dir / "report" / "plots"
+    output.mkdir(parents=True)
+    held = _try_lock(output)  # as a background drawer holds them
+    drawer = _try_lock(output, DRAWER_LOCK)
+    assert held is not None
+    assert drawer is not None
+    try:
+        assistant = ChatAssistant(ApexService(tmp_path / "service"),
+                                  ChatStore(tmp_path / "chats"), None)  # fmt: skip
+        tool = {t.name: t for t in assistant.local_tools(isolate=False)}["plot_run"]
+        answer = tool.handler(tool.arguments(run=str(run_dir), request="rmse"))
+        assert answer["state"].startswith("queued")
+        # Left in tmp_path: no drawer runs here to draw it.
+        assert (output / QUEUED_PLAN).is_file()
+    finally:
+        os.close(held)
+        os.close(drawer)

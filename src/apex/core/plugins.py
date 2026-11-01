@@ -1,7 +1,7 @@
 """Plugin registries: simulators, executors, priors, transforms, metrics, rules, scores, ....
 
-Also LLM providers, run summarizers, figures and figure presets, and the converter and
-geomodeling skills.
+Also LLM providers, run summarizers, figures and figure presets, the converter,
+geomodeling and simulation skills, and surrogate models.
 
 """
 
@@ -23,7 +23,9 @@ from apex.core.simulation import (
     PriorGenerator,
     Simulator,
 )
+from apex.core.simulation_skills import SimulationSkill
 from apex.core.summaries import Summarizer
+from apex.core.surrogates import SurrogateModel
 from apex.core.validation import StoppingRule
 
 #: Forward simulators by name (``"linear"``, ``"opm_flow"``, ...).
@@ -84,3 +86,11 @@ geomodeling_skills: Registry[GeomodelingSkill] = Registry("geomodeling_skills")
 
 #: Variogram estimators by name (``"wls"``): a variogram from hard data.
 variogram_estimators: Registry[VariogramEstimator] = Registry("variogram_estimators")
+
+#: Simulation skills by name: one per simulator and per technique (gridding, tuning, checks),
+#: registered by packages through the entry-point group ``apex.simulation_skills``.
+simulation_skills: Registry[SimulationSkill] = Registry("simulation_skills")
+
+#: Surrogate models by name: fitted models that stand in for a simulator stack,
+#: registered by packages through the entry-point group ``apex.surrogate_models``.
+surrogate_models: Registry[SurrogateModel] = Registry("surrogate_models")
