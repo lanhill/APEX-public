@@ -22,12 +22,18 @@ Optional capabilities, read with ``getattr`` as the simulators' are:
 - ``predict_fields`` (:class:`FieldSurrogate`): state fields at given times;
 - ``predict_std`` (:class:`UncertainSurrogate`): a predictive standard deviation, e.g. a
   Gaussian process's;
+- ``predict_corrected`` (:class:`CoarseCorrectedSurrogate`): a correction of a coarse
+  simulation's forecast, from the member's inputs and that forecast;
 - ``requires``, a ``tuple[str, ...]`` of simulator capabilities the plugin needs to be
   trained (the intrusive reduced models); none by default;
 - ``version``, a ``str`` recorded in the manifest.
 
 A plugin's options declare what their strings name (``core.options``), as every
 plugin's.
+
+Design plans are plugins of ``core.plugins.surrogate_designs`` (entry-point
+group ``apex.surrogate_designs``): core's own (:class:`BuiltinDesign`) and adaptive ones
+(:class:`AdaptiveDesign`) that choose runs from a fitted surrogate.
 """
 
 from collections.abc import Mapping, Sequence
@@ -120,4 +126,103 @@ class UncertainSurrogate(Protocol):
 
     def predict_std(self, inputs: SurrogateInputs, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Return the standard deviation at ``keys``, ``(len(keys), n_members)``, >= 0."""
+        ...
+
+
+class BuiltinDesign:
+    """Core's own design plans (``prior``, ``lhs``, ``file``, ``run``).
+
+    Registered in ``surrogate_designs`` under their names so that every plan is found in one
+    place; the build draws them in one go (``services.surrogates.draw_design``).
+    """
+
+    adaptive = False
+
+
+@runtime_checkable
+class AdaptiveDesign(Protocol):
+    """A design plan that chooses training runs where a fitted surrogate is uncertain.
+
+    The build draws the held-out runs and :meth:`initial_runs` training runs
+    from the prior, then a pool of :meth:`candidate_runs` prior draws; it runs the members,
+    fits the surrogate on the training runs so far and asks :meth:`choose` for the next batch
+    of :meth:`batch_runs` candidates, until ``[design] training`` runs are made. Choosing is
+    deterministic (no generator): equal inputs choose alike.
+
+    An optional ``uses``, a ``tuple[str, ...]`` of the surrogate's capabilities the plan
+    calls (e.g. ``("predict_std",)``; not ``requires``, which names a plugin's modules), lets
+    a build refuse an unsuitable surrogate before any run (read with ``getattr``).
+    """
+
+    adaptive: bool
+
+    def initial_runs(self, training: int) -> int:
+        """Return how many of the ``training`` runs are drawn before any choice (>= 2)."""
+        ...
+
+    def batch_runs(self) -> int:
+        """Return how many runs each choice adds (the last batch may be smaller)."""
+        ...
+
+    def candidate_runs(self) -> int:
+        """Return the size of the pool of prior draws the runs are chosen from."""
+        ...
+
+    def choose(
+        self,
+        model: SurrogateModel,
+        chosen: Mapping[str, NDArray[np.float64]],
+        candidates: Mapping[str, NDArray[np.float64]],
+        count: int,
+        *,
+        keys: Sequence[DataKey],
+        variances: NDArray[np.float64] | None,
+    ) -> list[int]:
+        """Return ``count`` distinct columns of ``candidates`` to run next.
+
+        Parameters
+        ----------
+        model
+            The surrogate fitted on the training runs so far.
+        chosen, candidates
+            The training runs so far and the candidates not chosen yet, as the surrogate's
+            inputs ``{variable: (size, n)}``.
+        keys
+            The model's keys.
+        variances
+            ``(len(keys),)``, the observation errors' variances (``None``: unknown).
+        """
+        ...
+
+
+@runtime_checkable
+class CoarseCorrectedSurrogate(Protocol):
+    """A surrogate that corrects a coarse simulation's forecast.
+
+    Its training runs carry a coarse stack's outputs at the same keys
+    (:attr:`~apex.domain.surrogate.SnapshotSet.coarse_outputs`); it predicts from a member's
+    inputs and its coarse forecast. Its :meth:`SurrogateModel.predict` refuses, naming the
+    coarse forecast it lacks. Core bounds its domain in both: the inputs' coordinates and
+    :meth:`coarse_coordinates`, the latter's residual as one more coordinate.
+    """
+
+    def coarse_coordinates(
+        self, coarse: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return the coarse forecast's coordinates ``(d_c, n)`` and residual ``(n,)``.
+
+        ``coarse`` is ``(n_keys, n)`` at the model's keys.
+        """
+        ...
+
+    def predict_corrected(
+        self,
+        inputs: Mapping[str, NDArray[np.float64]],
+        coarse: NDArray[np.float64],
+        keys: Sequence[DataKey],
+    ) -> NDArray[np.float64]:
+        """Return the corrected values at ``keys``, ``(len(keys), n)``; deterministic.
+
+        ``coarse`` ``(n_model_keys, n)``: the members' coarse forecasts at the model's keys.
+        """
         ...

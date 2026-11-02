@@ -33,12 +33,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError, WorkflowError
-from apex.core.simulation import Executor
+from apex.core.simulation import Executor, Simulator
 from apex.core.surrogates import SurrogateModel
 from apex.domain.config import SurrogateRunSection
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
     BuildCost,
+    CoarseSection,
     DomainExtent,
     FitRecord,
     GateResult,
@@ -132,6 +133,11 @@ class SurrogateForecasting:
     cost
         What the original's build's full runs cost (``None``: unknown), for the run's
         timing report.
+    coarse
+        A coarse-corrected model's coarse stack: takes a member's state, as the
+        run's simulator does, and runs on the run's executor before each surrogate forecast.
+    stored_coarse
+        The coarse stack as a refit's manifest in a given folder records it.
     """
 
     def __init__(
@@ -148,6 +154,8 @@ class SurrogateForecasting:
         snapshots: Callable[[], SnapshotSet] | None,
         cost: BuildCost | None = None,
         stored_options: Callable[[Path], dict[str, object]] | None = None,
+        coarse: Simulator | None = None,
+        stored_coarse: Callable[[Path], CoarseSection] | None = None,
     ) -> None:
         self.section = section
         self.original = original
@@ -161,6 +169,8 @@ class SurrogateForecasting:
         self.stored_options = stored_options
         self.snapshots = snapshots
         self.cost = cost
+        self.coarse = coarse
+        self.stored_coarse = stored_coarse
         # Loop state, checkpointed (state.json "surrogate").
         self.refits: list[dict[str, Any]] = []
         self.checks: list[dict[str, Any]] = []
@@ -169,6 +179,8 @@ class SurrogateForecasting:
         self.rescores: list[dict[str, Any]] = []
         self.evaluations = 0
         self.simulator_runs = 0
+        # A coarse-corrected model's coarse runs: simulator runs of their own.
+        self.coarse_runs = 0
         self.switched_at: int | None = None
 
     # ------------------------------------------------------------------ decisions
@@ -236,6 +248,7 @@ class SurrogateForecasting:
         member_ids: Sequence[int],
         rng: np.random.Generator,
         run_path: Path,
+        coarse_outputs: NDArray[np.float64] | None = None,
     ) -> GateResult:
         """Refit with the checked runs added; make the refit the active model if it passes.
 
@@ -249,6 +262,8 @@ class SurrogateForecasting:
             ``(n,)``, the members (recorded; the runs get new ids in the snapshot set).
         rng
             The run's stream ``surrogate``: the split of the new runs, then the fit.
+        coarse_outputs
+            ``(n_model_keys, n)``: their coarse stack's runs, for a coarse-corrected model.
 
         Returns the refit's gate. The refit is written whether or not it passes.
 
@@ -259,6 +274,11 @@ class SurrogateForecasting:
         """
         base, held = self._base()
         n = outputs.shape[1]
+        if (base.coarse_outputs is None) != (coarse_outputs is None):
+            raise WorkflowError(
+                "a coarse-corrected surrogate is refitted with the checked members' coarse "
+                "runs, and only such a surrogate"
+            )
         order = rng.permutation(n)
         n_held = 0 if n < 2 else min(n - 1, max(1, round(self.section.refit_held_out * n)))
         first = max(base.run_ids) + 1
@@ -274,6 +294,9 @@ class SurrogateForecasting:
             run_ids=(*base.run_ids, *new_ids),
             provenance=base.provenance,
             failed=base.failed,
+            coarse_outputs=None
+            if base.coarse_outputs is None or coarse_outputs is None
+            else np.concatenate([base.coarse_outputs, coarse_outputs], axis=1),
         )
         held_ids = set(held) | {new_ids[int(j)] for j in order[:n_held]}
         held_positions = [p for p, r in enumerate(combined.run_ids) if r in held_ids]
@@ -312,6 +335,11 @@ class SurrogateForecasting:
             snapshots=SnapshotReference(path=f"../{SNAPSHOTS}", digest=combined.digest()),
             fit=FitRecord(stream_state=fitted.stream_state),
             apex_commit=manifest.apex_commit,
+            coarse=(
+                manifest.coarse
+                if self.stored_coarse is None
+                else self.stored_coarse(model_file.parent)
+            ),
         )
         SurrogateDirectory(folder).write_json(
             "runs.json",
@@ -351,6 +379,7 @@ class SurrogateForecasting:
             "evaluations": self.evaluations,
             "simulator_runs": self.simulator_runs,
             "switched_at": self.switched_at,
+            **({"coarse_runs": self.coarse_runs} if self.coarse is not None else {}),
         }
 
     def restore(self, saved: Mapping[str, Any] | None, run_path: Path) -> None:
@@ -379,6 +408,7 @@ class SurrogateForecasting:
         self.rescores = [dict(r) for r in saved.get("rescores", [])]
         self.evaluations = int(saved.get("evaluations", 0))
         self.simulator_runs = int(saved.get("simulator_runs", 0))
+        self.coarse_runs = int(saved.get("coarse_runs", 0))
         switched = saved.get("switched_at")
         self.switched_at = None if switched is None else int(switched)
         if self.refits:
@@ -401,11 +431,15 @@ class SurrogateForecasting:
             "max_evaluations": self.section.max_evaluations,
             "switched_to_simulator_at": self.switched_at,
             "tolerances": self.tolerances.model_dump(mode="json"),
+            **({"coarse_runs": self.coarse_runs} if self.coarse is not None else {}),
         }
 
 
 #: The ``forecast_done`` label of the surrogate's forecasts; every other one is the simulator's.
 SURROGATE_LABEL = "surrogate"
+
+#: The end of the ``forecast_done`` labels of a coarse-corrected model's coarse runs.
+COARSE_LABEL = "(coarse)"
 
 
 def _side(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -438,7 +472,8 @@ def forecast_timing(events: Iterable[Mapping[str, Any]], cost: BuildCost | None)
     events
         The run's structured events (``events.jsonl``, every session of it): the
         ``forecast_done`` ones are used, ``label = "surrogate"`` for the surrogate's,
-        every other label the simulator's (checks, members outside the domain, the
+        labels ending ``(coarse)`` for a coarse-corrected model's coarse runs, every
+        other label the simulator's (checks, members outside the domain, the
         posterior's forecast, a switch to the simulator).
     cost
         The build's full runs (``None``: unknown, and no speed-up is given).
@@ -446,30 +481,41 @@ def forecast_timing(events: Iterable[Mapping[str, Any]], cost: BuildCost | None)
     Returns
     -------
     dict
-        ``surrogate`` and ``simulator``: forecasts, members, wall ``seconds`` and per member,
+        ``surrogate``, ``simulator`` and ``coarse`` (the coarse runs, part of each corrected
+        prediction's cost): forecasts, members, wall ``seconds`` and per member,
         ``worker_seconds`` (wall times members at once) and per member; ``full_model``: the
         build's cost; ``speedup``: the full model's mean run time over the surrogate's
-        worker-seconds per member; ``simulator_equivalent_worker_seconds``: what the
-        surrogate's members would have taken as full runs (the build's mean each), against
-        ``run_worker_seconds`` (the surrogate's and the simulator's), the build's
-        ``total_seconds`` a one-off cost beside them. Times are measured, not part of
+        worker-seconds per member (with its coarse run's, for a coarse-corrected model);
+        ``simulator_equivalent_worker_seconds``: what the surrogate's members would have
+        taken as full runs (the build's mean each), against ``run_worker_seconds`` (the
+        surrogate's, the coarse runs' and the simulator's), the build's ``total_seconds`` a
+        one-off cost beside them. Times are measured, not part of
         the run's results (never checkpointed).
     """
     done = [e for e in events if e.get("event") == "forecast_done"]
     surrogate = _side([e for e in done if e.get("label") == SURROGATE_LABEL])
-    simulator = _side([e for e in done if e.get("label") != SURROGATE_LABEL])
+    coarse = _side([e for e in done if str(e.get("label", "")).endswith(COARSE_LABEL)])
+    simulator = _side([
+        e for e in done
+        if e.get("label") != SURROGATE_LABEL and not str(e.get("label", "")).endswith(COARSE_LABEL)
+    ])  # fmt: skip
     per_member = surrogate["worker_seconds_per_member"]
+    if per_member is not None and coarse["members"]:
+        # Each corrected prediction costs its coarse run too.
+        coarse_each = coarse["worker_seconds_per_member"]
+        per_member = None if coarse_each is None else per_member + coarse_each
     mean = None if cost is None else cost.mean_seconds
-    both = (surrogate["worker_seconds"], simulator["worker_seconds"])
+    both = (surrogate["worker_seconds"], simulator["worker_seconds"], coarse["worker_seconds"])
     return {
         "surrogate": surrogate,
         "simulator": simulator,
+        "coarse": coarse,
         "full_model": None if cost is None else cost.model_dump(mode="json"),
         "speedup": mean / per_member if mean is not None and per_member else None,
         "simulator_equivalent_worker_seconds": (
             None if mean is None else surrogate["members"] * mean
         ),
-        "run_seconds": surrogate["seconds"] + simulator["seconds"],
+        "run_seconds": surrogate["seconds"] + simulator["seconds"] + coarse["seconds"],
         "run_worker_seconds": None if None in both else float(sum(both)),
     }
 

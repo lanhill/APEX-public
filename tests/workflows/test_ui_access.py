@@ -865,7 +865,7 @@ def test_web_ui_users_choose_no_programs_arguments_or_undeclared_options(
         ("output", "output_dir", "/anywhere"),  # the server places a UI user's runs
         ("output", "priors.ert_forward_init: work_dir", "/anywhere"),
     ]
-    monkeypatch.setattr(policy, "named", lambda config: named)
+    monkeypatch.setattr(policy, "named", lambda config, follow=None: named)
     rules = UIAccess.model_validate({"programs": {"executables": ["flow"]}})
     places = _Places({str(tmp_path / "ok.npz"): "folder"})
     refused = Access(rules, []).refused_names(object(), places)  # type: ignore[arg-type]
@@ -906,7 +906,7 @@ def test_a_template_is_never_text_web_ui_users_write(monkeypatch: pytest.MonkeyP
     }  # fmt: skip
     named = [("code", "simulators.opm_flow: deck_template_file", p) for p in places]
     named.append(("input", "observations.file", "/w/UI/g/runs/r/config.json"))
-    monkeypatch.setattr(policy, "named", lambda config: named)
+    monkeypatch.setattr(policy, "named", lambda config, follow=None: named)
     refused = Access(UIAccess(), []).refused_names(object(), _Places(places))  # type: ignore[arg-type]
     assert [r.split(" = ")[1].split("'")[1] for r in refused] == [
         "/w/alpha/x.toml", "/w/UI/g/drafts/c/report.md", "/w/UI/g/notes.mako",
@@ -985,7 +985,7 @@ def test_the_owners_web_ui_view_names_any_file_or_program(
     named = [("executable", "simulators.opm_flow: executable", "/opt/flow"),
              ("arguments", "simulators.opm_flow: flow_args", "--threads=8"),
              ("input", "observations.file", "/anywhere/obs.csv")]  # fmt: skip
-    monkeypatch.setattr(policy, "named", lambda config: named)
+    monkeypatch.setattr(policy, "named", lambda config, follow=None: named)
     assert OwnerView([]).refused_names(object(), _Places({})) == []  # type: ignore[arg-type]
 
 

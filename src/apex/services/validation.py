@@ -18,7 +18,7 @@ from apex.domain.services import RunPlan, Validation
 from apex.execution.resources import ECLIPSE_LICENCES
 from apex.services import composition
 from apex.services.identity import run_id
-from apex.services.plugins import check_options, plugin_sections
+from apex.services.plugins import check_options, plugin_sections, unavailable_errors
 
 
 def case_key(config: HistoryMatchConfig) -> str:
@@ -51,6 +51,7 @@ def _stored_members(path: Path) -> int | None:
 def _plugin_errors(config: HistoryMatchConfig) -> list[str]:
     errors: list[str] = []
     for registry, section in plugin_sections(config):
+        errors += unavailable_errors(registry, section.name)
         errors += check_options(registry, section.name, section.options)
     return errors
 
@@ -150,6 +151,14 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
         runs, notes = surrogates.planned_simulator_runs(config.surrogate, ensemble, members)
         warnings += notes
         forecasting = run.workflow.surrogate
+        if forecasting is not None and forecasting.coarse is not None:
+            # Every surrogate evaluation runs its member's coarse stack first.
+            if runs is not None and evaluations is not None:
+                runs += evaluations
+            warnings.append(
+                "the surrogate corrects a coarse simulation: each of its evaluations is also "
+                "a run of the coarse stack, counted with the simulator runs"
+            )
         if forecasting is not None:
             original = forecasting.original
             surrogate = f"{original.manifest.plugin} {original.identity[:12]}"

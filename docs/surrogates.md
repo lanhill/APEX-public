@@ -90,6 +90,53 @@ Using a surrogate in optimization or predictions comes later. A model is only ev
 
 With `[[parameterizations]]` the design is drawn in state space; the surrogate's inputs are the properties the simulator reads.
 
+Design plans are plugins of the registry `surrogate_designs` (entry-point group `apex.surrogate_designs`). The four above are core's own. Packages may add adaptive plans, which choose training runs from a fitted surrogate; such a plan takes its settings from `[design] options`.
+
+An adaptive build runs in rounds:
+1. The held-out runs and the plan's initial training runs are drawn from the prior. The held-out runs are drawn first and fixed by the seed, so the gate stays an unbiased test.
+2. A pool of candidate prior draws is drawn.
+3. The build runs the members, fits the surrogate on the training runs so far, and runs the batch of candidates the plan chooses. This repeats until `training` runs are made.
+4. The build then fits and gates the model as any other.
+
+The batches chosen are recorded, so an interrupted build resumes to the same choices and byte-identical model files. Because the surrogate chose the runs, an adaptive build's runs depend on its plugin and options. Changing them is refused in the same build directory, where a core plan would refit on the runs already made.
+
+## A coarse stack
+
+Some surrogates correct a coarse simulation of each member instead of predicting from the inputs alone. Their builds name a coarse stack in `[coarse]`:
+
+```toml
+[coarse]
+options = { deck_template_file = "coarse/deck.mako" }   # merged over the case's simulator options
+
+[[coarse.parameterizations]]
+name = "block_average"
+options = { dims = [50, 50, 1], factors = [2, 2, 1], means = { poro = "arithmetic", permx = "arithmetic" } }
+```
+
+- **The coarse stack** is the case's, with `simulator` (default: the case's) and `options` merged over the case's simulator options. Its `parameterizations` are applied after the case's.
+- **`block_average`** averages fields over blocks of `factors` cells onto the coarser grid. Each variable takes its own mean:
+  - `arithmetic` for porosity, and for ln k, which gives k's geometric mean;
+  - `geometric` or `harmonic` for positive variables.
+- **Every design run** also runs on the coarse stack, in the build's `coarse/` folder, so a build makes twice the simulator runs. The snapshots keep both stacks' outputs.
+- **The gate** judges the corrected prediction. The validated domain bounds the coarse forecast's coordinates as well as the inputs'.
+- **The coarse stack's provenance** joins the model's, and `[coarse]` joins the build's fingerprint.
+- **The model's manifest names its coarse stack,** with its file options relative to the model's folder. History matching and `apex surrogate check` rebuild the stack from there over the case. They refuse it if it is not the stack the model was built with.
+- **In history matching,** each surrogate forecast first runs every member on the coarse stack:
+  - the runs use the run's own executor, so pools, licences, retries and `keep_simulations` apply as for the simulator's runs;
+  - they go in `simulations/coarse_<iteration>/`;
+  - then the domain check and the corrected prediction follow.
+- **A member whose coarse run fails** is a failed member, counted against `min_success_fraction`.
+- **Counting:**
+  - `apex validate` counts one coarse run per surrogate evaluation among the simulator runs;
+  - the run's summary reports `coarse_runs`;
+  - the timing reports the coarse runs apart (`coarse`), and adds their cost to each corrected prediction's.
+- **A refit** pairs the checked runs with their coarse runs, made once.
+- **`apex surrogate check`** runs each member on both stacks, in the check's folder and `coarse/` in it, and gates the corrected prediction.
+- **Under a `[policy]`,** the files the manifest's coarse stack names are checked as the case's own simulator's are.
+- **Not yet supported:**
+  - a coarse stack with an adaptive or `run` design;
+  - reusing a forecast's coarse runs after a resume: they are made again, with the same results.
+
 ## The gate
 
 - With `outputs = "observations"`, per datatype the RMS over the held-out runs and keys of `(surrogate − simulator) / σ` must be at most `sigma_ratio` (0.5 by default), σ being the observation error's standard deviation. The surrogate's error must lie well inside the data noise the methods assume.

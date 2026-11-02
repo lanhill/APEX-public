@@ -21,6 +21,13 @@ learned residual: the executors run it as any simulator, one member at a time.
   refusing files of another identity: process executors ship it cheaply, and a changed file
   is never used.
 
+- **A coarse-corrected model** (``core.surrogates.CoarseCorrectedSurrogate``)
+  predicts from each member's coarse forecast too. The run makes those first, as a forecast
+  of its own on its executor (the user's choice, 2026-11-02: the domain check needs them, and
+  the run's executor gives the coarse runs its pools, licences, retries and pruning), and
+  hands them over with :meth:`SurrogateSimulator.with_coarse`; the simulator itself still
+  writes no files.
+
 ``predict`` is deterministic (the protocol's rule), so serial and process executors give
 equal forecasts.
 """
@@ -32,7 +39,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.core.simulation import MemberInput
-from apex.core.surrogates import SurrogateInputs, SurrogateModel
+from apex.core.surrogates import CoarseCorrectedSurrogate, SurrogateInputs, SurrogateModel
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import TrainingDomain
 
@@ -40,9 +47,19 @@ from apex.domain.surrogate import TrainingDomain
 SurrogateLoader = Callable[[], tuple[SurrogateModel, TrainingDomain]]
 
 #: Raises ``SurrogateDomainError`` for members, keys or times outside a model's domain:
-#: ``(domain, model, inputs {variable: (size, n)}, member_ids, keys) -> None``.
+#: ``(domain, model, inputs {variable: (size, n)}, member_ids, keys, coarse) -> None``, with
+#: ``coarse`` the members' coarse forecasts ``(n_model_keys, n)`` for a coarse-corrected model
+#: (``None`` otherwise).
 DomainGuard = Callable[
-    [TrainingDomain, SurrogateModel, SurrogateInputs, Sequence[int], Sequence[DataKey]], None
+    [
+        TrainingDomain,
+        SurrogateModel,
+        SurrogateInputs,
+        Sequence[int],
+        Sequence[DataKey],
+        NDArray[np.float64] | None,
+    ],
+    None,
 ]
 
 
@@ -84,6 +101,24 @@ class SurrogateSimulator:
         self.threads = threads
         self._model = model
         self._domain = domain
+        #: A coarse-corrected model's coarse forecasts by member, ``(n_model_keys,)`` each.
+        self.coarse: dict[int, NDArray[np.float64]] = {}
+
+    def with_coarse(self, coarse: Mapping[int, NDArray[np.float64]]) -> "SurrogateSimulator":
+        """Return a copy that predicts with the members' coarse forecasts.
+
+        ``coarse``: ``{member_id: (n_model_keys,)}``, the coarse stack's runs at the model's
+        keys. The copy shares the loaded model and pickles the forecasts with its reference.
+        """
+        copy = SurrogateSimulator(
+            self._model, self._domain, identity=self.identity, loader=self.loader,
+            guard=self.guard, threads=self.threads,
+        )  # fmt: skip
+        copy.coarse = {
+            int(m): np.ascontiguousarray(np.asarray(v, dtype=np.float64).reshape(-1))
+            for m, v in coarse.items()
+        }
+        return copy
 
     @property
     def resources(self) -> Mapping[str, int]:
@@ -97,6 +132,7 @@ class SurrogateSimulator:
             "loader": self.loader,
             "guard": self.guard,
             "threads": self.threads,
+            "coarse": self.coarse,
         }
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
@@ -105,6 +141,7 @@ class SurrogateSimulator:
         self.loader = state["loader"]
         self.guard = state["guard"]
         self.threads = int(state["threads"])
+        self.coarse = dict(state.get("coarse", {}))
         self._model = None
         self._domain = None
 
@@ -121,12 +158,24 @@ class SurrogateSimulator:
         ------
         SurrogateDomainError
             If the member, a key or a key's time lies outside the model's validated domain.
+        ValueError
+            If a coarse-corrected model was given no coarse forecast of the member.
         """
         model, domain = self.fitted()
         inputs = {
             name: np.ascontiguousarray(np.asarray(value, dtype=np.float64).reshape(-1, 1))
             for name, value in member.state.items()
         }
-        self.guard(domain, model, inputs, (member.member_id,), keys)
-        predicted = np.asarray(model.predict(inputs, keys), dtype=np.float64)
+        if not isinstance(model, CoarseCorrectedSurrogate):
+            self.guard(domain, model, inputs, (member.member_id,), keys, None)
+            predicted = np.asarray(model.predict(inputs, keys), dtype=np.float64)
+            return np.ascontiguousarray(predicted.reshape(-1))
+        if member.member_id not in self.coarse:
+            raise ValueError(
+                f"member {member.member_id}: a coarse-corrected surrogate needs the member's "
+                "coarse forecast (with_coarse), which the run makes first"
+            )
+        coarse = np.ascontiguousarray(self.coarse[member.member_id].reshape(-1, 1))
+        self.guard(domain, model, inputs, (member.member_id,), keys, coarse)
+        predicted = np.asarray(model.predict_corrected(inputs, coarse, keys), dtype=np.float64)
         return np.ascontiguousarray(predicted.reshape(-1))

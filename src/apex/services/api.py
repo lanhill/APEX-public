@@ -944,9 +944,26 @@ class ApexService:
     ) -> Validation:
         """Validate an optimization configuration and plan its cost; nothing is evaluated."""
         from apex.services import optimization as opt
+        from apex.services.plugins import unavailable_errors
 
         try:
             resolved = self.resolve_optimization(config, base_dir)
+        except (ApexError, ValueError, TypeError) as error:
+            return Validation(valid=False, errors=[str(error)])
+        # A plugin whose extra is not installed is refused here, not at its first use
+        # (#268: the ropt optimizer without the ert extra, as ert_adaptive in a study).
+        used = [("optimizers", resolved.optimizer.name), ("executors", resolved.execution.name)]
+        used += [("parameterizations", p.name) for p in resolved.parameterizations]
+        if resolved.simulator is not None:
+            used.append(("simulators", resolved.simulator.name))
+        for name in [resolved.objective.name] if resolved.objective is not None else []:
+            used += [("objectives", name), ("response_objectives", name)]
+        for entry in resolved.objectives:
+            used += [("objectives", entry.name), ("response_objectives", entry.name)]
+        missing = [e for registry, name in used for e in unavailable_errors(registry, name)]
+        if missing:
+            return Validation(valid=False, errors=missing)
+        try:
             plan = opt.plan_optimization(resolved)
         except (ApexError, ValueError, TypeError) as error:
             return Validation(valid=False, errors=[str(error)])

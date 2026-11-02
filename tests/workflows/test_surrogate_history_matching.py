@@ -19,7 +19,7 @@ checks, and each of ``stop``, ``refit`` and ``simulator`` behaves as §5 says.
 import importlib.util
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -1022,3 +1022,240 @@ def test_a_models_file_options_are_relative_to_the_model(tmp_path: Path) -> None
         assert (refit / option).resolve() == (moved / "data" / "scale.txt").resolve()
     finally:
         surrogate_models.remove("test_affine_file")
+
+
+# ------------------------------------------------------------- coarse-corrected
+
+COARSE_PLUGIN = "test_coarse_affine_hm"
+
+
+@pytest.fixture
+def coarse_built(tmp_path: Path) -> Iterator[Path]:
+    """Build the exact coarse-corrected surrogate of the case; return its manifest."""
+    surrogate_models.register(COARSE_PLUGIN)(cases.CoarseAffine)
+    try:
+        cases.write_case(tmp_path, name="base")
+        extra = cases.write_coarse(tmp_path)
+        result = surrogates.build(
+            cases.write_build(tmp_path, COARSE_PLUGIN, case="base.toml", name="cc", extra=extra)
+        )
+        assert result.summary.gate is not None
+        assert result.summary.gate.passed
+        yield tmp_path / "runs" / "cc" / "model" / "surrogate.json"
+    finally:
+        surrogate_models.remove(COARSE_PLUGIN)
+
+
+def _coarse_biased(model: Path) -> Path:
+    """The exact coarse-corrected model with every intercept shifted by ``BIAS`` sigma."""
+    stored = read_surrogate(model)
+    fitted = cases.CoarseAffine.from_arrays(stored.manifest.model, stored.arrays)
+    fitted.slope = fitted.slope.copy()
+    fitted.slope[:, 1] += BIAS * np.sqrt(cases.VARIANCE)
+    target = model.parent.parent / "model_biased" / "surrogate.json"
+    manifest = stored.manifest
+    write_surrogate(
+        target, plugin=manifest.plugin, model=fitted, domain=manifest.training_domain(),
+        provenance=manifest.provenance, options=manifest.options, gate=manifest.gate,
+        snapshots=manifest.snapshots, fit=manifest.fit, apex_commit=manifest.apex_commit,
+        coarse=surrogates.coarse_relative_to(
+            surrogates.coarse_resolved_in(manifest.coarse, model.parent), target.parent
+        ) if manifest.coarse is not None else None,
+    )  # fmt: skip
+    return target
+
+
+def test_a_coarse_corrected_surrogate_runs_its_coarse_stack_first(
+    tmp_path: Path, coarse_built: Path
+) -> None:
+    """Every surrogate forecast is preceded by the members' coarse runs
+    on the run's executor; an exact correction gives the plain run's posterior to round-off,
+    and the coarse runs are counted, planned and timed apart."""
+    manifest = read_surrogate(coarse_built).manifest
+    assert manifest.coarse is not None
+    assert manifest.coarse.options["forward_file"] == "../../../coarse.npz"  # relative
+    config = cases.write_case(
+        tmp_path, name="hm", surrogate=_section(coarse_built, check_members=5)
+    )
+    plan = validate_history_match(config).plan
+    assert plan is not None
+    assert plan.max_simulator_runs == 1 * 5 + 100 + 5 * 100  # checks, posterior, coarse
+    result = composition.start(config)
+    plain = composition.start(cases.write_case(tmp_path, name="plain"))
+    np.testing.assert_allclose(result.posterior, plain.posterior, rtol=0, atol=ROUND_OFF)
+    run = _run(tmp_path, "hm")
+    report = json.loads((run / "summary.json").read_text())["surrogate"]
+    assert report["coarse_runs"] == report["evaluations"] == 5 * 100
+    coarse_done = [e for e in _named(run, "forecast_done") if e["label"].endswith("(coarse)")]
+    assert len(coarse_done) == 5
+    timing = surrogates_timing(run)
+    assert timing["coarse"]["members"] == 5 * 100
+    assert timing["simulator"]["members"] == 1 * 5 + 100
+
+
+def surrogates_timing(run: Path) -> dict[str, Any]:
+    from apex.workflows.surrogate_forecasts import forecast_timing
+
+    return forecast_timing(_events(run), None)
+
+
+def test_a_coarse_corrected_refit_keeps_the_checked_members_coarse_runs(
+    tmp_path: Path, coarse_built: Path
+) -> None:
+    """A refit's snapshot set pairs the checked runs with their coarse runs, made once."""
+    biased = _coarse_biased(coarse_built)
+    config = cases.write_case(
+        tmp_path, name="hm",
+        surrogate=_section(biased, check_every=1, check_members=6, on_check_failure="refit"),
+    )  # fmt: skip
+    composition.start(config)
+    run = _run(tmp_path, "hm")
+    [refit] = _named(run, "surrogate_refit")
+    assert refit["passed"]
+    folder = run / "surrogates" / "refit_1"
+    snapshots = load_snapshots(folder / "snapshots.npz")
+    assert snapshots.coarse_outputs is not None
+    assert snapshots.coarse_outputs.shape == snapshots.outputs.shape == (16, 40 + 6)
+    stored = read_surrogate(folder / "model" / "surrogate.json")
+    assert stored.manifest.coarse is not None
+    resolved = surrogates.coarse_resolved_in(stored.manifest.coarse, folder / "model")
+    assert Path(str(resolved.options["forward_file"])) == (tmp_path / "coarse.npz").resolve()
+    report = json.loads((run / "summary.json").read_text())["surrogate"]
+    # The repeated forecast reuses the iteration's coarse runs: one per evaluation, less 100.
+    assert report["coarse_runs"] == report["evaluations"] - 100
+
+
+def test_resume_is_bit_identical_with_a_coarse_stack(tmp_path: Path, coarse_built: Path) -> None:
+    section = _section(coarse_built, check_every=1, check_members=6)
+    whole = cases.write_case(tmp_path / "whole", name="hm", method=cases.GIES, surrogate=section)
+    composition.start(whole)
+    parts = cases.write_case(tmp_path / "parts", name="hm", method=cases.GIES, surrogate=section)
+    composition.start(parts, max_steps=1)
+    for _ in range(10):
+        if json.loads((_run(tmp_path / "parts", "hm") / "summary.json").read_text())["complete"]:
+            break
+        composition.resume(_run(tmp_path / "parts", "hm"), max_steps=1)
+    a, b = _run(tmp_path / "whole", "hm"), _run(tmp_path / "parts", "hm")
+    files = sorted(p.name for p in (a / "checkpoints").glob("*.npz"))
+    assert files == sorted(p.name for p in (b / "checkpoints").glob("*.npz"))
+    for name in files:
+        with np.load(a / "checkpoints" / name) as left, np.load(b / "checkpoints" / name) as right:
+            for key in left.files:
+                np.testing.assert_array_equal(left[key], right[key], err_msg=f"{name}:{key}")
+    state_a, state_b = RunDirectory(a).read_state(), RunDirectory(b).read_state()
+    assert state_a["surrogate"]["evaluations"] == state_b["surrogate"]["evaluations"]
+
+
+def test_a_model_of_another_coarse_stack_is_refused(tmp_path: Path, coarse_built: Path) -> None:
+    config = cases.write_case(tmp_path, name="hm", surrogate=_section(coarse_built))
+    np.savez(tmp_path / "coarse.npz", matrix=3 * cases.forward_matrix())
+    found = validate_history_match(config)
+    assert not found.valid
+    assert "another coarse stack" in found.errors[0]
+    assert "options_digest" in found.errors[0]
+
+
+def test_a_coarse_corrected_model_without_its_stack_is_refused(
+    tmp_path: Path, coarse_built: Path
+) -> None:
+    """Models written before step 2 record no coarse stack: refused, with the remedy."""
+    stored = read_surrogate(coarse_built)
+    manifest = stored.manifest
+    target = coarse_built.parent.parent / "model_bare" / "surrogate.json"
+    model = cases.CoarseAffine.from_arrays(manifest.model, stored.arrays)
+    write_surrogate(
+        target, plugin=manifest.plugin, model=model, domain=manifest.training_domain(),
+        provenance=manifest.provenance, options=manifest.options, gate=manifest.gate,
+    )  # fmt: skip
+    found = validate_history_match(
+        cases.write_case(tmp_path, name="hm", surrogate=_section(target))
+    )
+    assert not found.valid
+    assert "records no coarse stack" in found.errors[0]
+
+
+def test_a_policy_checks_the_coarse_stack_a_manifest_names(
+    tmp_path: Path, coarse_built: Path
+) -> None:
+    """Under a [policy] the manifest's coarse stack is checked as the case's
+    own simulator is: its files inside the roots."""
+    from apex.domain.surrogate import CoarseSection
+    from apex.services import policy
+    from apex.services.settings import PolicySection
+
+    roots = [str(tmp_path)]
+    rules = PolicySection(input_roots=roots, code_roots=roots, output_roots=roots)
+    config = composition.load_config(
+        cases.write_case(tmp_path, name="hm", surrogate=_section(coarse_built))
+    )
+    assert policy.violations(config, rules, tmp_path / "root") == []
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-elsewhere" / "coarse.npz"
+    stored = read_surrogate(coarse_built)
+    manifest = stored.manifest
+    target = coarse_built.parent.parent / "model_stray" / "surrogate.json"
+    write_surrogate(
+        target, plugin=manifest.plugin,
+        model=cases.CoarseAffine.from_arrays(manifest.model, stored.arrays),
+        domain=manifest.training_domain(), provenance=manifest.provenance,
+        options=manifest.options, gate=manifest.gate,
+        coarse=surrogates.coarse_relative_to(
+            CoarseSection(options={"forward_file": str(elsewhere)}), target.parent
+        ),
+    )  # fmt: skip
+    stray = composition.load_config(
+        cases.write_case(tmp_path, name="stray", surrogate=_section(target))
+    )
+    problems = policy.violations(stray, rules, tmp_path / "root")
+    assert any("coarse stack" in p and "input_roots" in p for p in problems), problems
+
+    # Every confinement (the policy, tool sessions, web-UI users) sees the stack through
+    # named(), only when its own rule lets it read the manifest.
+    def coarse_keys(follow: Callable[[str], bool] | None) -> list[str]:
+        return [
+            k for _, k, _ in policy.named(stray, follow=follow) if k.startswith(policy.COARSE_STACK)
+        ]
+
+    assert coarse_keys(None) == []
+    assert coarse_keys(lambda path: False) == []
+    assert coarse_keys(lambda path: True) == [
+        f"{policy.COARSE_STACK}simulators.linear: forward_file"
+    ]
+
+
+def test_coarse_failures_members_outside_and_retention_stay_aligned(tmp_path: Path) -> None:
+    """A member whose coarse run fails is the simulator's failed member; members outside the
+    domain run coarse, then by the simulator; every other member's forecast is the exact
+    linear one; ``keep_simulations = "none"`` prunes the coarse folders (review, step 2)."""
+    surrogate_models.register(COARSE_PLUGIN)(cases.CoarseAffine)
+    try:
+        cases.write_case(tmp_path, name="base")
+        cases.write_coarse(tmp_path)
+        extra = (
+            '[coarse]\noptions = { forward_file = "coarse.npz", fail_members = [95], '
+            "write_files = true }"
+        )
+        result = surrogates.build(
+            cases.write_build(tmp_path, COARSE_PLUGIN, case="base.toml", name="cc", extra=extra)
+        )
+        model = tmp_path / "runs" / "cc" / "model" / "surrogate.json"
+        assert result.summary.gate is not None
+        assert result.summary.gate.passed
+        config = cases.write_case(
+            tmp_path, name="hm", prior_std=3.0,
+            surrogate=_section(model, outside="simulator", check_every=0),
+            extra='[output]\nkeep_simulations = "none"',
+        )  # fmt: skip
+        composition.start(config)
+    finally:
+        surrogate_models.remove(COARSE_PLUGIN)
+    run = _run(tmp_path, "hm")
+    results = RunResults(run, composition.build_layout(composition.load_config(config)))
+    prior = results.iterate(0)
+    assert 95 not in [int(m) for m in prior.member_ids]  # its coarse run failed: dropped
+    assert "simulator" in prior.forecast_source
+    assert "surrogate" in prior.forecast_source
+    exact = cases.forward_matrix() @ prior.state["x"]
+    np.testing.assert_allclose(prior.predicted, exact, rtol=0, atol=ROUND_OFF)
+    assert _named(run, "surrogate_coarse_failed")
+    simulations = run / "simulations"
+    assert not any(simulations.glob("coarse_*/member_*")) if simulations.is_dir() else True

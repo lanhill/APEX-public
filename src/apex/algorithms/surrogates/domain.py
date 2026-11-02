@@ -42,7 +42,7 @@ from numpy.typing import NDArray
 from scipy.optimize import linprog
 
 from apex.core.errors import SurrogateDomainError
-from apex.core.surrogates import SurrogateInputs, SurrogateModel
+from apex.core.surrogates import CoarseCorrectedSurrogate, SurrogateInputs, SurrogateModel
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
     DomainExtent,
@@ -245,11 +245,42 @@ def _input_scale(*inputs: SurrogateInputs) -> float:
     return scale
 
 
+def model_coordinates(
+    model: SurrogateModel,
+    inputs: SurrogateInputs,
+    coarse: NDArray[np.float64] | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return a model's coordinates ``(d, n)`` and residuals ``(n,)`` of members.
+
+    For a coarse-corrected model (``core.surrogates.CoarseCorrectedSurrogate``) with the
+    members' coarse forecasts ``(n_keys, n)``: the inputs' coordinates, then the coarse
+    forecast's, then its residual as one more coordinate (so that the box bounds it).
+
+    Raises
+    ------
+    ValueError
+        If a coarse-corrected model is given no coarse forecast.
+    """
+    found, residual = model.coordinates(inputs)
+    matrix = _as_matrix(found, "the model's coordinates")
+    residual = np.asarray(residual, dtype=np.float64).reshape(-1)
+    if isinstance(model, CoarseCorrectedSurrogate):
+        if coarse is None:
+            raise ValueError("a coarse-corrected surrogate needs the members' coarse forecasts")
+        extra, extra_residual = model.coarse_coordinates(np.asarray(coarse, dtype=np.float64))
+        matrix = np.concatenate([
+            matrix, _as_matrix(extra, "the coarse forecast's coordinates"),
+            np.asarray(extra_residual, dtype=np.float64).reshape(1, -1),
+        ])  # fmt: skip
+    return np.ascontiguousarray(matrix), residual
+
+
 def training_domain(
     model: SurrogateModel,
     training: SurrogateInputs,
     held_out: SurrogateInputs,
     *,
+    coarse: tuple[NDArray[np.float64], NDArray[np.float64]] | None = None,
     extent: DomainExtent = "box",
     fields: Sequence[str] = (),
     field_times: Sequence[str] = (),
@@ -258,13 +289,15 @@ def training_domain(
     """Return a fitted model's validated domain: its coordinates of both sets of inputs.
 
     ``training`` and ``held_out`` are ``{variable: (size, n_runs)}``; the keys are the
-    model's own (:attr:`SurrogateModel.keys`).
+    model's own (:attr:`SurrogateModel.keys`). ``coarse``: the two sets' coarse forecasts,
+    for a coarse-corrected model (:func:`model_coordinates`).
     """
     coordinates, residuals = [], []
-    for inputs in (training, held_out):
-        found, residual = model.coordinates(inputs)
-        coordinates.append(_as_matrix(found, "the model's coordinates"))
-        residuals.append(np.asarray(residual, dtype=np.float64).reshape(-1))
+    pairs = coarse if coarse is not None else (None, None)
+    for inputs, forecast in zip((training, held_out), pairs, strict=True):
+        found, residual = model_coordinates(model, inputs, forecast)
+        coordinates.append(found)
+        residuals.append(residual)
     return domain_from_coordinates(
         np.concatenate(coordinates, axis=-1),
         np.concatenate(residuals),
@@ -575,12 +608,14 @@ def check_members(
     *,
     fields: Sequence[str] = (),
     times: Sequence[str] = (),
+    coarse: NDArray[np.float64] | None = None,
 ) -> DomainCheck:
     """Return what lies outside the domain: members (by the model's coordinates), keys, times.
 
-    ``inputs`` is ``{variable: (size, n_members)}`` and ``member_ids`` names its columns.
+    ``inputs`` is ``{variable: (size, n_members)}`` and ``member_ids`` names its columns;
+    ``coarse`` their coarse forecasts, for a coarse-corrected model (:func:`model_coordinates`).
     """
-    coordinates, residuals = model.coordinates(inputs)
+    coordinates, residuals = model_coordinates(model, inputs, coarse)
     found = check_coordinates(domain, coordinates, residuals, member_ids)
     return found.merged(check_request(domain, keys, fields=fields, times=times))
 
@@ -591,12 +626,15 @@ def refuse_outside(
     inputs: SurrogateInputs,
     member_ids: Sequence[int],
     keys: Sequence[DataKey] = (),
+    coarse: NDArray[np.float64] | None = None,
 ) -> None:
     """Raise unless every member and key lies inside the domain (a surrogate simulator's guard).
+
+    ``coarse``: the members' coarse forecasts, for a coarse-corrected model.
 
     Raises
     ------
     SurrogateDomainError
         Naming the members, keys and times outside, and by how much.
     """
-    check_members(domain, model, inputs, member_ids, keys).raise_if_outside()
+    check_members(domain, model, inputs, member_ids, keys, coarse=coarse).raise_if_outside()

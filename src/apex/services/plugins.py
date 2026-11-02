@@ -92,6 +92,9 @@ REGISTRIES: dict[str, Registry[Any]] = {
     # fitted models standing in for a simulator stack; registered by other
     # packages' entry points (apex.surrogate_models).
     "surrogate_models": plugins.surrogate_models,
+    # a surrogate build's design plans, core's and adaptive ones (entry points
+    # apex.surrogate_designs).
+    "surrogate_designs": plugins.surrogate_designs,
 }
 
 #: The workflow each registry serves, for front ends that group plugins (the web UI).
@@ -127,6 +130,7 @@ WORKFLOWS: dict[str, str] = {
     "executors": "simulation",
     "simulation_skills": "simulation",
     "surrogate_models": "simulation",
+    "surrogate_designs": "simulation",
     **dict.fromkeys(
         ("petro_elastic_models", "reflectivity", "avo_attributes", "displacement_kernels"),
         "simulation",
@@ -435,8 +439,8 @@ def plugin_info(registry: str, name: str) -> PluginInfo:
     )
 
 
-def _unavailable(factory: object) -> str | None:
-    """Why a plugin cannot be used here: a module of its ``requires`` that is not installed.
+def missing_extra(factory: object) -> tuple[str, str] | None:
+    """Return a module of a plugin's ``requires`` that is not installed, and its extra.
 
     ``requires`` maps importable module names to the extra providing them; the modules are
     looked up, not imported.
@@ -449,8 +453,37 @@ def _unavailable(factory: object) -> str | None:
         except (ImportError, ValueError):
             found = False
         if not found:
-            return f"needs {module} (the {extra} extra)"
+            return str(module), str(extra)
     return None
+
+
+def _unavailable(factory: object) -> str | None:
+    """Why a plugin cannot be used here: a module of its ``requires`` that is not installed."""
+    missing = missing_extra(factory)
+    return None if missing is None else f"needs {missing[0]} (the {missing[1]} extra)"
+
+
+def unavailable_errors(registry: str, name: str) -> list[str]:
+    """Return why a configuration's plugin cannot run in this environment (an extra missing).
+
+    Said at validation, with the extra and how to install it, so that a run, a study cell
+    or the assistant's plan is refused before it is launched rather than failing at its
+    first update (#268, 2026-11-02: an ``ert_adaptive`` study launched where the ``ert``
+    extra was not installed, and every cell failed with no reason shown). Unknown
+    plugins are left to the option checks.
+    """
+    entries = REGISTRIES.get(registry)
+    if entries is None or name not in entries.names():
+        return []
+    missing = missing_extra(entries.factory(name))
+    if missing is None:
+        return []
+    module, extra = missing
+    return [
+        f"{registry} {name!r} needs {module} (the {extra} extra), which is not installed "
+        f"here: install it with `uv sync --inexact --extra {extra}` (or `pip install "
+        f"'apex[{extra}]'`), or choose another plugin"
+    ]
 
 
 def is_private(registry: str, name: str) -> bool:

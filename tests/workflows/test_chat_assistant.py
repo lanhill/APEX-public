@@ -2168,3 +2168,176 @@ def test_a_cut_section_key_leaves_its_entries_the_full_default() -> None:
     pointed = _shown_value(flat, "method.damping.name", defaults, None,
                            ["method.damping", "method.damping.name"])  # fmt: skip
     assert pointed == "not set: the method's own default (see method.damping)"
+
+
+def test_a_method_the_goal_names_is_planned_or_the_draft_refused(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #266 (2026-11-02): "the assimilated method" became a localization study."""
+    from apex.agents.chat import named_methods
+
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"},
+                {"name": "loc", "patch": {"method": {"localization": {"name": "adaptive"}}},
+                 "rationale": "localized"}]  # fmt: skip
+
+    def call(goal: str) -> dict[str, Any]:
+        result: dict[str, Any] = plan.handler(plan.arguments(
+            case="alpha/config.toml", budget=5000, variants=variants, goal=goal))  # fmt: skip
+        return result
+
+    with pytest.raises(ValueError, match=r"names the method.*gies.*never substitute"):
+        call("compare GIES against the case's own algorithm")
+    # The case's own method named: planned as before.
+    planned = call("does localization help ES-MDA")
+    assert planned["draft"].endswith(".toml")
+    names = ["assimilated", "chop", "es", "esmda", "gies"]
+    assert named_methods("compare chop with ES-MDA", names) == {"chop", "esmda"}
+    assert named_methods("compare the assimilated method", names) == {"assimilated"}
+    # An everyday word is no method's name unless "method" is beside it.
+    assert named_methods("how well are the data assimilated by GIES", names) == {"gies"}
+
+
+def test_a_card_proposes_the_chats_latest_draft_of_its_kind(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #263 (2026-11-02): the card named the first plan, the answer its revision."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"}]
+
+    def plan(name: str) -> str:
+        draft: str = tools["plan_study"].handler(tools["plan_study"].arguments(
+            case="alpha/config.toml", goal="a baseline", budget=5000, name=name,
+            variants=variants))["draft"]  # fmt: skip
+        return draft
+
+    def propose(draft: str) -> dict[str, Any]:
+        result: dict[str, Any] = tools["propose_action"].handler(
+            tools["propose_action"].arguments(draft=draft, summary="Launch it.")
+        )
+        return result  # fmt: skip
+
+    first, second = plan("first"), plan("second")
+    with pytest.raises(ValueError, match=f"replaced by a later draft of this chat, {second}"):
+        propose(first)
+    propose(second)
+    # Revised after the other, the first is the latest again.
+    text = tools["read_draft"].handler(tools["read_draft"].arguments(draft=first))
+    tools["revise_draft"].handler(tools["revise_draft"].arguments(draft=first, text=text["text"]))
+    propose(first)
+    assert [p.draft for p in store.proposals(chat.id)] == [second, first]
+
+
+def test_a_report_in_a_chat_is_saved_unless_the_model_says_not(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #262 (2026-11-02): a write-up came back as chat text only."""
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    composition.start(case.config)
+    chat = store.create("report")
+    tools = {t.name: t for t in assistant.local_tools(None, chat.id)}
+    run = str(case.directory / "runs" / "alpha")
+
+    written = tools["write_report"].handler(tools["write_report"].arguments(run=run))
+    quick = tools["write_report"].handler(tools["write_report"].arguments(run=run, save=False))
+    outside = {t.name: t for t in assistant.local_tools(None, None)}["write_report"]
+
+    assert written["saved"].endswith(".md")
+    assert "saved" not in quick
+    assert "saved" not in outside.handler(outside.arguments(run=run))  # no chat: no folder
+
+
+def test_named_methods_reads_multiword_names_and_a_wrappers_inner_counts(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #266: "multilevel ES-MDA", "ES MDA", and CHOP on GIES (gies is run)."""
+    from apex.agents.chat import named_methods
+
+    names = ["es", "esmda", "multilevel_esmda", "chop", "gies", "lm_enrml"]
+    assert named_methods("multilevel ES-MDA", names) == {"multilevel_esmda"}
+    assert named_methods("try ES MDA", names) == {"esmda"}
+    assert named_methods("LM-EnRML", names) == {"lm_enrml"}
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    linear_case(
+        name="gies5", ensemble_size=20,
+        method='name = "gies"\noptions = { max_trials_per_iteration = 4 }\n'
+        'strategy = { name = "rlmmac", options = { energy = 0.99 } }\nmax_iterations = 2',
+    )  # fmt: skip
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    planned = plan.handler(plan.arguments(
+        case="gies5/config.toml", goal="CHOP on GIES", budget=5000,
+        methods={"chop": {"name": "chop", "max_iterations": 2}},
+        variants=[{"name": "plain", "rationale": "as configured"}],
+    ))  # fmt: skip
+    assert set(planned["methods"]) == {"chop"}
+
+
+def test_two_run_drafts_can_both_be_proposed_and_a_saved_report_is_kept(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #263 and #262: several runs on purpose; an edited report not overwritten."""
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("runs")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+
+    def draft(name: str) -> str:
+        made: str = tools["draft_run"].handler(tools["draft_run"].arguments(
+            case="alpha/config.toml", patch={"run": {"name": name}}))["draft"]  # fmt: skip
+        return made
+
+    first, second = draft("one"), draft("two")
+    for made in (first, second):
+        tools["propose_action"].handler(
+            tools["propose_action"].arguments(draft=made, summary="Launch it."))  # fmt: skip
+    assert [p.draft for p in store.proposals(chat.id)] == [first, second]
+
+    composition.start(case.config)
+    report = {t.name: t for t in assistant.local_tools(None, chat.id)}["write_report"]
+    run = str(case.directory / "runs" / "alpha")
+    saved = report.handler(report.arguments(run=run))["saved"]
+    path = tmp_path / saved
+    path.write_text("my edits\n")
+    again = report.handler(report.arguments(run=run))["saved"]
+    assert again != saved
+    assert again.endswith("-2.md")
+    assert path.read_text() == "my edits\n"
+    assert report.handler(report.arguments(run=run))["saved"] == again  # same text, same file
+
+
+def test_a_comparisons_card_states_each_arms_runs_and_flags_a_fifth(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issues #264 and #267 (the user, 2026-11-02): state the budgets on the card, flag a
+    difference beyond about 20 %, cap nothing."""
+    from apex.agents.chat import BUDGET_TOLERANCE, _comparison, _Matching
+
+    assert BUDGET_TOLERANCE == 0.20
+    cells = [_opt_cell("a", {"name": "enopt"}), _opt_cell("b", {"name": "pso"})]
+    near = [{"simulator_runs": 100}, {"simulator_runs": 78}]  # 22 % apart: flagged now
+    [flagged] = [u for u in _comparison(cells, _Matching(near, {}, {}))["unmatched"]
+                 if u.startswith("budget")]  # fmt: skip
+    assert "equal-budget variant can be drafted on request" in flagged
+
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    planned = tools["plan_study"].handler(tools["plan_study"].arguments(
+        case="alpha/config.toml", goal="compare ES against ES-MDA", budget=5000,
+        methods={"es": {"name": "es", "strategy": {"name": "approx"}},
+                 "esmda": {"name": "esmda", "options": {"inflation": [4, 4, 4, 4]},
+                           "strategy": {"name": "approx"}}},
+        variants=[{"name": "plain", "rationale": "as configured"}]))  # fmt: skip
+    propose = tools["propose_action"]
+    propose.handler(propose.arguments(draft=planned["draft"], summary="Launch it."))
+    [card] = store.proposals(chat.id)
+    assert set(card.data["arms"].values()) == {40, 100}  # as the plan costs them
+    assert any(u.startswith("budget") for u in card.data["unmatched"])
+    # Nothing capped: ES-MDA keeps its four steps.
+    written = tomllib.loads((tmp_path / planned["draft"]).read_text())["study"]["methods"]
+    assert written["esmda"]["options"]["inflation"] == [4, 4, 4, 4]
+    assert "max_iterations" not in written["esmda"]

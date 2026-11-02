@@ -25,7 +25,7 @@ from apex.core.simulation import (
 )
 from apex.core.simulation_skills import SimulationSkill
 from apex.core.summaries import Summarizer
-from apex.core.surrogates import SurrogateModel
+from apex.core.surrogates import AdaptiveDesign, BuiltinDesign, SurrogateModel
 from apex.core.validation import StoppingRule
 
 #: Forward simulators by name (``"linear"``, ``"opm_flow"``, ...).
@@ -94,3 +94,8 @@ simulation_skills: Registry[SimulationSkill] = Registry("simulation_skills")
 #: Surrogate models by name: fitted models that stand in for a simulator stack,
 #: registered by packages through the entry-point group ``apex.surrogate_models``.
 surrogate_models: Registry[SurrogateModel] = Registry("surrogate_models")
+
+#: Surrogate design plans by name: core's ``prior``, ``lhs``, ``file``, ``run``
+#: and adaptive plans, registered by packages through the entry-point group
+#: ``apex.surrogate_designs``.
+surrogate_designs: Registry[BuiltinDesign | AdaptiveDesign] = Registry("surrogate_designs")

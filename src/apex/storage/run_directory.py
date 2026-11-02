@@ -289,11 +289,11 @@ class RunDirectory:
             return []
         found: list[Path] = []
         name = folder or f"iter_{current}"
-        # check_*, accepted_* and full_* exist only in surrogate runs: other runs
-        # prune as they always did.
+        # check_*, accepted_*, full_* and coarse_* exist only in surrogate runs:
+        # other runs prune as they always did.
         folders = sorted(
             {*root.glob("iter_*"), *root.glob("check_*"), *root.glob("accepted_*"),
-             *root.glob("full_*")}
+             *root.glob("full_*"), *root.glob("coarse_*")}
         )  # fmt: skip
         for iteration_dir in folders:
             is_current = iteration_dir.name == name

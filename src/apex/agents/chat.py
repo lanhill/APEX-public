@@ -26,7 +26,7 @@ import os
 import re
 import threading
 import tomllib
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -142,10 +142,11 @@ class ReportArgument(BaseModel):
         description="Another run (id, job id or directory) to compare the run with, when "
         "the user asks for a comparison (runs only).",
     )
-    save: bool = Field(
-        default=False,
-        description="Also save it as a Markdown file in this chat's drafts folder, to open "
-        "in the editor (when the user asks to keep it).",
+    save: bool | None = Field(
+        default=None,
+        description="Save it as a Markdown file in this chat's drafts folder, to open in the "
+        "editor: the default in a chat, since a user asking for a report or a write-up "
+        "wants the file (#262); false only when they ask for a quick look in the chat.",
     )
 
 
@@ -197,6 +198,42 @@ OPTIMIZING = re.compile(
     r"(?:npv|net present|production|recovery|oil|profit|revenue|value)",
     re.IGNORECASE,
 )
+
+
+def _compact(word: str) -> str:
+    """Return a word as a method's name compares: "ES-MDA", "es_mda" and "esmda" alike."""
+    return re.sub(r"[-_\s]", "", word.lower())
+
+
+#: Method names that are also everyday words: they name the method only beside "method"
+#: ("the assimilated method"), not in "how well the data are assimilated".
+WORD_METHOD_NAMES = frozenset({"assimilated"})
+
+
+def named_methods(goal: str, names: Iterable[str]) -> set[str]:
+    """Return the registered methods a goal names ("compare chop with ES-MDA": chop, esmda).
+
+    A name counts as one to three adjacent words of the goal, hyphens, underscores and
+    spaces ignored, the longest first: "ES-MDA" and "ES MDA" name esmda (not es),
+    "multilevel ES-MDA" multilevel_esmda (not esmda). One of :data:`WORD_METHOD_NAMES` counts
+    only beside the word "method".
+    """
+    tokens = [_compact(w) for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", goal)]
+    keys = {_compact(name): name for name in names}
+    found: set[str] = set()
+    i = 0
+    while i < len(tokens):
+        for size in (3, 2, 1):
+            name = keys.get("".join(tokens[i : i + size]))
+            if name is None:
+                continue
+            beside = tokens[max(i - 1, 0) : i] + tokens[i + size : i + size + 1]
+            if name not in WORD_METHOD_NAMES or any(t.startswith("method") for t in beside):
+                found.add(name)
+            i += size - 1
+            break
+        i += 1
+    return found
 
 
 class DraftOptimizationArguments(BaseModel):
@@ -920,6 +957,21 @@ class ChatAssistant:
                 raise ValueError("the study is refused, revise it: " + "; ".join(errors))
             study_plan = _study_plan(service, spec)
             cells = list(study_plan.cells)
+            # A method the goal names is in the draft, or the user is asked: never another
+            # comparison in its place (#266: "the assimilated method" became localization).
+            used = {c.config.method.name for c in cells}
+            for cell in cells:  # a wrapper's (CHOP's) inner method runs too
+                method = cell.config.method
+                if (split := wrapped("methods", method.name, method.options)) is not None:
+                    used.add(split[1])
+            if missing := sorted(named_methods(args.goal, REGISTRIES["methods"].names()) - used):
+                raise ValueError(
+                    f"the goal names the method(s) {', '.join(missing)}, which the draft does "
+                    f"not run (it runs {', '.join(sorted(used))}): plan it with methods "
+                    "naming them, or, if they cannot be planned on this case or are not "
+                    "available, tell the user and ask; never substitute another comparison "
+                    "(a method named only as background, not compared, leaves the goal)"
+                )
             comparison = _comparison(cells, _history_matching(study_plan))
             if access is not None:
                 for config in [c.config for c in cells]:
@@ -1309,6 +1361,19 @@ class ChatAssistant:
                     "next": "say which values were assumed; revise_draft the [prior] the user "
                             "wants changed; propose_action(draft=...) to launch it"}  # fmt: skip
 
+        def launch_kind(path: Path) -> str:
+            return (
+                "launch_optimization" if is_optimization_config(path)
+                else "launch_run" if _is_run_config(path) else "launch_study"
+            )  # fmt: skip
+
+        def same_kind(draft: str, kind: str) -> bool:
+            try:
+                other = draft_path(draft)
+                return other.exists() and launch_kind(other) == kind
+            except (KeyError, ValueError, OSError):  # gone, or no longer this chat's
+                return False
+
         def propose(args: ProposeArguments) -> dict[str, Any]:
             path = draft_path(args.draft)
             if not path.exists():
@@ -1316,15 +1381,34 @@ class ChatAssistant:
             total, errors = cost(path)
             if errors:
                 raise ValueError("the draft is invalid: " + "; ".join(errors))
-            kind = (
-                "launch_optimization" if is_optimization_config(path)
-                else "launch_run" if _is_run_config(path) else "launch_study"
-            )  # fmt: skip
+            kind = launch_kind(path)
+            # The card launches the chat's latest draft of its kind: one written after this
+            # one replaced it (#263: the card named the first plan, the answer the revision).
+            drafts = [e.data.get("draft") for e in store.events(chat_id)
+                      if e.kind in ("draft", "draft_revised")]  # fmt: skip
+            if kind == "launch_study" and args.draft in drafts:  # runs: several on purpose
+                after = len(drafts) - drafts[::-1].index(args.draft)  # past its last writing
+                newer = [
+                    d for d in dict.fromkeys(drafts[after:])
+                    if isinstance(d, str) and d != args.draft and same_kind(d, kind)
+                ]  # fmt: skip
+                if newer:
+                    raise ValueError(
+                        f"{args.draft} was replaced by a later draft of this chat, {newer[-1]}: "
+                        "propose that one (the one your answer describes), or revise_draft "
+                        "this one if it is the one the user wants"
+                    )
             comparison, approval = _draft_facts(service, path, total)
             data: dict[str, Any] = {"cost": total}
             if comparison.get("unmatched"):
                 # The card shows them too, whatever the answer says (reported issues).
                 data["unmatched"] = comparison["unmatched"]
+            # Each arm's simulator runs, on every comparison's card (the user's decision on
+            # #264 and #267, 2026-11-02: state the budgets; each method keeps its settings).
+            arms = {label: runs for label, c in (comparison.get("arm_costs") or {}).items()
+                    if c and isinstance(runs := c.get("simulator_runs"), int)}  # fmt: skip
+            if len(arms) > 1:
+                data["arms"] = arms
             proposal = store.add_proposal(chat_id, kind, args.draft, args.summary, data)
             self._emit(chat_id, "proposal",
                             {"n": proposal.n, "draft": args.draft, "kind": kind})  # fmt: skip
@@ -1349,7 +1433,10 @@ class ChatAssistant:
                       "the algorithm (budget, strategy) comes back in 'differences': state "
                       "each with the plan and propose it (propose_action) as usual; offer to "
                       "match them, "
-                      "keeping each algorithm its own base unless the user asks.",
+                      "keeping each algorithm its own base unless the user asks. A method "
+                      "the goal names must be in the draft (the goal names only what the "
+                      "study compares); one that cannot be planned is asked about, never "
+                      "replaced by another comparison.",
                       PlanArguments, plan),
             LocalTool("draft_optimization", "Draft an optimization from a history-matching "
                       "case: its wells' controls over a forecast after the "
@@ -1500,14 +1587,24 @@ class ChatAssistant:
                 else reporter.run_report(args.run or "", args.compare_with)
             )
             written: dict[str, Any] = {"markdown": result.text}
-            if args.save:  # the user's decision on a reported issue (2026-10-05)
+            # Saved unless the model says not to (the user's decisions on reported issues,
+            # 2026-10-05 and #262, 2026-11-02); outside a chat, only when asked.
+            if args.save if args.save is not None else chat_id is not None:
                 if chat_id is None:
                     raise ValueError("a report is saved in a chat's drafts folder")
                 shown, folder = self.drafts(chat_id)
                 stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(args.study or args.run or "x").name)
                 folder.mkdir(parents=True, exist_ok=True)
-                (folder / f"report_{stem}.md").write_text(result.text, encoding="utf-8")
-                written["saved"] = f"{shown}/report_{stem}.md"
+                # Saved by default now (#262): a report the user may have edited is kept, the
+                # new one beside it (report_x-2.md, ...); the same text is not saved twice.
+                name, number = f"report_{stem}.md", 1
+                while (folder / name).exists() and (folder / name).read_text(
+                    encoding="utf-8", errors="replace"
+                ) != result.text:
+                    number += 1
+                    name = f"report_{stem}-{number}.md"
+                (folder / name).write_text(result.text, encoding="utf-8")
+                written["saved"] = f"{shown}/{name}"
             return written
 
         def case(args: CaseArgument) -> dict[str, Any]:
@@ -1555,8 +1652,9 @@ class ChatAssistant:
             LocalTool("write_report", "Write the narrative report of a run or a study "
                       "(Markdown; numbers checked against the facts): a summary, the run's "
                       "setup from its configuration, its results and health, and with "
-                      "compare_with a comparison with another run; save = true also "
-                      "saves it in this chat's drafts folder.", ReportArgument, report),
+                      "compare_with a comparison with another run; saved in this chat's "
+                      "drafts folder unless save = false (say where it is).",
+                      ReportArgument, report),
             LocalTool("plot_run", "Draw a run's result figures (PNG and PDF) in the "
                       "background into its report/plots folder, shown on the run's page as "
                       "they are drawn: what the request asks for (metric box/violin plots, "
@@ -2334,7 +2432,10 @@ UNMATCHED_NEXT = (
     "; 'unmatched' lists how the arms are not like for like (budget, a setting both "
     "arms take set differently, the case's own settings changed): tell the user each, "
     "in the answer, and offer to match them (revise_draft) or explain why they cannot be "
-    "matched within the budget; never leave it to the card alone"
+    "matched within the budget; never leave it to the card alone. For a budget difference, "
+    "offer an equal-budget variant (the larger arm's max_iterations capped so that its "
+    "simulator runs do not exceed the other's), but cap nothing unasked: each method keeps "
+    "its own settings, and the card states every arm's runs"
 )
 #: What the assistant does with a plan's ``matched`` list (a reported issue, 2026-10-24).
 MATCHED_NEXT = (
@@ -2350,9 +2451,10 @@ COST_NEXT = (
 )
 #: Arms whose budgets differ by more than this fraction of the largest are "not matched in
 #: budget": a reported issue (2026-10-20) compared optimizers given 12 and 29 evaluations,
-#: so a gap could reflect the budget, not the optimizer. 25 % leaves room for optimizers
-#: whose evaluation counts cannot be set exactly equal (a population times generations).
-BUDGET_TOLERANCE = 0.25
+#: so a gap could reflect the budget, not the optimizer. About 20 % (the user, 2026-11-02,
+#: #264 and #267; 25 % before): room for budgets that cannot be set exactly equal (a
+#: population times generations, a method's trials) but no more.
+BUDGET_TOLERANCE = 0.20
 #: Settings of the case's own algorithm compared with the case as written.
 _CASE_SETTINGS = ("prior.ensemble_size", "method.", "optimizer.")
 
@@ -2434,7 +2536,8 @@ def _unmatched(
                     listed = ", ".join(f"{label}: {n}" for label, n in known.items())
                     what = unit.replace("_", " ")
                     found.append(f"budget: the arms' {what} differ ({listed}); a difference "
-                                 "in results may reflect the budget, not the method")  # fmt: skip
+                                 "in results may reflect the budget, not the method (an "
+                                 "equal-budget variant can be drafted on request)")  # fmt: skip
             if known:
                 break  # evaluations, when known, are the optimizers' budget
     # Population optimizers' sizes, however each sets it (pop_size, or nsga3's and moead's

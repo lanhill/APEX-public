@@ -330,7 +330,13 @@ class Access:
         from apex.services import policy
 
         problems: list[str] = []
-        for kind, key, value in policy.named(config):
+
+        # A surrogate's manifest in a folder the user may use: its coarse stack is judged
+        # here too.
+        def follow(value: str) -> bool:
+            return Path(value).is_absolute() and paths.where(Path(value)) is not None
+
+        for kind, key, value in policy.named(config, follow=follow):
             if kind == "undeclared":
                 problems.append(f"{key}: the plugin does not declare what this option names")
             elif kind == "output":

@@ -56,6 +56,7 @@ Registry = Literal[
     "reflectivity", "avo_attributes", "displacement_kernels", "chop_components",
     "converter_skills", "geomodeling_skills", "variogram_estimators", "simulation_skills",
     "surrogate_models",
+    "surrogate_designs",
 ]  # fmt: skip
 
 
@@ -422,20 +423,29 @@ def _confine_config(
         # Before policy.named, which reads the run's snapshot to judge its simulator.
         refusal = _outside(session, roots, "give a run of the catalogue or of those folders")
         raise ToolFailure(f"prediction.run_dir: {refusal.error}", refusal.hint)
-    known = set(policy.named(before)) if before is not None else None
+
+    # A surrogate's manifest in the folders: its coarse stack is held to them too.
+    def follow(path: str) -> bool:
+        return _readable_item("input", path, roots, runs)
+
+    known = set(policy.named(before, follow=follow)) if before is not None else None
     space = session.service.workspace()
     # For the owner's clients (MCP, the CLI's tools, agent loops); a web-UI user's session
     # (the assistant's, ``access`` set) is held to its own allowlist.
     owners = session.access is None
     written_by_others = owners and any(space.in_other_ui_user_folder(f) for f in sources)
     problems = []
-    for kind, key, value in policy.named(config):
+    for kind, key, value in policy.named(config, follow=follow):
         if kind in ("code", "executable") and written_by_others:
             problems.append(f"{key}: a template or program in a configuration another web-UI "
                             "user wrote is refused (a [policy] decides those)")  # fmt: skip
         elif known is not None and kind in UNSAFE_OVERRIDES and (kind, key, value) not in known:
             problems.append(f"{key}: overrides may not set templates, programs, arguments or "
                             "hosts (a [policy] decides those)")  # fmt: skip
+        elif key.startswith(policy.COARSE_STACK) and kind == "code" and not _inside(value, roots):
+            # A template a surrogate's manifest names is not the owner's configuration: it
+            # must lie in the folders.
+            problems.append(f"{key} = {value!r}")
         elif not _readable_item(
             kind, value, roots, runs,
             trusted=not (owners and space.in_other_ui_user_folder(value)),

@@ -39,3 +39,17 @@ export function unmatchedOf(proposal: Pick<Proposal, "data">): string[] {
   const listed = proposal.data?.unmatched;
   return Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
 }
+
+/**
+ * Each arm's simulator runs (one replicate) of a proposed comparison, as the service
+ * computed them (the proposal's `data.arms`): shown on every comparison's card, so that a
+ * budget difference between methods is seen before launching (the user's decision on
+ * reported issues, 2026-11-02).
+ */
+export function armRunsOf(proposal: Pick<Proposal, "data">): [string, number][] {
+  const arms = proposal.data?.arms;
+  if (!arms || typeof arms !== "object" || Array.isArray(arms)) return [];
+  return Object.entries(arms as Record<string, unknown>).filter(
+    (entry): entry is [string, number] => typeof entry[1] === "number",
+  );
+}

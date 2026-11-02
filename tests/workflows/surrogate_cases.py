@@ -91,6 +91,60 @@ class Affine:
         return model
 
 
+class CoarseAffine(Affine):
+    """A coarse-corrected test surrogate: each key affine in its coarse value.
+
+    On :func:`write_coarse`'s coarse stack, whose response is the fine one divided key by
+    key, it corrects the coarse forecast to the fine one to round-off.
+    """
+
+    slope: NDArray[np.float64]
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        super().fit(snapshots, rng)
+        assert snapshots.coarse_outputs is not None
+        coarse, fine = snapshots.coarse_outputs, snapshots.outputs
+        self.slope = np.ascontiguousarray(
+            [np.polyfit(coarse[k], fine[k], 1) for k in range(len(fine))]
+        )
+
+    def coarse_coordinates(
+        self, coarse: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        forecast = np.asarray(coarse, dtype=np.float64)
+        return forecast, np.zeros(forecast.shape[1])
+
+    def predict(self, inputs: SurrogateInputs, keys: Sequence[DataKey]) -> NDArray[np.float64]:
+        raise ValueError("a coarse-corrected surrogate needs the coarse forecast")
+
+    def predict_corrected(
+        self, inputs: SurrogateInputs, coarse: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        rows = [self.keys.index(k) for k in keys]
+        full = self.slope[:, :1] * np.asarray(coarse) + self.slope[:, 1:]
+        return np.ascontiguousarray(full[rows])
+
+    def to_arrays(self) -> SurrogateParts:
+        own, arrays = super().to_arrays()
+        return own, {**arrays, "slope": self.slope}
+
+    @classmethod
+    def from_arrays(
+        cls, manifest: Mapping[str, object], arrays: Mapping[str, NDArray[np.generic]]
+    ) -> Self:
+        model = super().from_arrays(manifest, arrays)
+        model.slope = np.asarray(arrays["slope"], dtype=np.float64)
+        return model
+
+
+def write_coarse(folder: Path) -> str:
+    """Write a coarse stack of the case (``y_c = G x / d``, key by key); return ``[coarse]``."""
+    forward = forward_matrix()
+    d = np.linspace(0.5, 2.0, forward.shape[0])
+    np.savez(folder / "coarse.npz", matrix=forward / d[:, None])
+    return '[coarse]\noptions = { forward_file = "coarse.npz" }'
+
+
 def std_of(std: float, k: int, n_keys: int) -> float:
     """Return the test surrogate's predictive standard deviation at its ``k``-th key."""
     return std * (1.0 + k / n_keys)
@@ -192,6 +246,7 @@ def write_build(
     name: str = "lin",
     options: str = "{}",
     box: tuple[float, float] = (-6.0, 6.0),
+    extra: str = "",
 ) -> Path:
     """Write a surrogate build of the case: a Latin hypercube over ``box^3``, 30 + 10 runs."""
     path = folder / f"build_{name}.toml"
@@ -210,5 +265,7 @@ plan = "lhs"
 training = 30
 held_out = 10
 box = {{ x = [{box[0]}, {box[1]}] }}
+
+{extra}
 """)
     return path

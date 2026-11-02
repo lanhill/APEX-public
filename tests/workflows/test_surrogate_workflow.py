@@ -22,7 +22,7 @@ from apex.algorithms.surrogates.designs import repeated_columns
 from apex.cli.main import app
 from apex.core.errors import ConfigError, WorkflowError
 from apex.core.plugins import surrogate_models
-from apex.core.surrogates import SurrogateInputs, SurrogateParts
+from apex.core.surrogates import SurrogateInputs, SurrogateModel, SurrogateParts
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import SnapshotReference, SnapshotSet, SurrogateCheckSummary
 from apex.services import composition, surrogates
@@ -736,3 +736,299 @@ def test_a_complete_build_without_its_model_files_refits_them(tmp_path: Path) ->
     assert (again.path / "summary.json").is_file()
     for name, data in model.items():
         assert (again.path / "model" / name).read_bytes() == data
+
+
+class _FarthestFirst:
+    """A test adaptive plan: the candidates of largest norm in the surrogate's coordinates."""
+
+    adaptive = True
+
+    def __init__(self, initial: int = 6, batch: int = 4, candidates: int = 30) -> None:
+        self.initial, self.batch, self.candidates = initial, batch, candidates
+        self.seen: list[int] = []
+
+    def initial_runs(self, training: int) -> int:
+        return self.initial
+
+    def batch_runs(self) -> int:
+        return self.batch
+
+    def candidate_runs(self) -> int:
+        return self.candidates
+
+    def choose(
+        self,
+        model: SurrogateModel,
+        chosen: Mapping[str, NDArray[np.float64]],
+        candidates: Mapping[str, NDArray[np.float64]],
+        count: int,
+        *,
+        keys: Sequence[DataKey],
+        variances: NDArray[np.float64] | None,
+    ) -> list[int]:
+        points, _ = model.coordinates(candidates)
+        self.seen.append(next(iter(chosen.values())).shape[1])
+        return [int(i) for i in np.argsort(-np.linalg.norm(points, axis=0), kind="stable")[:count]]
+
+
+@pytest.fixture
+def _adaptive() -> Iterator[None]:
+    from apex.core.plugins import surrogate_designs
+
+    surrogate_designs.register("test_farthest")(_FarthestFirst)
+    try:
+        yield
+    finally:
+        surrogate_designs.remove("test_farthest")
+
+
+ADAPTIVE = 'plan = "test_farthest"\ntraining = 20\nheld_out = 5\noptions = { batch = 4 }'
+
+
+@pytest.mark.usefixtures("_adaptive")
+def test_an_adaptive_design_runs_its_batches_and_resumes_to_identical_files(
+    tmp_path: Path,
+) -> None:
+    """Held-out and initial runs from the prior, then batches the plan chooses."""
+    write_case(tmp_path)
+    whole = surrogates.build(write_build(tmp_path, name="whole", design=ADAPTIVE))
+    assert whole.complete
+    state = json.loads((whole.path / "state.json").read_text())
+    batches = state["adaptive"]["batches"]
+    assert [len(b) for b in batches] == [4, 4, 4, 2]  # 6 initial runs, then to 20
+    assert len({i for b in batches for i in b}) == 14  # never a candidate twice
+    assert len((whole.path / JOURNAL).read_text().splitlines()) == 25
+    # Interrupted after each few runs, resumed: the same choices, the same model files.
+    path = write_build(tmp_path, name="parts", design=ADAPTIVE)
+    result = surrogates.build(path, max_runs=7)
+    while not result.complete:
+        result = surrogates.build(path, max_runs=5)
+    for name in ("surrogate.json", "surrogate.npz"):
+        assert (result.path / "model" / name).read_bytes() == (
+            whole.path / "model" / name
+        ).read_bytes()
+    assert json.loads((result.path / "state.json").read_text())["adaptive"]["batches"] == batches
+
+
+@pytest.mark.usefixtures("_adaptive")
+def test_an_adaptive_designs_runs_follow_its_surrogate(tmp_path: Path) -> None:
+    """The plugin chose the runs: a changed plugin option is refused, not refitted."""
+    write_case(tmp_path)
+    surrogates.build(write_build(tmp_path, design=ADAPTIVE))
+    with pytest.raises(ConfigError, match="surrogate"):
+        surrogates.build(write_build(tmp_path, design=ADAPTIVE, options="{ ridge = 10.0 }"))
+
+
+def test_core_plans_keep_their_fingerprints_and_unknown_plans_are_refused(
+    tmp_path: Path,
+) -> None:
+    write_case(tmp_path)
+    config = surrogates.load_surrogate_config(write_build(tmp_path))
+    case = surrogates._build_case(config)
+    parts = surrogates.fingerprint_parts(config, case)
+    # The design's digest is over the section as it was before plans had options.
+    before = json.loads(config.design.model_dump_json())
+    before.pop("options")
+    assert parts["design"] == surrogates._digest(before)
+    assert "surrogate" not in parts
+    with pytest.raises(ConfigError, match=r"unknown design plan 'nope'.*prior"):
+        surrogates.build(write_build(tmp_path, design='plan = "nope"\ntraining = 4\nheld_out = 2'))
+    with pytest.raises(ConfigError, match="takes no options"):
+        surrogates.load_surrogate_config(
+            write_build(
+                tmp_path,
+                design='plan = "prior"\ntraining = 4\nheld_out = 2\noptions = { batch = 2 }',
+            )
+        )
+
+
+@pytest.mark.usefixtures("_adaptive")
+def test_an_adaptive_build_survives_a_crash_between_its_writes(tmp_path: Path) -> None:
+    """The state is the record: a design saved without its state is drawn again, and a design
+    saved behind its state is rebuilt from it; either way the same model files."""
+    write_case(tmp_path)
+    whole = surrogates.build(write_build(tmp_path, name="whole", design=ADAPTIVE))
+    reference = (whole.path / "model" / "surrogate.npz").read_bytes()
+    # The design saved, its adaptive state never written.
+    path = write_build(tmp_path, name="lost", design=ADAPTIVE)
+    first = surrogates.build(path, max_runs=3)
+    state = json.loads((first.path / "state.json").read_text())
+    del state["adaptive"]
+    (first.path / "state.json").write_text(json.dumps(state))
+    assert surrogates.build(path).complete
+    assert (first.path / "model" / "surrogate.npz").read_bytes() == reference
+    # Two batches recorded, the design saved with only the first runs (behind its state).
+    path = write_build(tmp_path, name="behind", design=ADAPTIVE)
+    early = surrogates.build(path, max_runs=8)
+    snapshot = (early.path / "design.npz").read_bytes()
+    later = surrogates.build(path, max_runs=10)
+    assert len(json.loads((later.path / "state.json").read_text())["adaptive"]["batches"]) >= 2
+    (later.path / "design.npz").write_bytes(snapshot)
+    assert surrogates.build(path).complete
+    assert (later.path / "model" / "surrogate.npz").read_bytes() == reference
+
+
+class _NeedsStd(_FarthestFirst):
+    uses = ("predict_std",)
+
+
+def test_validation_refuses_a_plan_or_surrogate_before_any_run(tmp_path: Path) -> None:
+    from apex.core.plugins import surrogate_designs
+
+    write_case(tmp_path)
+    with pytest.raises(ConfigError, match="unknown design plan"):
+        surrogates.plan_build(surrogates.load_surrogate_config(
+            write_build(tmp_path, design='plan = "nope"\ntraining = 4\nheld_out = 2')
+        ))  # fmt: skip
+    surrogate_designs.register("test_needs_std")(_NeedsStd)
+    try:
+        with pytest.raises(ConfigError, match="needs a surrogate with predict_std"):
+            surrogates.plan_build(surrogates.load_surrogate_config(
+                write_build(tmp_path, design='plan = "test_needs_std"\ntraining = 8\nheld_out = 2')
+            ))  # fmt: skip
+    finally:
+        surrogate_designs.remove("test_needs_std")
+
+
+class _CoarseAffine(_Affine):
+    """A coarse-corrected test plugin: each key an affine map of its coarse value."""
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        super().fit(snapshots, rng)
+        assert snapshots.coarse_outputs is not None
+        coarse, fine = snapshots.coarse_outputs, snapshots.outputs
+        self.slope = np.array([np.polyfit(coarse[k], fine[k], 1) for k in range(len(fine))])
+
+    def coarse_coordinates(
+        self, coarse: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        return np.asarray(coarse, dtype=np.float64), np.zeros(np.asarray(coarse).shape[1])
+
+    def predict(self, inputs: SurrogateInputs, keys: Sequence[DataKey]) -> NDArray[np.float64]:
+        raise ValueError("needs the coarse forecast")
+
+    def predict_corrected(
+        self, inputs: SurrogateInputs, coarse: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        rows = [self.keys.index(k) for k in keys]
+        full = self.slope[:, :1] * coarse + self.slope[:, 1:]
+        return np.ascontiguousarray(full[rows])
+
+    def to_arrays(self) -> SurrogateParts:
+        own, arrays = super().to_arrays()
+        return own, {**arrays, "slope": self.slope}
+
+    @classmethod
+    def from_arrays(
+        cls, manifest: Mapping[str, object], arrays: Mapping[str, NDArray[np.generic]]
+    ) -> Self:
+        model = super().from_arrays(manifest, arrays)
+        model.slope = np.asarray(arrays["slope"], dtype=np.float64)
+        return model
+
+
+@pytest.fixture
+def _coarse_plugin() -> Iterator[None]:
+    surrogate_models.register("test_coarse_affine")(_CoarseAffine)
+    try:
+        yield
+    finally:
+        surrogate_models.remove("test_coarse_affine")
+
+
+def _coarse_case(folder: Path) -> str:
+    """A coarse matrix whose fine response is ``d * coarse`` exactly, key by key."""
+    write_case(folder)
+    forward = np.load(folder / "forward.npz")["matrix"]
+    d = np.linspace(0.5, 2.0, forward.shape[0])
+    np.savez(folder / "coarse.npz", matrix=forward / d[:, None])
+    return '[coarse]\noptions = { forward_file = "coarse.npz" }'
+
+
+def _build_with(folder: Path, model: str, extra: str, **kwargs: str) -> Path:
+    path = write_build(folder, extra=extra, **kwargs)
+    path.write_text(path.read_text().replace('model = "test_affine_build"', f'model = "{model}"'))
+    return path
+
+
+@pytest.mark.usefixtures("_coarse_plugin")
+def test_a_coarse_stack_runs_every_design_run_and_the_gate_judges_the_correction(
+    tmp_path: Path,
+) -> None:
+    """Every run on both stacks; a fine response affine in the coarse one is
+    corrected exactly, and the gate judges the corrected prediction."""
+    extra = _coarse_case(tmp_path)
+    path = _build_with(tmp_path, "test_coarse_affine", extra)
+    plan = surrogates.plan_build(surrogates.load_surrogate_config(path))
+    assert plan.simulator_runs == 50  # 25 runs on each stack
+    result = surrogates.build(path)
+    assert result.complete
+    assert result.summary.simulator_runs == 50
+    assert max(_gate_errors(result.path)) < 1e-6
+    assert len((result.path / "coarse" / JOURNAL).read_text().splitlines()) == 25
+    snapshots = load_snapshots(result.path / "snapshots.npz")
+    assert snapshots.coarse_outputs is not None
+    assert snapshots.coarse_outputs.shape == snapshots.outputs.shape
+    manifest = read_surrogate(result.path / "model" / "surrogate.json").manifest
+    assert manifest.provenance.coarse is not None
+    assert manifest.provenance.coarse.options_digest != manifest.provenance.options_digest
+    config = surrogates.load_surrogate_config(path)
+    assert "coarse" in surrogates.fingerprint_parts(config, surrogates._build_case(config))
+    # The manifest names its coarse stack, relative to the model (step 2 runs it).
+    assert manifest.coarse is not None
+    assert manifest.coarse.options["forward_file"] == "../../../coarse.npz"
+    # `apex surrogate check` runs both stacks and gates the corrected prediction.
+    check = surrogates.check_surrogate(
+        result.path / "model" / "surrogate.json",
+        tmp_path / "case.toml",
+        runs=6,
+        seed=3,
+        min_inside=0.0,  # the coarse coordinates' box, from 25 runs, is narrow
+    )
+    assert check.summary.passed, check.summary.notes
+    assert check.summary.inside >= 1
+    assert len((check.path / "coarse" / JOURNAL).read_text().splitlines()) == 6
+    assert check.summary.gate is not None
+    assert max(d.error or 0.0 for d in check.summary.gate.datatypes) < 1e-6
+    # Bounded by max_runs: the fine runs first, then the coarse ones, across sessions.
+    model = result.path / "model" / "surrogate.json"
+    first = surrogates.check_surrogate(
+        model, tmp_path / "case.toml", runs=6, seed=4, min_inside=0.0, max_runs=6
+    )
+    assert first.summary.status == "stopped"
+    second = surrogates.check_surrogate(
+        model, tmp_path / "case.toml", runs=6, seed=4, min_inside=0.0, max_runs=6
+    )
+    assert second.summary.status == "complete"
+    assert len((second.path / "coarse" / JOURNAL).read_text().splitlines()) == 6
+
+
+@pytest.mark.usefixtures("_coarse_plugin", "_adaptive")
+def test_what_a_coarse_stack_refuses(tmp_path: Path) -> None:
+    extra = _coarse_case(tmp_path)
+    with pytest.raises(ConfigError, match="needs the runs' coarse outputs"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_affine", "", name="bare"))
+    with pytest.raises(ConfigError, match="not supported yet"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_affine", extra, name="adaptive",
+                                     design=ADAPTIVE))  # fmt: skip
+    config = surrogates.load_surrogate_config(write_build(tmp_path))
+    assert "coarse" not in surrogates.fingerprint_parts(config, surrogates._build_case(config))
+    with pytest.raises(ConfigError, match="does not correct a coarse simulation"):
+        surrogates.build(_build_with(tmp_path, "test_affine_build", extra, name="plain"))
+
+
+@pytest.mark.usefixtures("_coarse_plugin")
+def test_a_build_stopped_in_its_coarse_runs_resumes_to_identical_files(tmp_path: Path) -> None:
+    extra = _coarse_case(tmp_path)
+    whole = surrogates.build(_build_with(tmp_path, "test_coarse_affine", extra, name="whole"))
+    path = _build_with(tmp_path, "test_coarse_affine", extra, name="parts")
+    first = surrogates.build(path, max_runs=30)  # the 25 fine runs and 5 coarse ones
+    assert not first.complete
+    assert first.summary.pending == 20
+    assert len((first.path / "coarse" / JOURNAL).read_text().splitlines()) == 5
+    finished = surrogates.build(path)
+    assert finished.complete
+    for name in ("surrogate.json", "surrogate.npz"):
+        assert (finished.path / "model" / name).read_bytes() == (
+            whole.path / "model" / name
+        ).read_bytes()

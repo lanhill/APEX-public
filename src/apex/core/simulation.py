@@ -584,7 +584,9 @@ class Parameterization(Protocol):
     porosity and permeability of each facies. The methods update the state; the simulator,
     the performance metrics and the figures see the properties. It must be a deterministic
     function of the state and its options. State variables it does not consume pass
-    through unchanged.
+    through unchanged. Its outputs live on the grid of the variables they come from, unless
+    it names its own with an optional ``output_grid`` (``(nx, ny, nz)``; e.g. a coarser grid,
+    ``block_average``).
     """
 
     #: The state variables it consumes.

@@ -36,6 +36,8 @@ import apex.algorithms.geophysics
 import apex.algorithms.geostatistics.variogram
 import apex.algorithms.metrics
 import apex.algorithms.priors
+import apex.algorithms.surrogates.designs
+import apex.algorithms.upscaling
 import apex.algorithms.validation
 import apex.execution.ert
 import apex.execution.local
@@ -671,8 +673,9 @@ def build_run(
 
             surrogates.refuse_parts(method, executor, config.surrogate)
             forecasting = surrogates.surrogate_forecasting(
-                config, observations, surrogates.stack_provenance(config, stack.simulator)
-            )
+                config, observations, surrogates.stack_provenance(config, stack.simulator),
+                layout=layout, executor=executor,
+            )  # fmt: skip
     except (TypeError, ValueError) as error:
         raise ConfigError(f"invalid plugin configuration: {error}") from error
     truth = None
@@ -1919,6 +1922,9 @@ def start_built(
             if not (run.run_dir.path / "state.json").exists():
                 run.run_dir.clear_stop()
             raise
+        except Exception as error:
+            _log_failure(error)
+            raise
         _write_summary(run, result)
     return result
 
@@ -1960,9 +1966,27 @@ def resume(
         _stop_if_asked(run_dir, stopped)
         configure_logging(run.run_dir.path)
         write_run_provenance(run, resumed=True)
-        result = run.execute(None, max_steps)
+        try:
+            result = run.execute(None, max_steps)
+        except RunStopped:
+            raise
+        except Exception as error:
+            _log_failure(error)
+            raise
         _write_summary(run, result)
     return result
+
+
+def _log_failure(error: BaseException) -> None:
+    """Record why a run failed in its own ``events.jsonl`` (and its job's events).
+
+    A run's events ended at its last forecast with no word of the failure (#268, 2026-11-02:
+    a study's cells failed at their first update, and only the job store held the reason).
+    """
+    logger.error(
+        "run failed: %s: %s", type(error).__name__, error,
+        extra={"event": "run_failed", "error": f"{type(error).__name__}: {error}"},
+    )  # fmt: skip
 
 
 def _stop_if_asked(run_dir: RunDirectory, stopped: Callable[[], bool] | None) -> None:

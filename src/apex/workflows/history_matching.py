@@ -85,6 +85,7 @@ from apex.domain.surrogate import GateResult
 from apex.storage.run_directory import SIMULATOR, SURROGATE, RunDirectory, upgrade_iterate
 from apex.workflows.parameterization import PropertyMap, parameterized
 from apex.workflows.surrogate_forecasts import (
+    COARSE_LABEL,
     SURROGATE_LABEL,
     SurrogateCheckFailed,
     SurrogateForecasting,
@@ -321,6 +322,10 @@ class HistoryMatchingWorkflow:
         self._posterior_report: dict[str, Any] | None = None
         # The iteration whose check changed the forecasts' source (a switch or a refit).
         self._source_changed: int | None = None
+        # A coarse-corrected surrogate's coarse runs of the last surrogate forecast, by member
+        # id, taken at once by the caller (_surrogate_outputs) for the check: a
+        # refit repeating the forecast, and its snapshot set, reuse them.
+        self._last_coarse: dict[int, NDArray[np.float64] | MemberFailure] = {}
         rows: dict[str, list[int]] = {}
         for i, key in enumerate(observations.keys):
             rows.setdefault(key.datatype, []).append(i)
@@ -828,9 +833,11 @@ class HistoryMatchingWorkflow:
             sources = [SIMULATOR] * len(ids)
         else:
             outputs, sources = self._surrogate_members(state, ids, iteration, label)
+            # This forecast's coarse runs, by member, for a refit of its check.
+            made = dict(self._last_coarse)
             if not request.required and surrogate.checks_at(iteration):
                 outputs, sources = self._check_surrogate(
-                    state, ids, iteration, outputs, sources, label
+                    state, ids, iteration, outputs, sources, label, coarse=made
                 )
         if not request.required:
             variance = None
@@ -853,13 +860,18 @@ class HistoryMatchingWorkflow:
         *,
         folder: str | None = None,
         simulated: Mapping[int, NDArray[np.float64] | MemberFailure] | None = None,
+        coarse: Mapping[int, NDArray[np.float64] | MemberFailure] | None = None,
     ) -> tuple[list[NDArray[np.float64] | MemberFailure], list[str]]:
         """Predict the members inside the domain; the others stop the run or are simulated.
 
         ``folder``: where the simulator's runs go when not ``iter_<iteration>`` (an accepted
         iterate's forecast again). ``simulated``: the members' simulator outputs made
         already in this forecast, by column (a refit repeating it): a member outside reuses
-        its own instead of being run again.
+        its own instead of being run again. ``coarse``: for a coarse-corrected model, the
+        members' coarse runs made already in this forecast, by member id (a refit repeating
+        it); the others are run first (:meth:`_coarse_members`). A member whose coarse run
+        fails is a failed member, as a simulator's failure is (counted against
+        ``min_success_fraction``).
 
         Raises
         ------
@@ -873,12 +885,33 @@ class HistoryMatchingWorkflow:
         surrogate = self.surrogate
         assert surrogate is not None
         active = surrogate.active
+        outputs: list[NDArray[np.float64] | MemberFailure | None] = [None] * len(member_ids)
+        coarse_runs: dict[int, NDArray[np.float64]] = {}
+        lost: list[int] = []  # columns whose coarse run failed
+        if surrogate.coarse is not None:
+            made = self._coarse_members(state, member_ids, iteration, label, folder, coarse)
+            self._last_coarse = made
+            for column, member in enumerate(member_ids):
+                out = made[int(member)]
+                if isinstance(out, MemberFailure):
+                    outputs[column] = out
+                    lost.append(column)
+                else:
+                    coarse_runs[int(member)] = out
+        kept = [j for j in range(len(member_ids)) if j not in set(lost)]
         found = check_members(
             active.domain,
             active.model,
-            self._surrogate_inputs(state),
-            [int(m) for m in member_ids],
+            self._surrogate_inputs(keep(state[:, kept])),
+            [int(member_ids[j]) for j in kept],
             self.raw_observations.keys,
+            coarse=None
+            if surrogate.coarse is None
+            else np.ascontiguousarray(
+                np.column_stack([coarse_runs[int(member_ids[j])] for j in kept])
+            )
+            if kept
+            else np.zeros((len(active.model.keys), 0)),
         )
         stops = found.unknown_keys or found.times_outside or surrogate.section.outside == "stop"
         if not found.inside:
@@ -892,14 +925,16 @@ class HistoryMatchingWorkflow:
             if stops:
                 found.raise_if_outside()
         outside = {int(m) for m in found.members}
-        inside = [j for j, m in enumerate(member_ids) if int(m) not in outside]
-        rest = [j for j, m in enumerate(member_ids) if int(m) in outside]
-        outputs: list[NDArray[np.float64] | MemberFailure | None] = [None] * len(member_ids)
+        inside = [j for j in kept if int(member_ids[j]) not in outside]
+        rest = [j for j in kept if int(member_ids[j]) in outside]
         if inside:
             surrogate.charge(len(inside), iteration)
             predicted = self._run_surrogate(
-                keep(state[:, inside]), member_ids[inside], iteration, label
-            )
+                keep(state[:, inside]), member_ids[inside], iteration, label,
+                coarse={int(member_ids[j]): coarse_runs[int(member_ids[j])] for j in inside}
+                if surrogate.coarse is not None
+                else None,
+            )  # fmt: skip
             for column, out in zip(inside, predicted, strict=True):
                 if isinstance(out, MemberFailure):
                     # Loud: dropping members the surrogate cannot predict would bias the
@@ -931,9 +966,11 @@ class HistoryMatchingWorkflow:
             "surrogate forecast",
             extra={"event": "surrogate_forecast", "iteration": iteration, "label": label,
                    "surrogate": len(inside), "simulator": len(rest), "reused": len(reused),
-                   "identity": active.identity, "evaluations": surrogate.evaluations},
+                   "coarse_failed": len(lost), "identity": active.identity,
+                   "evaluations": surrogate.evaluations},
         )  # fmt: skip
-        simulated_columns = set(rest)
+        # A member whose coarse run failed is the simulator's failure, never the surrogate's.
+        simulated_columns = set(rest) | set(lost)
         sources = [
             SIMULATOR if j in simulated_columns else SURROGATE for j in range(len(member_ids))
         ]
@@ -941,16 +978,62 @@ class HistoryMatchingWorkflow:
         assert len(done) == len(member_ids)  # every member is predicted or simulated
         return done, sources
 
+    def _coarse_members(
+        self,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        iteration: int,
+        label: str,
+        folder: str | None,
+        known: Mapping[int, NDArray[np.float64] | MemberFailure] | None,
+    ) -> dict[int, NDArray[np.float64] | MemberFailure]:
+        """Run the members on a coarse-corrected model's coarse stack.
+
+        Through the run's executor, as the simulator's runs (its pools, licences, retries and
+        ``keep_simulations``), into ``simulations/coarse_<iteration>/`` (or ``<folder>_coarse``),
+        at the model's keys. ``known``: runs made already in this forecast, by member id.
+        Returns every member's run or failure by member id.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        assert surrogate.coarse is not None
+        made = {int(m): known[int(m)] for m in member_ids if known and int(m) in known}
+        todo = [j for j, m in enumerate(member_ids) if int(m) not in made]
+        if todo:
+            outcome = self._run_members(
+                keep(state[:, todo]), member_ids[todo], iteration, f"{label} {COARSE_LABEL}",
+                surrogate.coarse, auxiliary=False, keys=surrogate.active.model.keys,
+                folder=f"coarse_{iteration}" if folder is None else f"{folder}_coarse",
+            )  # fmt: skip
+            surrogate.coarse_runs += len(todo)
+            for column, out in zip(todo, outcome, strict=True):
+                made[int(member_ids[column])] = out
+            failed = [int(o.member_id) for o in outcome if isinstance(o, MemberFailure)]
+            if failed:
+                logger.warning(
+                    "coarse runs failed",
+                    extra={"event": "surrogate_coarse_failed", "iteration": iteration,
+                           "label": label, "members": failed},
+                )  # fmt: skip
+        return made
+
     def _run_surrogate(
         self,
         state: NDArray[np.float64],
         member_ids: NDArray[np.int64],
         iteration: int,
         label: str,
+        coarse: Mapping[int, NDArray[np.float64]] | None = None,
     ) -> list[NDArray[np.float64] | MemberFailure]:
-        """Run the active surrogate on the members, on its local executor."""
+        """Run the active surrogate on the members, on its local executor.
+
+        ``coarse``: a coarse-corrected model's coarse forecasts by member id.
+        """
         surrogate = self.surrogate
         assert surrogate is not None
+        model = surrogate.active.simulator
+        if coarse is not None:
+            model = model.with_coarse(coarse)
         blocks = self.layout.split(state)
         members = [
             MemberInput(
@@ -964,7 +1047,7 @@ class HistoryMatchingWorkflow:
         )
         began = time.monotonic()
         outputs = surrogate.executor.run_all(
-            parameterized(surrogate.active.simulator, self.property_map),
+            parameterized(model, self.property_map),
             members,
             self.raw_observations.keys,
             on_result=lambda member_id, ok: self.progress.member_finished(
@@ -1039,8 +1122,11 @@ class HistoryMatchingWorkflow:
         outputs: list[NDArray[np.float64] | MemberFailure],
         sources: list[str],
         label: str,
+        coarse: Mapping[int, NDArray[np.float64] | MemberFailure] | None = None,
     ) -> tuple[list[NDArray[np.float64] | MemberFailure], list[str]]:
         """Run some members by the simulator too and gate the surrogate on them (§5).
+
+        ``coarse``: the forecast's coarse runs by member, for a coarse-corrected model.
 
         Returns the forecast the update uses: the surrogate's when the check passes (every
         member's, so that the members' errors stay equal), a refit's, or the simulator's.
@@ -1140,6 +1226,12 @@ class HistoryMatchingWorkflow:
             model_keys = surrogate.active.model.keys
             index = {key: row for row, key in enumerate(keys)}
             rows = [index[key] for key in model_keys]
+            coarse_checked = None
+            if surrogate.coarse is not None:
+                assert coarse is not None
+                coarse_checked = np.ascontiguousarray(
+                    np.column_stack([_values(coarse[m]) for m in checked_ids])
+                )
             surrogate.refit(
                 iteration,
                 self._surrogate_inputs(keep(state[:, [j for j, _ in good]])),
@@ -1147,6 +1239,7 @@ class HistoryMatchingWorkflow:
                 checked_ids,
                 self.streams["surrogate"],
                 self.run_dir.path,
+                coarse_outputs=coarse_checked,
             )
             # The iteration's forecast again, with the refit (not checked again: the checked
             # runs are now its training and held-out runs). Members the simulator ran
@@ -1154,7 +1247,9 @@ class HistoryMatchingWorkflow:
             self._source_changed = iteration
             done = {j: out for j, (out, s) in enumerate(zip(outputs, sources, strict=True))
                     if s == SIMULATOR}  # fmt: skip
-            return self._surrogate_members(state, member_ids, iteration, label, simulated=done)
+            return self._surrogate_members(
+                state, member_ids, iteration, label, simulated=done, coarse=coarse
+            )
         surrogate.switched_at = iteration
         self._source_changed = iteration
         logger.warning(
@@ -1610,14 +1705,16 @@ class HistoryMatchingWorkflow:
         member_ids: Sequence[int],
         iteration: int,
         folder: str | None = None,
+        simulator: Simulator | None = None,
     ) -> list[MemberInput]:
+        needs_work_dir = bool(getattr(simulator or self.simulator, "needs_work_dir", False))
         blocks = self.layout.split(state)
         return [
             MemberInput(
                 member_id=int(member_id),
                 state={name: block[:, column].copy() for name, block in blocks.items()},
                 work_dir=self.run_dir.simulation_dir(iteration, int(member_id), folder)
-                if bool(getattr(self.simulator, "needs_work_dir", False))
+                if needs_work_dir
                 else None,
             )
             for column, member_id in enumerate(member_ids)
@@ -1652,7 +1749,7 @@ class HistoryMatchingWorkflow:
         with nullcontext() if auxiliary or without_raw is None else without_raw():
             outputs = self.executor.run_all(
                 self.simulator if simulator is None else simulator,
-                self._members(state, list(member_ids), iteration, folder),
+                self._members(state, list(member_ids), iteration, folder, simulator),
                 [*keys, *extra] if extra else keys,
                 on_result=lambda member_id, ok: self.progress.member_finished(
                     member_id=member_id, ok=ok
@@ -1674,7 +1771,7 @@ class HistoryMatchingWorkflow:
             self._last_auxiliary = np.column_stack(values) if values else None
             outputs = [out if isinstance(out, MemberFailure) else out[:n_keys] for out in outputs]
         seconds = time.monotonic() - began
-        if bool(getattr(self.simulator, "needs_work_dir", False)):
+        if bool(getattr(simulator or self.simulator, "needs_work_dir", False)):
             # Retention ([output] keep_simulations): failed members are marked first, so a
             # policy that keeps them can tell them apart later.
             for out in outputs:
@@ -1700,13 +1797,15 @@ class HistoryMatchingWorkflow:
                 "n_ok": len(outputs) - n_failed,
                 "n_failed": n_failed,
                 "seconds": round(seconds, 3),
-                **self._concurrency(len(member_ids)),
+                **self._concurrency(len(member_ids), simulator),
             },
         )
         return outputs
 
-    def _concurrency(self, n_members: int) -> dict[str, int]:
+    def _concurrency(self, n_members: int, simulator: Simulator | None = None) -> dict[str, int]:
         """Return ``{"workers": members run at once}`` when the executor states its workers.
+
+        ``simulator``: the one the forecast ran (a coarse stack's), when not the run's.
 
         A surrogate run's timing report (decision 14) turns wall time into
         worker-seconds with it; executors that place members elsewhere state none.
@@ -1715,7 +1814,7 @@ class HistoryMatchingWorkflow:
         if not isinstance(workers, int):
             return {}
         # The process executor runs no more than the simulator's licences at once.
-        cap = getattr(self.simulator, "max_parallel_runs", None)
+        cap = getattr(simulator or self.simulator, "max_parallel_runs", None)
         cap = cap if isinstance(cap, int) and cap > 0 else workers
         return {"workers": max(1, min(workers, cap, n_members))}
 

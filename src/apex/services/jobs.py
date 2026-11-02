@@ -44,6 +44,28 @@ logger = logging.getLogger(__name__)
 
 #: Job states after which nothing more happens.
 FINAL: frozenset[str] = frozenset({"complete", "stopped", "failed", "cancelled"})
+#: The failed cells a study's event lists (all are counted in its error).
+MAX_FAILED_CELLS = 20
+#: How much of each failed cell's reason a study's error quotes.
+MAX_REASON_CHARS = 300
+
+
+def _cells_error(failures: Sequence[dict[str, str]], cells: int) -> str:
+    """Return a failed study's error: how many cells failed, and the distinct reasons (#268).
+
+    A study whose cells failed ended ``failed`` with no error, so its status said nothing
+    of why (2026-11-02: every ert_adaptive cell lacked the ``ert`` extra).
+    """
+    reasons: dict[str, list[str]] = {}
+    for failure in failures:  # a reason cut short: a simulator's output may be long
+        reason = failure["error"]
+        reason = reason if len(reason) <= MAX_REASON_CHARS else reason[:MAX_REASON_CHARS] + "..."
+        reasons.setdefault(reason, []).append(failure["cell"])
+    shown = "; ".join(f"{', '.join(c[:3])}{' ...' if len(c) > 3 else ''}: {e}"
+                      for e, c in list(reasons.items())[:3])  # fmt: skip
+    more = f"; and {len(reasons) - 3} other reason(s)" if len(reasons) > 3 else ""
+    return f"{len(failures)} of {cells} cells failed: {shown}{more}"
+
 
 Role = Literal["client", "worker", "service"]
 
@@ -314,10 +336,35 @@ class LocalJobRunner:
                     if all(s == "complete" for s in children)
                     else ("stopped" if "stopped" in children else "failed")
                 )
-                ended.append(self.store.update_job(record["id"], state=final, finished=now()))
+                failures = self._failed_cells(record) if final == "failed" else []
+                error = _cells_error(failures, len(children)) if failures else None
+                ended.append(self.store.update_job(
+                    record["id"], state=final, finished=now(), error=error,
+                ))  # fmt: skip
+                if failures:
+                    self.log_event(record["id"], "study_cells_failed", error=error,
+                                   cells=failures[:MAX_FAILED_CELLS])  # fmt: skip
             elif record["state"] == "queued" and any(s != "queued" for s in children):
                 self.store.update_job(record["id"], state="running", started=now())
         return ended
+
+    def _failed_cells(self, study: JobRecord) -> list[dict[str, str]]:
+        """Return a study's failed cells: each one's job, label and error (#268)."""
+        found = []
+        for child in study["children"]:
+            try:
+                record = self.store.job(child)
+            except KeyError:  # removed since
+                continue
+            if record["state"] != "failed":
+                continue
+            notes = record.get("annotations") or {}
+            label = "/".join(str(notes[k]) for k in ("case", "method", "variant") if notes.get(k))
+            if notes.get("replicate") is not None:
+                label += f"/r{notes['replicate']}"
+            found.append({"job": child, "cell": label or child,
+                          "error": record.get("error") or "no error recorded"})  # fmt: skip
+        return found
 
     def _spawn(self, record: JobRecord) -> int:
         # A pinned job runs its frozen copy's interpreter, so the worker and everything it

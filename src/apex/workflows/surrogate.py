@@ -32,7 +32,7 @@ from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.progress import GuardedProgress, NullProgress, ProgressReporter
 from apex.core.simulation import Executor, MemberFailure, MemberInput, Simulator
-from apex.core.surrogates import SurrogateModel
+from apex.core.surrogates import CoarseCorrectedSurrogate, SurrogateModel
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
     DomainExtent,
@@ -269,14 +269,33 @@ def fit_and_gate(
         If the plugin cannot fit the snapshots, or the domain cannot be built.
     """
     state = dict(rng.bit_generator.state)
+    if isinstance(model, CoarseCorrectedSurrogate) and (
+        training.coarse_outputs is None or held_out.coarse_outputs is None
+    ):
+        raise WorkflowError(
+            "a coarse-corrected surrogate needs the runs' coarse outputs: give the build a "
+            "[coarse] stack"
+        )
     began = clock()
     model.fit(training, rng)
     fit_seconds = clock() - began
     if tuple(model.keys) != training.keys:
         raise WorkflowError("the surrogate answers other keys than it was fitted on")
-    domain = training_domain(model, training.inputs, held_out.inputs, extent=extent)
+    coarse: tuple[NDArray[np.float64], NDArray[np.float64]] | None = None
+    if (
+        isinstance(model, CoarseCorrectedSurrogate)
+        and training.coarse_outputs is not None
+        and held_out.coarse_outputs is not None
+    ):
+        coarse = (training.coarse_outputs, held_out.coarse_outputs)
+    domain = training_domain(model, training.inputs, held_out.inputs, coarse=coarse, extent=extent)
     began = clock()
-    predicted = np.ascontiguousarray(model.predict(held_out.inputs, training.keys))
+    if isinstance(model, CoarseCorrectedSurrogate) and coarse is not None:
+        predicted = np.ascontiguousarray(
+            model.predict_corrected(held_out.inputs, coarse[1], training.keys)
+        )
+    else:
+        predicted = np.ascontiguousarray(model.predict(held_out.inputs, training.keys))
     prediction_seconds = (clock() - began) / max(held_out.n_runs, 1)
     verdict = gate(
         predicted,

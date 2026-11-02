@@ -24,7 +24,20 @@ from typing import Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-DesignPlan = Literal["prior", "lhs", "file", "run"]
+from apex.core.plugins import surrogate_designs
+from apex.core.surrogates import BuiltinDesign
+
+#: Core's plans; packages add others through ``surrogate_designs``.
+BUILTIN_PLANS = ("prior", "lhs", "file", "run")
+DesignPlan = str
+
+
+def _register_builtins() -> None:
+    for name in BUILTIN_PLANS:
+        surrogate_designs.register(name)(BuiltinDesign)
+
+
+_register_builtins()
 
 #: Draws ``n`` runs' inputs, ``{variable: (size, n)}``, from the generator given.
 Draw = Callable[[int, np.random.Generator], Mapping[str, NDArray[np.float64]]]

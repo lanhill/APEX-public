@@ -42,6 +42,7 @@ from apex.core.surrogates import SurrogateModel
 from apex.domain.surrogate import (
     ArraysReference,
     BuildCost,
+    CoarseSection,
     FitRecord,
     GateResult,
     SnapshotProvenance,
@@ -166,11 +167,13 @@ def write_surrogate(
     snapshots: SnapshotReference | None = None,
     fit: FitRecord | None = None,
     apex_commit: str | None = None,
+    coarse: CoarseSection | None = None,
 ) -> StoredSurrogate:
     """Write a fitted surrogate as ``path`` (a ``.json`` manifest) and its ``.npz`` beside it.
 
     The arrays are written first and the manifest last, each atomically, so a manifest
-    always names arrays that exist.
+    always names arrays that exist. ``coarse``: the coarse stack a coarse-corrected model
+    runs, its file options relative to the manifest's folder.
 
     Raises
     ------
@@ -213,6 +216,7 @@ def write_surrogate(
             file=path.with_suffix(ARRAYS_SUFFIX).name,
             sha256=hashlib.sha256(arrays_bytes).hexdigest(),
         ),
+        coarse=coarse,
     )
     manifest_bytes = _manifest_bytes(manifest)
     path.parent.mkdir(parents=True, exist_ok=True)

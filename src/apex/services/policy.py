@@ -39,7 +39,7 @@ catches a symlink swapped in between submission and execution.
 
 import fnmatch
 import shutil
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -254,11 +254,15 @@ def _run_simulator(run_dir: Path) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def named(config: BaseModel) -> list[tuple[Kind, str, str]]:
+def named(
+    config: BaseModel, *, follow: Callable[[str], bool] | None = None
+) -> list[tuple[Kind, str, str]]:
     """Return what a configuration names, as (kind, key, value).
 
     Every path, program and argument list: APEX's fields by their names, plugin options by
-    their declarations.
+    their declarations. With ``follow``, also what the coarse stack of a surrogate's
+    manifest names, read only when ``follow(model_file)`` allows the caller to
+    read that file: each caller passes its own confinement.
 
     Used by the policy, and for web-UI users with or without one (``services/access.py``).
     """
@@ -276,6 +280,74 @@ def named(config: BaseModel) -> list[tuple[Kind, str, str]]:
             (kind, f"{registry}.{name or '?'}: {key}", value)
             for kind, key, value in _plugin_items(registry, name, options)
         ]
+    surrogate = getattr(config, "surrogate", None)
+    model_file = getattr(surrogate, "model_file", None)
+    if (
+        follow is not None
+        and isinstance(config, HistoryMatchConfig)
+        and model_file is not None
+        and follow(str(model_file))
+    ):
+        found += _coarse_stack_items(config, Path(model_file))
+    return found
+
+
+#: The start of the keys :func:`named` gives what a surrogate's coarse stack names.
+COARSE_STACK = "surrogate's coarse stack: "
+
+
+def _coarse_stack_items(
+    config: HistoryMatchConfig, model_file: Path
+) -> list[tuple[Kind, str, str]]:
+    """Return what the coarse stack a surrogate's manifest names names.
+
+    Its simulator's options (merged over the case's, as the run composes them) and its
+    parameterizations', file options resolved against the manifest's folder. Reading the
+    manifest runs no code. A manifest that cannot be read names nothing here;
+    the run refuses it when it loads the model.
+    """
+    import os
+
+    from apex.domain.surrogate import SurrogateManifest
+    from apex.services.composition import PATH_OPTION_SUFFIXES
+
+    try:
+        manifest = SurrogateManifest.model_validate_json(model_file.read_bytes())
+    except (OSError, ValueError):
+        return []
+    coarse = manifest.coarse
+    if coarse is None:
+        return []
+    folder = model_file.parent
+
+    def resolved(options: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            k: os.path.abspath(folder / v)
+            if k.endswith(PATH_OPTION_SUFFIXES) and isinstance(v, str)
+            else v
+            for k, v in options.items()
+        }
+
+    name = coarse.simulator or config.simulator.name
+    # The run merges the coarse options over the case's. With the case's simulator, the
+    # case's options are judged already, by the same declarations; with another one, they
+    # are judged again by its own.
+    merged = (
+        resolved(coarse.options)
+        if name == config.simulator.name
+        else {**config.simulator.options, **resolved(coarse.options)}
+    )
+    found = [
+        (kind, f"{COARSE_STACK}simulators.{name}: {key}", value)
+        for kind, key, value in _plugin_items("simulators", name, merged)
+    ]
+    for section in coarse.parameterizations:
+        found += [
+            (kind, f"{COARSE_STACK}parameterizations.{section.name}: {key}", value)
+            for kind, key, value in _plugin_items(
+                "parameterizations", section.name, resolved(section.options)
+            )
+        ]
     return found
 
 
@@ -285,7 +357,10 @@ def violations(config: BaseModel, rules: PolicySection, root: Path) -> list[str]
         return []
     own = service_roots(root)
     problems = []
-    found = named(config)
+    readable = [*rules.input_roots, *rules.code_roots, *rules.output_roots, *own]
+    # A surrogate's manifest the policy lets the run read: its coarse stack is checked as the
+    # configuration's own simulator is.
+    found = named(config, follow=lambda path: _allowed(path, readable))
     for kind, key, value in found:
         if kind == "undeclared":
             problems.append(

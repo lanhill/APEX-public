@@ -14,7 +14,7 @@ import type { Route } from "../router";
 import { follow } from "../sse";
 import { href } from "../router";
 import { visibleAgents } from "../agents";
-import { assumptionsOf, launchKind, unmatchedOf } from "../proposals";
+import { armRunsOf, assumptionsOf, launchKind, unmatchedOf } from "../proposals";
 import { ErrorBox, Time, useApi, useCan, usePaths } from "./common";
 import { withoutAdr } from "../text";
 
@@ -596,6 +596,7 @@ function ProposalCard({
   };
   const cost = proposal.data.cost;
   const unmatched = unmatchedOf(proposal);
+  const arms = armRunsOf(proposal);
   return (
     <div className="proposal" role="group" aria-label="proposal">
       <strong>Proposed: launch {what === "run" ? "a run" : what === "optimization" ? "an optimization" : "a study"}</strong>
@@ -604,6 +605,12 @@ function ProposalCard({
         Draft: <a href={href({ page: "editor", path: proposal.draft })}>{proposal.draft}</a>
         {typeof cost === "number" && <> · at most {cost.toLocaleString()} simulator runs</>}
       </p>
+      {arms.length > 1 && (
+        <p className="muted">
+          Simulator runs per arm (one replicate):{" "}
+          {arms.map(([label, runs]) => `${label}: ${runs.toLocaleString()}`).join(" · ")}
+        </p>
+      )}
       {unmatched.length > 0 && (
         <div className="assumptions">
           <p id={`unmatched-${chat}-${proposal.n}`}>

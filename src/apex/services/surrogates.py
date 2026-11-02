@@ -42,6 +42,7 @@ from numpy.typing import NDArray
 from pydantic import ValidationError
 
 from apex.algorithms.surrogates.designs import (
+    BUILTIN_PLANS,
     ensemble_design,
     lhs_design,
     repeated_columns,
@@ -53,18 +54,25 @@ from apex.core.errors import (
     ApexError,
     ConfigError,
     PluginError,
+    UnknownPluginError,
     WorkflowError,
     validation_problems,
 )
-from apex.core.plugins import executors, priors, surrogate_models
+from apex.core.plugins import executors, priors, surrogate_designs, surrogate_models
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import Executor, Simulator
-from apex.core.surrogates import SurrogateModel
+from apex.core.surrogates import (
+    AdaptiveDesign,
+    BuiltinDesign,
+    CoarseCorrectedSurrogate,
+    SurrogateModel,
+)
 from apex.domain.config import HistoryMatchConfig, PluginSection, SurrogateRunSection
 from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.state import StateLayout, StateVariable
 from apex.domain.surrogate import (
     BuildCost,
+    CoarseSection,
     DomainSummary,
     FitRecord,
     GateResult,
@@ -111,7 +119,7 @@ from apex.storage.surrogate_files import (
     write_surrogate,
 )
 from apex.workflows.parameterization import PropertyMap, parameterized
-from apex.workflows.surrogate import check_success, fit_and_gate, run_members
+from apex.workflows.surrogate import MembersOutcome, check_success, fit_and_gate, run_members
 from apex.workflows.surrogate_forecasts import ActiveModel, SurrogateForecasting
 
 logger = logging.getLogger(__name__)
@@ -182,7 +190,10 @@ def load_surrogate(path: Path, *, identity: str | None = None) -> LoadedSurrogat
 # =================================================================== the workflow (§7)
 
 #: The build's random streams, spawned from ``[surrogate] seed`` in this order.
-BUILD_STREAMS = ("design", "surrogate")
+BUILD_STREAMS = ("design", "surrogate", "design_fit")
+
+#: The build's subfolder of the coarse stack's runs.
+COARSE = "coarse"
 
 #: Simulators whose runs a surrogate cannot stand in for ("Refused").
 REFUSED_SIMULATORS = {
@@ -252,8 +263,27 @@ def resolve_surrogate_config(config: SurrogateConfig, base: Path) -> SurrogateCo
         "design": design.model_copy(update={
             "ensemble_file": design.ensemble_file and resolve(design.ensemble_file),
             "run_dir": None if design.run_dir is None else resolve(design.run_dir),
+            # A plan's options naming files are resolved as every plugin's.
+            "options": {
+                key: os.path.abspath(base / str(value)) if _is_path_option(key, value) else value
+                for key, value in design.options.items()
+            },
         }),
         "execution": execution,
+        "coarse": None if config.coarse is None else config.coarse.model_copy(update={
+            "options": {
+                key: os.path.abspath(base / str(value)) if _is_path_option(key, value) else value
+                for key, value in config.coarse.options.items()
+            },
+            "parameterizations": [
+                p.model_copy(update={"options": {
+                    key: os.path.abspath(base / str(value)) if _is_path_option(key, value)
+                    else value
+                    for key, value in p.options.items()
+                }})
+                for p in config.coarse.parameterizations
+            ],
+        }),
     })  # fmt: skip
 
 
@@ -386,6 +416,8 @@ class SurrogateCase:
     simulator: Simulator
     executor: Executor
     provenance: SnapshotProvenance
+    coarse_simulator: Simulator | None = None
+    coarse_config: HistoryMatchConfig | None = None
 
 
 def _refuse(case: HistoryMatchConfig) -> None:
@@ -472,6 +504,7 @@ def surrogate_case(
     *,
     execution: PluginSection | None,
     output_dir: Path,
+    coarse: CoarseSection | None = None,
 ) -> SurrogateCase:
     """Compose the stack a build (or a check) runs, from the case's configuration.
 
@@ -500,6 +533,12 @@ def surrogate_case(
         composition.prepare_remote(executor, simulator, case)
     except (TypeError, ValueError, PluginError) as error:
         raise ConfigError(f"invalid case for a surrogate: {error}") from error
+    provenance_ = stack_provenance(case, stack.simulator)
+    coarse_simulator, coarse_config = None, None
+    if coarse is not None:
+        built = coarse_stack(case, coarse, layout, executor)
+        coarse_simulator, coarse_config = built.simulator, built.config
+        provenance_ = provenance_.model_copy(update={"coarse": built.provenance})
     return SurrogateCase(
         config=case,
         layout=layout,
@@ -509,8 +548,101 @@ def surrogate_case(
         variances=variances,
         simulator=simulator,
         executor=executor,
-        provenance=stack_provenance(case, stack.simulator),
+        provenance=provenance_,
+        coarse_simulator=coarse_simulator,
+        coarse_config=coarse_config,
     )
+
+
+@dataclass(frozen=True)
+class CoarseStack:
+    """A coarse stack as a case runs it.
+
+    Attributes
+    ----------
+    simulator
+        Takes a member's state: the case's parameterizations, the coarse ones, then the
+        coarse simulator.
+    config
+        The case with the coarse simulator, options and parameterizations.
+    provenance
+        What names it (:func:`stack_provenance`).
+    """
+
+    simulator: Simulator
+    config: HistoryMatchConfig
+    provenance: SnapshotProvenance
+
+
+def coarse_stack(
+    case: HistoryMatchConfig, coarse: CoarseSection, layout: StateLayout, executor: object
+) -> CoarseStack:
+    """Compose a case's coarse stack.
+
+    The case's simulator with the coarse options, its parameterizations followed by the
+    coarse ones; the same layout, keys and executor.
+
+    Raises
+    ------
+    ConfigError
+        If the executor runs members remotely, the case has ``[geophysics]``, the coarse
+        deck would inherit the case's ``case_dir``, or the stack is refused or invalid.
+    """
+    if getattr(executor, "remote", False):
+        raise ConfigError(
+            "a coarse stack is a second stack: remote members carry one; use the "
+            "executor's files mode or local workers"
+        )
+    if case.geophysics is not None:
+        raise ConfigError(
+            "a coarse stack with [geophysics]: its grid and masks are the fine deck's; a "
+            "coarse stack forecasts the wells' data only"
+        )
+    if "case_dir" in case.simulator.options and "case_dir" not in coarse.options:
+        raise ConfigError(
+            "the coarse stack: the case's simulator has a case_dir (its decks' includes); "
+            "give the coarse deck's own in the coarse options, or its includes are the fine "
+            "case's"
+        )
+    config = case.model_copy(update={
+        "simulator": case.simulator.model_copy(update={
+            "name": coarse.simulator or case.simulator.name,
+            "options": {**case.simulator.options, **coarse.options},
+        }),
+        "parameterizations": [*case.parameterizations, *coarse.parameterizations],
+    })  # fmt: skip
+    _refuse(config)
+    try:
+        stack = composition.forecast_stack(config, layout)
+        properties = PropertyMap(composition.build_parameterizations(config), layout)
+        simulator = parameterized(stack.simulator, properties)
+        if executor is not None:
+            composition.check_executor(executor, simulator)
+    except (TypeError, ValueError, PluginError) as error:
+        raise ConfigError(f"invalid coarse stack: {error}") from error
+    return CoarseStack(simulator, config, stack_provenance(config, stack.simulator))
+
+
+def coarse_relative_to(coarse: CoarseSection, folder: Path) -> CoarseSection:
+    """Return a coarse stack with its file options relative to ``folder`` (a manifest's)."""
+    return coarse.model_copy(update={
+        "options": options_relative_to(coarse.options, folder),
+        "parameterizations": [
+            p.model_copy(update={"options": options_relative_to(p.options, folder)})
+            for p in coarse.parameterizations
+        ],
+    })  # fmt: skip
+
+
+def coarse_resolved_in(coarse: CoarseSection, folder: Path) -> CoarseSection:
+    """Return a manifest's coarse stack with its file options resolved against ``folder``."""
+    return coarse.model_copy(update={
+        "options": options_resolved_in(coarse.options, folder),
+        "parameterizations": [
+            p.model_copy(update={"options": options_resolved_in(p.options, folder)})
+            for p in coarse.parameterizations
+        ],
+    })  # fmt: skip
 
 
 def _case_config(path: Path) -> HistoryMatchConfig:
@@ -627,6 +759,89 @@ def _stored_generators(case: HistoryMatchConfig, layout: StateLayout) -> list[st
     return found
 
 
+def _prior_draw(
+    case: SurrogateCase, plan: str
+) -> Callable[[int, np.random.Generator], dict[str, NDArray[np.float64]]]:
+    """Return ``draw(n, rng)``: ``n`` members of the case's prior, in state space.
+
+    Raises
+    ------
+    ConfigError
+        If a stored prior gives the same columns whatever the stream (held-out runs would
+        repeat training runs).
+    """
+    layout = case.layout
+    stored = _stored_generators(case.config, layout)
+    if stored:
+        raise ConfigError(
+            f"plan {plan!r} draws from the prior, but {', '.join(stored)} gives stored "
+            "columns whatever the random stream: the held-out runs would repeat the "
+            "training runs; use plan = 'file' with its ensemble_file"
+        )
+
+    def draw(n: int, generator: np.random.Generator) -> dict[str, NDArray[np.float64]]:
+        drawn = composition.draw_prior_ensemble(case.config, layout, n, generator)
+        return dict(layout.split(drawn))
+
+    return draw
+
+
+def design_plan(config: SurrogateConfig) -> BuiltinDesign | AdaptiveDesign:
+    """Return ``[design] plan`` from the registry ``surrogate_designs``, with its options.
+
+    Raises
+    ------
+    ConfigError
+        If the plan is unknown, refuses its options, or is neither core's nor adaptive.
+    """
+    name = config.design.plan
+    try:
+        factory = surrogate_models.factory(config.surrogate.model)
+    except UnknownPluginError:
+        factory = None  # refused with its own message where the surrogate is created
+    corrects = callable(getattr(factory, "predict_corrected", None))
+    if corrects and config.coarse is None:
+        raise ConfigError(
+            f"the surrogate {config.surrogate.model!r} corrects a coarse simulation: it needs "
+            "the runs' coarse outputs, from a [coarse] stack"
+        )
+    if factory is not None and not corrects and config.coarse is not None:
+        raise ConfigError(
+            f"[coarse] doubles the runs, but the surrogate {config.surrogate.model!r} does not "
+            "correct a coarse simulation: remove [coarse] or use a coarse-corrected plugin"
+        )
+    try:
+        plan = surrogate_designs.create(name, **config.design.options)
+    except UnknownPluginError as error:
+        raise ConfigError(
+            f"unknown design plan {name!r}: one of {', '.join(surrogate_designs.names())}"
+        ) from error
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"[design] plan = {name!r}: {error}") from error
+    if isinstance(plan, BuiltinDesign):
+        if config.coarse is not None and name == "run":
+            raise ConfigError("plan 'run' has no coarse runs: [coarse] needs a drawn design")
+        return plan
+    if config.coarse is not None:
+        raise ConfigError(
+            f"the adaptive plan {name!r} with a [coarse] stack is not supported yet: its fits "
+            "between batches would need the coarse runs too"
+        )
+    if not (isinstance(plan, AdaptiveDesign) and getattr(plan, "adaptive", False)):
+        raise ConfigError(f"the design plan {name!r} is neither core's nor an adaptive plan")
+    try:
+        factory = surrogate_models.factory(config.surrogate.model)
+    except UnknownPluginError:
+        return plan  # refused with its own message where the surrogate is created
+    missing = [c for c in getattr(plan, "uses", ()) if not callable(getattr(factory, c, None))]
+    if missing:
+        raise ConfigError(
+            f"the design plan {name!r} needs a surrogate with {', '.join(missing)}; "
+            f"{config.surrogate.model!r} has none"
+        )
+    return plan
+
+
 def draw_design(
     config: SurrogateConfig, case: SurrogateCase, rng: np.random.Generator
 ) -> StoredDesign:
@@ -645,19 +860,7 @@ def draw_design(
     layout = case.layout
     try:
         if section.plan == "prior":
-            stored = _stored_generators(case.config, layout)
-            if stored:
-                raise ConfigError(
-                    f"plan 'prior' draws from the prior, but {', '.join(stored)} gives stored "
-                    "columns whatever the random stream: the held-out runs would repeat the "
-                    "training runs; use plan = 'file' with its ensemble_file"
-                )
-
-            def draw(n: int, generator: np.random.Generator) -> dict[str, NDArray[np.float64]]:
-                drawn = composition.draw_prior_ensemble(case.config, layout, n, generator)
-                return dict(layout.split(drawn))
-
-            design = sampled_design(draw, n_train, n_held, rng)
+            design = sampled_design(_prior_draw(case, "prior"), n_train, n_held, rng)
         elif section.plan == "lhs":
             box = {}
             for variable in layout.variables:
@@ -736,8 +939,29 @@ def fingerprint_parts(config: SurrogateConfig, case: SurrogateCase) -> dict[str,
     )
     parts |= {f"stack.{name}": str(value) for name, value in sorted(stack.items())}
     parts["keys"] = _digest([key_document(k) for k in case.keys])
-    parts["design"] = _digest(json.loads(config.design.model_dump_json()))
+    design = json.loads(config.design.model_dump_json())
+    if not design.get("options"):
+        # Absent before the plans' options existed: builds keep their digest.
+        design.pop("options", None)
+    parts["design"] = _digest(design)
     parts["seed"] = str(config.surrogate.seed)
+    if config.coarse is not None and case.provenance.coarse is not None:
+        # The coarse stack's runs are runs too: what shapes them (absent without one).
+        coarse = case.provenance.coarse.model_dump(
+            include={"simulator", "simulator_version", "options_digest", "deck_digest",
+                     "case_digest"}
+        )  # fmt: skip
+        parts["coarse"] = _digest({
+            "section": _with_contents(json.loads(config.coarse.model_dump_json())),
+            "stack": coarse,
+        })  # fmt: skip
+    if config.design.plan not in BUILTIN_PLANS:
+        # An adaptive plan's runs are chosen by the surrogate (the user,
+        # 2026-11-02): its plugin and options are part of what the runs are.
+        parts["surrogate"] = _digest({
+            "model": config.surrogate.model,
+            "options": _with_contents(config.surrogate.options),
+        })  # fmt: skip
     return parts
 
 
@@ -778,6 +1002,7 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
     problems = check_options("surrogate_models", config.surrogate.model, config.surrogate.options)
     if problems:
         raise ConfigError("[surrogate]: " + "; ".join(problems))
+    design_plan(config)  # an unknown plan, its options, the surrogate it needs: before any run
     assert config.surrogate.output_dir is not None
     case = _build_case(config)
     warnings = []
@@ -797,6 +1022,8 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
                 f"{config.design.training + config.design.held_out} the design asks for"
             )
     runs = 0 if config.design.plan == "run" else config.design.training + config.design.held_out
+    if config.coarse is not None:
+        runs *= 2  # every run also on the coarse stack
     return SurrogateBuildPlan(
         name=config.surrogate.name,
         model=config.surrogate.model,
@@ -866,7 +1093,7 @@ def _build_case(config: SurrogateConfig) -> SurrogateCase:
     assert config.surrogate.output_dir is not None
     return surrogate_case(
         case_config, keys, variances, execution=config.execution,
-        output_dir=config.surrogate.output_dir,
+        output_dir=config.surrogate.output_dir, coarse=config.coarse,
     )  # fmt: skip
 
 
@@ -883,9 +1110,17 @@ def _snapshot_set(
     outputs: Mapping[int, NDArray[np.float64]],
     provenance_: SnapshotProvenance,
     failed: Sequence[int],
+    coarse: Mapping[int, NDArray[np.float64]] | None = None,
 ) -> SnapshotSet:
-    """Return the successful members of ``ids`` as snapshots of the surrogate's inputs."""
-    columns = [j for j, m in enumerate(ids) if int(m) in outputs]
+    """Return the successful members of ``ids`` as snapshots of the surrogate's inputs.
+
+    With ``coarse`` (a coarse stack's values by member), only members with both, and the
+    coarse values as the set's ``coarse_outputs``.
+    """
+    columns = [
+        j for j, m in enumerate(ids)
+        if int(m) in outputs and (coarse is None or int(m) in coarse)
+    ]  # fmt: skip
     state = {k: np.ascontiguousarray(v[:, columns]) for k, v in blocks.items()}
     inputs = case.properties.ensemble(state)
     return SnapshotSet(
@@ -898,7 +1133,166 @@ def _snapshot_set(
         run_ids=tuple(int(ids[j]) for j in columns),
         provenance=provenance_,
         failed=tuple(int(m) for m in failed),
+        coarse_outputs=None
+        if coarse is None
+        else np.stack([coarse[int(ids[j])] for j in columns], axis=-1).reshape(
+            len(case.keys), len(columns)
+        ),
     )
+
+
+def _initial_adaptive_design(
+    config: SurrogateConfig, case: SurrogateCase, plan: AdaptiveDesign, rng: np.random.Generator
+) -> StoredDesign:
+    """Return an adaptive plan's first design: the held-out runs, then the initial ones."""
+    n_train, n_held = config.design.training, config.design.held_out
+    n_initial = int(plan.initial_runs(n_train))
+    if not 2 <= n_initial <= n_train:
+        raise ConfigError(
+            f"the design plan {config.design.plan!r} starts with {n_initial} runs: it needs "
+            f"2 to training = {n_train}"
+        )
+    try:
+        drawn = sampled_design(_prior_draw(case, config.design.plan), n_initial, n_held, rng)
+    except ValueError as error:
+        raise ConfigError(f"the design cannot be drawn: {error}") from error
+    return StoredDesign(
+        plan=config.design.plan,
+        held_out_ids=tuple(range(n_held)),
+        training_ids=tuple(range(n_held, n_held + n_initial)),
+        held_out=drawn.held_out,
+        training=drawn.training,
+    )
+
+
+def _adaptive_design(
+    design: StoredDesign,
+    initial: int,
+    pool: Mapping[str, NDArray[np.float64]],
+    batches: Sequence[Sequence[int]],
+) -> StoredDesign:
+    """Return the design of the initial training runs and the pool's chosen columns.
+
+    Member ids: the held-out runs', then the training runs' in order, contiguous.
+    """
+    chosen = [i for batch in batches for i in batch]
+    start = design.training_ids[0]
+    return StoredDesign(
+        plan=design.plan,
+        held_out_ids=design.held_out_ids,
+        training_ids=tuple(range(start, start + initial + len(chosen))),
+        held_out=design.held_out,
+        training={
+            k: np.ascontiguousarray(np.concatenate(
+                [np.asarray(design.training[k])[:, :initial], pool[k][:, chosen]], axis=1
+            ))
+            for k in design.training
+        },
+    )  # fmt: skip
+
+
+def _run_adaptive(
+    config: SurrogateConfig,
+    case: SurrogateCase,
+    directory: SurrogateDirectory,
+    plan: AdaptiveDesign,
+    design: StoredDesign,
+    plan_provenance: SnapshotProvenance,
+    *,
+    keep: str,
+    max_runs: int | None,
+    progress: ProgressReporter | None,
+) -> tuple[StoredDesign, MembersOutcome]:
+    """Run an adaptive design's batches until ``training`` runs are made.
+
+    Each round runs the members not finished, fits the surrogate on the training runs so far
+    (stream ``design_fit``, its state checkpointed per batch) and asks the plan for the next
+    batch from the pool (prior draws from the ``design`` stream's state after the first
+    design, so a resume redraws the same pool). The batches chosen are in ``state.json``;
+    a resume reruns no choice already made. Returns the design and the last outcome (not
+    complete when ``max_runs`` stopped it).
+    """
+    n_train = config.design.training
+    saved = dict(directory.read_state()["adaptive"])
+    pool_rng = np.random.default_rng()
+    pool_rng.bit_generator.state = saved["pool_stream"]
+    pool = _prior_draw(case, config.design.plan)(int(plan.candidate_runs()), pool_rng)
+    pool_inputs = case.properties.ensemble(pool)
+    n_pool = next(iter(pool.values())).shape[1]
+    batches = [[int(i) for i in batch] for batch in saved.get("batches", [])]
+    taken = {i for batch in batches for i in batch}
+    # The state is the record: the training runs are the initial ones and the pool's columns
+    # of the batches chosen (a design saved behind its state is rebuilt from it).
+    design = _adaptive_design(design, int(saved["initial"]), pool, batches)
+    directory.save_design(design, case.layout)
+    budget = max_runs
+    while True:
+        members = _members(design.held_out_ids, design.held_out) + _members(
+            design.training_ids, design.training
+        )
+        before = len(directory.journal())
+        outcome = run_members(
+            directory, case.simulator, case.executor, members, case.keys, label="design",
+            keep_simulations=keep, max_runs=budget, progress=progress,
+        )  # fmt: skip
+        if budget is not None:
+            budget = max(budget - (len(directory.journal()) - before), 0)
+        if not outcome.complete or len(design.training_ids) >= n_train:
+            return design, outcome
+        for label, ids in (("held-out", design.held_out_ids), ("training", design.training_ids)):
+            check_success(label, len(ids), sum(int(m) in outcome.failed for m in ids),
+                          config.design.min_success_fraction)  # fmt: skip
+        failed_ids = sorted(outcome.failed)
+        training = _snapshot_set(case, design.training_ids, design.training, dict(outcome.values),
+                                 plan_provenance, failed_ids)  # fmt: skip
+        fit_rng = np.random.default_rng()
+        fit_rng.bit_generator.state = saved["fit_stream"]
+        section = config.surrogate
+        try:
+            model = surrogate_models.create(section.model, **section.options)
+            model.fit(training, fit_rng)
+        except (TypeError, ValueError, ArithmeticError, LookupError, AttributeError) as error:
+            raise ConfigError(
+                f"the surrogate {section.model!r} cannot be fitted between the design's "
+                f"batches: {type(error).__name__}: {error}"
+            ) from error
+        remaining = [i for i in range(n_pool) if i not in taken]
+        count = min(int(plan.batch_runs()), n_train - len(design.training_ids), len(remaining))
+        if count < 1:
+            raise ConfigError(
+                f"the design plan {config.design.plan!r}'s pool is used up before {n_train} "
+                "training runs: raise its candidates"
+            )
+        candidates = {k: np.ascontiguousarray(v[:, remaining]) for k, v in pool_inputs.items()}
+        try:
+            picks = [int(p) for p in plan.choose(
+                model, training.inputs, candidates, count, keys=case.keys,
+                variances=case.variances,
+            )]  # fmt: skip
+        except (TypeError, ValueError) as error:
+            raise ConfigError(f"the design plan {config.design.plan!r}: {error}") from error
+        if (
+            len(picks) != count
+            or len(set(picks)) != count
+            or not all(0 <= p < len(remaining) for p in picks)
+        ):
+            raise PluginError(
+                f"the design plan {config.design.plan!r} chose {picks}, not {count} distinct "
+                f"candidates of {len(remaining)}"
+            )
+        chosen = [remaining[p] for p in picks]
+        taken.update(chosen)
+        batches.append(chosen)
+        saved["batches"] = batches
+        saved["fit_stream"] = fit_rng.bit_generator.state
+        directory.write_state(adaptive=saved)  # the record first, then the design from it
+        design = _adaptive_design(design, int(saved["initial"]), pool, batches)
+        directory.save_design(design, case.layout)
+        logger.info(
+            "design batch chosen",
+            extra={"event": "surrogate_design_batch", "batch": len(saved["batches"]),
+                   "runs": count, "training": len(design.training_ids)},
+        )  # fmt: skip
 
 
 def _build(
@@ -938,10 +1332,25 @@ def _build(
                 "surrogate model files missing; refitting on the runs made",
                 extra={"event": "surrogate_refit_missing_model"},
             )
+    plan = design_plan(config)
+    adaptive = not isinstance(plan, BuiltinDesign)
     streams = build_streams(section.seed)
     design = directory.load_design()
+    if design is not None and adaptive and "adaptive" not in directory.read_state():
+        design = None  # saved, but its state was never written: draw it again (same draws)
     if design is None:
-        design = draw_design(config, case, streams["design"])
+        if isinstance(plan, BuiltinDesign):
+            design = draw_design(config, case, streams["design"])
+        else:
+            design = _initial_adaptive_design(config, case, plan, streams["design"])
+            # The state first: it is the record (a design saved without it is drawn again,
+            # identically, from the seed). The pool is drawn from here on, redrawn identically
+            # on resume; the fits between batches draw from their own stream.
+            directory.write_state(adaptive={
+                "initial": len(design.training_ids),
+                "pool_stream": streams["design"].bit_generator.state,
+                "fit_stream": streams["design_fit"].bit_generator.state, "batches": [],
+            })  # fmt: skip
         directory.save_design(design, case.layout)
         directory.write_state(design_stream=streams["design"].bit_generator.state)
         logger.info(
@@ -954,6 +1363,7 @@ def _build(
         "source": None if config.design.run_dir is None else str(config.design.run_dir),
     })  # fmt: skip
     keep = config.output.keep_simulations
+    coarse_values: dict[int, NDArray[np.float64]] | None = None
     if design.plan == "run":
         assert design.held_out_outputs is not None
         assert design.training_outputs is not None
@@ -965,15 +1375,24 @@ def _build(
         seconds: Mapping[int, float] = {}
         simulator_runs = 0
     else:
-        members = _members(design.held_out_ids, design.held_out) + _members(
-            design.training_ids, design.training
-        )
-        outcome = run_members(
-            directory, case.simulator, case.executor, members, case.keys, label="design",
-            keep_simulations=keep, max_runs=max_runs, progress=progress,
-        )  # fmt: skip
+        journal_before = len(directory.journal())
+        if isinstance(plan, BuiltinDesign):
+            members = _members(design.held_out_ids, design.held_out) + _members(
+                design.training_ids, design.training
+            )
+            outcome = run_members(
+                directory, case.simulator, case.executor, members, case.keys, label="design",
+                keep_simulations=keep, max_runs=max_runs, progress=progress,
+            )  # fmt: skip
+        else:
+            design, outcome = _run_adaptive(
+                config, case, directory, plan, design, plan_provenance,
+                keep=keep, max_runs=max_runs, progress=progress,
+            )  # fmt: skip
         if not outcome.complete:
-            summary = _summary(config, design, case, outcome.failed, len(outcome.pending),
+            # An adaptive design's later batches are pending too (not drawn yet).
+            later = max(config.design.training - len(design.training_ids), 0)
+            summary = _summary(config, design, case, outcome.failed, len(outcome.pending) + later,
                                len(outcome.values) + len(outcome.failed))  # fmt: skip
             directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
             directory.write_state(complete=False)
@@ -984,21 +1403,55 @@ def _build(
             return BuildResult(directory.path, summary)
         values, seconds, failed = dict(outcome.values), outcome.seconds, dict(outcome.failed)
         simulator_runs = len(values) + len(failed)
+        if case.coarse_simulator is not None:
+            # Every design run on the coarse stack too, in a folder of its own,
+            # within what is left of max_runs.
+            budget = (
+                None if max_runs is None
+                else max(max_runs - (len(directory.journal()) - journal_before), 0)
+            )  # fmt: skip
+            coarse_outcome = run_members(
+                SurrogateDirectory(directory.path / COARSE),
+                case.coarse_simulator, case.executor,
+                # Only the members whose fine run succeeded: a pair needs both.
+                [m for m in _members(design.held_out_ids, design.held_out)
+                 + _members(design.training_ids, design.training) if m[0] in values],
+                case.keys, label="coarse", keep_simulations=keep, max_runs=budget,
+                progress=progress,
+            )  # fmt: skip
+            if not coarse_outcome.complete:
+                summary = _summary(
+                    config, design, case, failed, len(coarse_outcome.pending),
+                    simulator_runs + len(coarse_outcome.values) + len(coarse_outcome.failed),
+                )  # fmt: skip
+                directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
+                directory.write_state(complete=False)
+                logger.info(
+                    "build stopped",
+                    extra={"event": "surrogate_stopped", "pending": len(coarse_outcome.pending)},
+                )  # fmt: skip
+                return BuildResult(directory.path, summary)
+            coarse_values = dict(coarse_outcome.values)
+            for member, message in coarse_outcome.failed.items():
+                # A run is a training or held-out pair: without its coarse run it is lost.
+                failed.setdefault(member, f"its coarse run failed: {message}")
+                values.pop(member, None)
+            simulator_runs += len(coarse_outcome.values) + len(coarse_outcome.failed)
         for label, ids in (("held-out", design.held_out_ids), ("training", design.training_ids)):
             check_success(label, len(ids), sum(int(m) in failed for m in ids),
                           config.design.min_success_fraction)  # fmt: skip
     failed_ids = sorted(failed)
     held_out = _snapshot_set(case, design.held_out_ids, design.held_out, values,
-                             plan_provenance, failed_ids)  # fmt: skip
+                             plan_provenance, failed_ids, coarse_values)  # fmt: skip
     training = _snapshot_set(case, design.training_ids, design.training, values,
-                             plan_provenance, failed_ids)  # fmt: skip
+                             plan_provenance, failed_ids, coarse_values)  # fmt: skip
     # Every successful run, in id order: the snapshot set a refit starts from (phase 3).
     everything = _snapshot_set(
         case,
         list(design.held_out_ids) + list(design.training_ids),
         {k: np.concatenate([design.held_out[k], design.training[k]], axis=1)
          for k in design.held_out},
-        values, plan_provenance, failed_ids,
+        values, plan_provenance, failed_ids, coarse_values,
     )  # fmt: skip
     directory.save_snapshots(everything)
     try:
@@ -1030,6 +1483,9 @@ def _build(
         snapshots=SnapshotReference(path=f"../{SNAPSHOTS}", digest=everything.digest()),
         fit=FitRecord(seed=section.seed, stream_state=fitted.stream_state),
         apex_commit=plan_provenance.apex_commit,
+        coarse=None
+        if config.coarse is None
+        else coarse_relative_to(config.coarse, directory.model.parent),
     )
     directory.write_json(GATE, json.loads(fitted.gate.model_dump_json()))
     # A changed plugin or gate refits on the runs made: the configuration follows the model
@@ -1239,6 +1695,14 @@ def check_surrogate(
         raise ConfigError("min_success_fraction must be in (0, 1] and min_inside in [0, 1]")
     loaded = load_surrogate(Path(model_path))
     manifest = loaded.manifest
+    coarse_section = None
+    if isinstance(loaded.model, CoarseCorrectedSurrogate):
+        if manifest.coarse is None or manifest.provenance.coarse is None:
+            raise ConfigError(
+                f"the surrogate {model_path} corrects a coarse simulation but records no "
+                "coarse stack: rebuild it (models record theirs since the step 2)"
+            )
+        coarse_section = coarse_resolved_in(manifest.coarse, Path(model_path).parent)
     trained = _model_snapshots(Path(model_path), manifest)
     against = Path(against).resolve()
     if against.is_dir():
@@ -1269,7 +1733,10 @@ def check_surrogate(
             )
         variances = np.ascontiguousarray(observed_variances[[index[k] for k in keys]])
     with exclusive(folder, "surrogate check"):
-        case = surrogate_case(case_config, keys, variances, execution=None, output_dir=folder)
+        case = surrogate_case(
+            case_config, keys, variances, execution=None, output_dir=folder,
+            coarse=coarse_section,
+        )  # fmt: skip
         mismatches = manifest.provenance.stack_mismatches(case.provenance)
         if mismatches:
             raise ConfigError(
@@ -1292,10 +1759,16 @@ def check_surrogate(
             directory.save_design(design, case.layout)
             directory.write_state(trained_on=trained_on)
         trained_on = [int(m) for m in directory.read_state().get("trained_on", [])]
+        made_before = len(directory.journal())
         outcome = run_members(
             directory, case.simulator, case.executor,
             _members(design.held_out_ids, design.held_out),
             case.keys, label="check", max_runs=max_runs, progress=progress,
+        )  # fmt: skip
+        # What is left of max_runs for the coarse stack: less the fine runs made now.
+        left = (
+            None if max_runs is None
+            else max(max_runs - (len(directory.journal()) - made_before), 0)
         )  # fmt: skip
         created = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
         base = SurrogateCheckSummary(
@@ -1318,23 +1791,58 @@ def check_surrogate(
             })  # fmt: skip
             record_check(Path(model_path), directory.path, failed_check)
             raise
+        coarse_values = None
+        failed_ids = dict(outcome.failed)
+        if case.coarse_simulator is not None:
+            # Each successful run on the model's coarse stack too, and the
+            # corrected prediction gated (a member without its coarse run is lost).
+            coarse_outcome = run_members(
+                SurrogateDirectory(directory.path / COARSE), case.coarse_simulator,
+                case.executor,
+                [m for m in _members(design.held_out_ids, design.held_out)
+                 if m[0] in outcome.values],
+                case.keys, label="coarse",
+                max_runs=left,
+                progress=progress,
+            )  # fmt: skip
+            if not coarse_outcome.complete:
+                directory.write_json(CHECK, json.loads(base.model_dump_json()))
+                return CheckResult(directory.path, base)
+            coarse_values = dict(coarse_outcome.values)
+            failed_ids.update(coarse_outcome.failed)
+            base = base.model_copy(update={"failed": sorted(failed_ids)})
+            try:
+                check_success("check", runs, len(failed_ids), min_success_fraction)
+            except WorkflowError as error:
+                record_check(Path(model_path), directory.path, base.model_copy(update={
+                    "status": "complete", "succeeded": runs - len(failed_ids),
+                    "passed": False, "notes": [f"with the coarse runs: {error}"],
+                }))  # fmt: skip
+                raise
         snapshots = _snapshot_set(case, design.held_out_ids, design.held_out, outcome.values,
-                                  case.provenance, sorted(outcome.failed))  # fmt: skip
+                                  case.provenance, sorted(failed_ids),
+                                  coarse_values)  # fmt: skip
         found = check_members(loaded.domain, loaded.model, snapshots.inputs, snapshots.run_ids,
-                              case.keys)  # fmt: skip
+                              case.keys, coarse=snapshots.coarse_outputs)  # fmt: skip
         outside = set(found.members)
         inside = [j for j, m in enumerate(snapshots.run_ids) if m not in outside]
         tolerances = manifest.gate.tolerances if manifest.gate is not None else GateTolerances()
         if inside:
             gated = snapshots.columns(inside)
-            predicted = np.ascontiguousarray(loaded.model.predict(gated.inputs, case.keys))
+            if isinstance(loaded.model, CoarseCorrectedSurrogate):
+                assert gated.coarse_outputs is not None
+                predicted = np.ascontiguousarray(loaded.model.predict_corrected(
+                    gated.inputs, gated.coarse_outputs, case.keys
+                ))  # fmt: skip
+            else:
+                predicted = np.ascontiguousarray(loaded.model.predict(gated.inputs, case.keys))
             kinds = {d.datatype: d.kind for d in (manifest.gate.datatypes if manifest.gate else [])
                      if d.kind is not None}  # fmt: skip
             verdict = gate(predicted, gated.outputs, case.keys, gated.run_ids,
                            tolerances=tolerances, variances=case.variances, kinds=kinds,
-                           failed=sorted(outcome.failed))  # fmt: skip
+                           failed=sorted(failed_ids))  # fmt: skip
         else:
-            verdict = GateResult(held_out=[], failed=sorted(outcome.failed), datatypes=[],
+            verdict = GateResult(held_out=[], failed=sorted(failed_ids), datatypes=[],
                                  tolerances=tolerances, passed=False)  # fmt: skip
         notes = []
         share = len(inside) / snapshots.n_runs
@@ -1622,11 +2130,17 @@ def surrogate_forecasting(
     config: HistoryMatchConfig,
     observations: ObservationSet,
     stack: SnapshotProvenance,
+    *,
+    layout: StateLayout | None = None,
+    executor: object = None,
 ) -> SurrogateForecasting:
     """Compose what a run with ``[surrogate]`` holds, after every refusal.
 
     ``observations`` are the run's raw observations (every role), ``stack`` its simulator
-    stack's provenance (:func:`stack_provenance`).
+    stack's provenance (:func:`stack_provenance`). A coarse-corrected model's coarse stack
+    (from its manifest) is composed over the run's case, on the run's
+    ``layout``, and run by the run's ``executor``; it must be the stack the model was
+    built with.
 
     Raises
     ------
@@ -1641,6 +2155,7 @@ def surrogate_forecasting(
     original = active_model(section.model_file)
     refuse_model(config, original, observations, stack)
     manifest = original.manifest
+    coarse = run_coarse_stack(config, original, layout, executor)
     assert manifest.gate is not None  # refused otherwise
     try:
         tolerances = (
@@ -1682,7 +2197,53 @@ def surrogate_forecasting(
         snapshots=snapshots,
         cost=model_cost(Path(section.model_file), original.identity),
         stored_options=functools.partial(options_relative_to, resolved),
+        coarse=None if coarse is None else coarse.simulator,
+        stored_coarse=None
+        if manifest.coarse is None
+        else functools.partial(
+            coarse_relative_to,
+            coarse_resolved_in(manifest.coarse, Path(section.model_file).parent),
+        ),
     )
+
+
+def run_coarse_stack(
+    config: HistoryMatchConfig,
+    model: ActiveModel,
+    layout: StateLayout | None,
+    executor: object,
+) -> CoarseStack | None:
+    """Return the coarse stack a run with a coarse-corrected model runs.
+
+    ``None`` for any other model. The stack is the manifest's (its file options relative
+    to the model's folder) over the run's case: it must be the one the model was built
+    with, compared as the fine stack is (:meth:`SnapshotProvenance.stack_mismatches`).
+
+    Raises
+    ------
+    ConfigError
+        If the manifest records no coarse stack, the stack is refused or invalid, or it is
+        not the model's.
+    """
+    if not isinstance(model.model, CoarseCorrectedSurrogate):
+        return None
+    manifest = model.manifest
+    if manifest.coarse is None or manifest.provenance.coarse is None:
+        raise ConfigError(
+            f"the surrogate {model.path} corrects a coarse simulation but records no coarse "
+            "stack: rebuild it (models record theirs since the step 2)"
+        )
+    if layout is None:
+        layout = composition.build_layout(config)
+    section = coarse_resolved_in(manifest.coarse, model.path.parent)
+    built = coarse_stack(config, section, layout, executor)
+    mismatches = manifest.provenance.coarse.stack_mismatches(built.provenance)
+    if mismatches:
+        raise ConfigError(
+            f"the surrogate {model.path} was built for another coarse stack "
+            f"({', '.join(mismatches)} differ)"
+        )
+    return built
 
 
 def model_cost(model_file: Path, identity: str) -> BuildCost | None:

@@ -29,7 +29,16 @@ from typing import Any, Literal, Self
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from apex.domain.config import PluginSection
 from apex.domain.observations import DataKey
@@ -124,20 +133,36 @@ class SnapshotProvenance(_Frozen):
     seed: int | None = None
     apex_commit: str | None = None
     source: str | None = Field(default=None, description="The run directory, if any.")
+    coarse: "SnapshotProvenance | None" = Field(
+        default=None, description="The coarse stack's, for coarse-corrected surrogates."
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Absent before coarse stacks existed: manifests and snapshot digests
+        # of surrogates without one keep their bytes.
+        document: dict[str, Any] = handler(self)
+        if document.get("coarse") is None:
+            document.pop("coarse", None)
+        return document
 
     def stack_mismatches(self, other: "SnapshotProvenance") -> list[str]:
         """Return the fields naming the stack and case on which ``other`` differs.
 
-        Only what both state is compared: an unknown digest is not a difference.
+        Only what both state is compared: an unknown digest is not a difference. The coarse
+        stack's fields are prefixed ``coarse.``.
         """
         names = ("simulator", "options_digest", "deck_digest", "case_digest")
-        return [
+        found = [
             n
             for n in names
             if getattr(self, n) is not None
             and getattr(other, n) is not None
             and getattr(self, n) != getattr(other, n)
         ]
+        if self.coarse is not None and other.coarse is not None:
+            found += [f"coarse.{n}" for n in self.coarse.stack_mismatches(other.coarse)]
+        return found
 
 
 @dataclass(frozen=True, eq=False)
@@ -168,6 +193,9 @@ class SnapshotSet:
         Optional state snapshots, ``{name: (n_cells, n_times, n_runs)}``.
     field_times
         ``(n_times,)``, the times of ``fields``.
+    coarse_outputs
+        Optional ``(n_keys, n_runs)``: a coarse simulation's values at the same ``keys`` for
+        the same runs, for surrogates that correct a coarse forecast.
     """
 
     layout: StateLayout
@@ -179,6 +207,7 @@ class SnapshotSet:
     failed: tuple[int, ...] = ()
     fields: Mapping[str, NDArray[np.float64]] = field(default_factory=dict)
     field_times: tuple[str, ...] = ()
+    coarse_outputs: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
         """Check every shape against the layout, the keys and the runs; copy the arrays."""
@@ -208,6 +237,13 @@ class SnapshotSet:
         outputs = _array(self.outputs, "outputs", 2)
         if outputs.shape != (len(self.keys), n_runs):
             raise ValueError(f"outputs must be ({len(self.keys)}, {n_runs}), got {outputs.shape}")
+        coarse = None
+        if self.coarse_outputs is not None:
+            coarse = _array(self.coarse_outputs, "coarse outputs", 2)
+            if coarse.shape != outputs.shape:
+                raise ValueError(
+                    f"coarse outputs must be the outputs' {outputs.shape}, got {coarse.shape}"
+                )
         if self.fields and not self.field_times:
             raise ValueError("field snapshots need their field_times")
         fields: dict[str, NDArray[np.float64]] = {}
@@ -228,6 +264,7 @@ class SnapshotSet:
         object.__setattr__(self, "run_ids", tuple(int(i) for i in self.run_ids))
         object.__setattr__(self, "failed", tuple(int(i) for i in self.failed))
         object.__setattr__(self, "field_times", tuple(self.field_times))
+        object.__setattr__(self, "coarse_outputs", coarse)
 
     @property
     def n_runs(self) -> int:
@@ -250,6 +287,7 @@ class SnapshotSet:
             failed=self.failed,
             fields={name: array[:, :, index] for name, array in self.fields.items()},
             field_times=self.field_times,
+            coarse_outputs=None if self.coarse_outputs is None else self.coarse_outputs[:, index],
         )
 
     def digest(self) -> str:
@@ -282,6 +320,10 @@ class SnapshotSet:
             array(self.fields[name])
         text(repr(self.field_times))
         text(self.provenance.model_dump_json())
+        if self.coarse_outputs is not None:
+            # Only when there are some, so that sets without them keep their digests.
+            text("coarse_outputs")
+            array(self.coarse_outputs)
         return digest.hexdigest()
 
 
@@ -742,6 +784,20 @@ class SurrogateManifest(_Frozen):
         default_factory=dict, description="The plugin's own manifest (``to_arrays``)."
     )
     arrays: ArraysReference
+    coarse: "CoarseSection | None" = Field(
+        default=None,
+        description="The coarse stack a coarse-corrected surrogate runs, its "
+        "file options relative to the manifest's folder.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Absent before coarse stacks existed: manifests without one keep
+        # their bytes, so their identities do not change.
+        document: dict[str, Any] = handler(self)
+        if document.get("coarse") is None:
+            document.pop("coarse", None)
+        return document
 
     def data_keys(self) -> tuple[DataKey, ...]:
         """Return the keys the surrogate answers."""
@@ -832,13 +888,22 @@ class DesignSection(_Frozen):
       a few scalar inputs: use ``prior`` for fields;
     - ``file``: columns of a stored ensemble (``ensemble_file``, one array per variable);
     - ``run``: the forecasts an existing history-matching run holds (``run_dir``, its
-      ``iterations``): free snapshots, no simulator run.
+      ``iterations``): free snapshots, no simulator run;
+    - another plan of the registry ``surrogate_designs``, with its
+      ``options``: e.g. an adaptive plan that chooses training runs where the surrogate is
+      uncertain (the held-out runs are drawn from the prior first, fixed by the seed).
 
     With ``[[parameterizations]]`` in the case, the design is drawn in state space and each
     member mapped to the properties its simulator reads, which are the surrogate's inputs.
     """
 
-    plan: Literal["prior", "lhs", "file", "run"] = "prior"
+    plan: str = Field(
+        default="prior",
+        description="prior, lhs, file, run, or another plan of the registry surrogate_designs.",
+    )
+    options: dict[str, JsonValue] = Field(
+        default_factory=dict, description="Another plan's options (core's plans take none)."
+    )
     training: int = Field(ge=2, description="Training runs: the plugin is fitted on these.")
     held_out: int = Field(ge=1, description="Held-out runs: the gate's, never fitted on.")
     box: dict[str, tuple[float, float]] = Field(
@@ -871,6 +936,8 @@ class DesignSection(_Frozen):
                     if given
                     else f"plan = {plan!r} needs {option}"
                 )
+        if self.options and self.plan in ("prior", "lhs", "file", "run"):
+            raise ValueError(f"plan = {self.plan!r} takes no options")
         if self.box and self.plan != "lhs":
             raise ValueError("box is for plan = 'lhs'")
         if self.iterations != "all" and self.plan != "run":
@@ -903,6 +970,25 @@ class GateSection(_Frozen):
     def tolerances(self) -> GateTolerances:
         """Return the gate's tolerances (the defaults where not given)."""
         return GateTolerances(sigma_ratio=self.sigma_ratio, relative=dict(self.relative))
+
+
+class CoarseSection(_Frozen):
+    """``[coarse]``: a coarse simulator stack every design run also runs on.
+
+    For surrogates that correct a coarse forecast (``coarse_corrected``). The coarse stack is
+    the case's, with ``simulator`` (default: the case's) and ``options`` merged over the
+    case's simulator options (e.g. another ``deck_template_file``), and ``parameterizations``
+    applied after the case's (e.g. ``block_average`` onto the coarse grid). Its runs answer
+    the same keys as the case's.
+    """
+
+    simulator: str | None = Field(default=None, description="Default: the case's simulator.")
+    options: dict[str, JsonValue] = Field(
+        default_factory=dict, description="Merged over the case's simulator options."
+    )
+    parameterizations: list[PluginSection] = Field(
+        default_factory=list, description="Applied after the case's (e.g. block_average)."
+    )
 
 
 class SurrogateOutputSection(_Frozen):
@@ -951,6 +1037,9 @@ class SurrogateConfig(_Frozen):
         default=None, description="Where the full runs go; default: the case's [execution]."
     )
     output: SurrogateOutputSection = Field(default_factory=SurrogateOutputSection)
+    coarse: CoarseSection | None = Field(
+        default=None, description="A coarse stack every run also runs on."
+    )
 
 
 # ------------------------------------------------------------------------ the workflow's results
@@ -1054,3 +1143,7 @@ class SurrogateCheckSummary(_Frozen):
         default=0, description="The check's order among the model's complete checks (1, 2, ...)."
     )
     created: str
+
+
+# The manifest names the coarse stack, defined with the build's sections.
+SurrogateManifest.model_rebuild()

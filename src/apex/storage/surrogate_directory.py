@@ -354,6 +354,8 @@ class SurrogateDirectory:
         }
         for i, variable in enumerate(snapshots.layout.variables):
             arrays[f"input_{i}"] = snapshots.inputs[variable.name]
+        if snapshots.coarse_outputs is not None:
+            arrays["coarse_outputs"] = snapshots.coarse_outputs
         path = self.path / SNAPSHOTS
         _save_npz(path, arrays)
         return path
@@ -383,6 +385,7 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 run_ids=tuple(int(i) for i in data["run_ids"]),
                 failed=tuple(int(i) for i in data["failed"]),
                 provenance=SnapshotProvenance.model_validate_json(str(data["provenance"])),
+                coarse_outputs=data["coarse_outputs"] if "coarse_outputs" in data.files else None,
             )
             recorded = str(data["digest"])
     except (OSError, KeyError, ValueError) as error:

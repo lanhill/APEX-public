@@ -56,12 +56,18 @@ class PropertyMap:
                     f"{type(parameterization).__name__} produces {', '.join(clashing)}, which "
                     "already exist(s)"
                 )
-            # Outputs live on the grid of the variables they come from (one cell each).
+            # Outputs live on the grid of the variables they come from (one cell each), unless
+            # the parameterization names its own (``output_grid``: e.g. block_average's
+            # coarser grid).
             source = next((v for v in parameterization.variables if v in grids), None)
+            own = getattr(parameterization, "output_grid", None)
             available -= set(parameterization.variables)
             available |= set(parameterization.outputs)
             for output in parameterization.outputs:
-                if source is not None:
+                if own is not None:
+                    grids[output] = tuple(int(d) for d in own)
+                    sizes[output] = int(np.prod(grids[output]))
+                elif source is not None:
                     grids[output] = grids[source]
                     sizes[output] = sizes[source]
         self.names = tuple(sorted(available))
