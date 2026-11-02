@@ -23,7 +23,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from apex.agents.catalogue import CORE_AGENTS
-from apex.agents.chat import AUTO_PROPOSED, READ_TOOLS, SYSTEM, ChatAssistant, public_agents
+from apex.agents.chat import READ_TOOLS, SYSTEM, UNPROPOSED, ChatAssistant, public_agents
 from apex.agents.loop import AgentLoop, Fallback, LocalTool
 from apex.agents.providers.stub import StubProvider
 from apex.agents.trace import CallRecorder
@@ -442,37 +442,33 @@ def test_the_assistant_plans_a_draft_and_proposes_it_but_never_submits(
     assert shown.startswith("UI/owner/drafts/")  # the owner's web-UI folder
 
 
-def test_a_planned_draft_gets_its_card_when_the_model_does_not_propose_it(
+def test_a_draft_the_model_does_not_propose_gets_no_card_and_is_named(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
-    """A reported issue (2026-10-24): a valid plan, and an answer with no propose_action; the card
-    is shown anyway (launched only on the user's click), and the answer is the model's."""
+    """#273 (the user, 2026-11-02): a card appeared for a plan the answer had said does not
+    answer the request; only propose_action shows one now, and the answer names the saved
+    draft (it was given a card anyway since a reported issue of 2026-10-24)."""
     variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"}]
     stub = StubProvider([
         Completion(tool_calls=(ToolCall("c1", "plan_study", {
             "case": "alpha/config.toml", "goal": "baseline only", "budget": 200,
             "name": "no_card", "variants": variants, "replicates": 1}),)),
-        _answer("Here is the plan; it costs 100 simulator runs."),
+        _answer("This plan does not answer your request, so I am not proposing it."),
     ])  # fmt: skip
     _, service, store, assistant = _planning(tmp_path, linear_case, stub)
     chat = store.create("plan")
-    shown, _ = assistant.drafts(chat.id)
+    _, folder = assistant.drafts(chat.id)
 
     answer = assistant.run(chat.id, "Plan a study on alpha so I can review and launch it")
 
-    # The model's answer, closed by the card it did not propose (a reported issue,
-    # 2026-10-24: "planned but not proposed yet" above the card).
     assert answer == (
-        "Here is the plan; it costs 100 simulator runs.\n\n"
-        + AUTO_PROPOSED.format(drafts="`study_no_card.toml`")
+        "This plan does not answer your request, so I am not proposing it.\n\n"
+        + UNPROPOSED.format(drafts="`study_no_card.toml`")
     )
     assert store.turns(chat.id)[-1].content == answer
-    [proposal] = store.proposals(chat.id)
-    assert (proposal.state, proposal.draft) == ("pending", f"{shown}/study_no_card.toml")
-    assert proposal.kind == "launch_study"
-    assert proposal.data["cost"] == 100
-    assert [e.kind for e in store.events(chat.id)].count("proposal") == 1
-    assert service.jobs.all_records() == []  # a card, not a launch
+    assert store.proposals(chat.id) == []
+    assert (folder / "study_no_card.toml").exists()  # saved, without a card
+    assert service.jobs.all_records() == []
 
 
 def test_asked_to_propose_a_study_the_assistant_proposes_it_at_once() -> None:
@@ -487,11 +483,11 @@ def test_asked_to_propose_a_study_the_assistant_proposes_it_at_once() -> None:
     assert SYSTEM.index("shows the user a card") < rule < SYSTEM.index("never propose a card over")
 
 
-def test_a_card_shown_after_a_fallback_answer_is_named_in_it(
+def test_a_draft_saved_before_a_fallback_answer_is_named_in_it(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
-    """A turn that planned a draft and then gave no usable answer still gets the draft's card,
-    and the fallback answer says so; the stored turn and the answer event agree."""
+    """A turn that planned a draft and then gave no usable answer names the saved draft (no
+    card, #273); the stored turn and the answer event agree."""
     variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"}]
     stub = StubProvider([
         Completion(tool_calls=(ToolCall("c1", "plan_study", {
@@ -504,14 +500,14 @@ def test_a_card_shown_after_a_fallback_answer_is_named_in_it(
     answer = assistant.run(chat.id, "Set up a baseline study on alpha and propose it")
 
     assert store.turns(chat.id)[-1].data["decided_by"] == "fallback"
-    assert answer.endswith(AUTO_PROPOSED.format(drafts="`study_fell_back.toml`"))
+    assert answer.endswith(UNPROPOSED.format(drafts="`study_fell_back.toml`"))
     assert store.turns(chat.id)[-1].content == answer
     [event] = [e for e in store.events(chat.id) if e.kind == "answer"]
     assert event.data["text"] == answer
-    assert len(store.proposals(chat.id)) == 1
+    assert store.proposals(chat.id) == []
 
 
-def test_a_timed_out_model_is_said_in_plain_words_and_the_card_still_named(
+def test_a_timed_out_model_is_said_in_plain_words_and_the_draft_still_named(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
     """issue #239: the answer was the provider's error ("no answer in 120 s (2
@@ -534,37 +530,26 @@ def test_a_timed_out_model_is_said_in_plain_words_and_the_card_still_named(
     assert "120 s" not in answer
     assert "attempt" not in answer
     assert "plan_study (done)" in answer
-    assert answer.endswith(AUTO_PROPOSED.format(drafts="`study_slow.toml`"))
+    assert answer.endswith(UNPROPOSED.format(drafts="`study_slow.toml`"))
     assert "no answer in 120 s" in store.turns(chat.id)[-1].data["reason"]
     [shown] = [e for e in store.events(chat.id) if e.kind == "fallback"]
     assert shown.data["reason"] == "the model took too long to answer"
 
 
-def test_the_closing_sentence_names_every_card_and_who_may_launch() -> None:
-    """One card, several, and a sign-in that may not launch (its card says so)."""
-    from types import SimpleNamespace
+def test_the_closing_sentence_names_every_unproposed_draft() -> None:
+    """None, one, several (#273: saved drafts named, no cards)."""
+    from apex.agents.chat import _unproposed_note
 
-    from apex.agents.chat import AUTO_PROPOSED_MANY, AUTO_PROPOSED_NO_LAUNCH, _auto_proposed_note
-
-    assert _auto_proposed_note([], None) == ""
-    one = _auto_proposed_note(["UI/owner/drafts/c/study_a.toml"], None)
-    assert one == "\n\n" + AUTO_PROPOSED.format(drafts="`study_a.toml`")
-    two = _auto_proposed_note(["d/study_a.toml", "d/study_b.toml"], None)
-    assert two == "\n\n" + AUTO_PROPOSED_MANY.format(drafts="`study_a.toml`, `study_b.toml`")
-
-    def access(submit: bool) -> Any:  # noqa: ANN401 (a stand-in for Access)
-        return SimpleNamespace(rules=SimpleNamespace(actions=SimpleNamespace(submit=submit)))
-
-    guest = _auto_proposed_note(["d/study_a.toml"], access(False))
-    assert guest == "\n\n" + AUTO_PROPOSED_NO_LAUNCH.format(drafts="`study_a.toml`")
-    assert _auto_proposed_note(["d/study_a.toml"], access(True)) == one
+    assert _unproposed_note([]) == ""
+    one = _unproposed_note(["UI/owner/drafts/c/study_a.toml"])
+    assert one == "\n\n" + UNPROPOSED.format(drafts="`study_a.toml`")
+    two = _unproposed_note(["d/study_a.toml", "d/study_b.toml"])
+    assert two == "\n\n" + UNPROPOSED.format(drafts="`study_a.toml`, `study_b.toml`")
 
 
-def test_a_stopped_turn_proposes_none_of_its_drafts(
-    tmp_path: Path, linear_case: CaseFactory
-) -> None:
-    """After Stop (or once another turn is the chat's), a draft gets no card: its event
-    would be dropped, leaving a card the user never saw, or a later turn's draft."""
+def test_a_stopped_turn_names_none_of_its_drafts(tmp_path: Path, linear_case: CaseFactory) -> None:
+    """After Stop (or once another turn is the chat's), no draft is named: its event would be
+    dropped, or it is a later turn's draft."""
     import threading
 
     from apex.agents.chat import _Turn
@@ -579,12 +564,12 @@ def test_a_stopped_turn_proposes_none_of_its_drafts(
     stopped.set()
     assistant._running[chat.id] = 7
 
-    assert assistant._propose_drafts(chat.id, None, 0, _Turn(7, stopped, [])) == []
+    assert assistant._unproposed_drafts(chat.id, 0, _Turn(7, stopped, [])) == []
     other = _Turn(6, threading.Event(), [])  # no longer the chat's turn
-    assert assistant._propose_drafts(chat.id, None, 0, other) == []
+    assert assistant._unproposed_drafts(chat.id, 0, other) == []
     assert store.proposals(chat.id) == []
     current = _Turn(7, threading.Event(), [])
-    assert assistant._propose_drafts(chat.id, None, 0, current) == [
+    assert assistant._unproposed_drafts(chat.id, 0, current) == [
         f"{assistant.drafts(chat.id)[0]}/study_stopped.toml"
     ]
 
@@ -1038,9 +1023,9 @@ def test_apex_against_erts_localization_is_planned_within_the_turns(
 
     answer = assistant.run(chat.id, "plan a study on alpha to " + goal)
 
-    # The model did not propose its draft: the card was added, and the answer says so.
+    # The model did not propose its draft: no card (#273), and the answer names the draft.
     assert answer.startswith("I planned ES-MDA with adaptive_rows against ert_adaptive.\n\n")
-    assert answer.endswith("launched from the card.")
+    assert "Saved without a launch card: `study_" in answer
     assert len(stub.requests) == 11  # 10 turns, and one more for the refused plan
     results = [e.data for e in store.events(chat.id) if e.kind == "tool_result"]
     refused = results[len(lookups)]
@@ -2341,3 +2326,41 @@ def test_a_comparisons_card_states_each_arms_runs_and_flags_a_fifth(
     written = tomllib.loads((tmp_path / planned["draft"]).read_text())["study"]["methods"]
     assert written["esmda"]["options"]["inflation"] == [4, 4, 4, 4]
     assert "max_iterations" not in written["esmda"]
+
+
+def test_arms_that_need_a_missing_extra_are_named_so_the_others_are_kept(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#271 (2026-11-02): ert_adaptive (no ert extra) was refused, and the assistant fell back
+    to a default draft without the adaptive_rows arm the user asked for."""
+    from apex.services import plugins
+
+    def missing(factory: object) -> tuple[str, str] | None:
+        requires = getattr(factory, "requires", None) or {}
+        return next(iter(requires.items()), None)
+
+    monkeypatch.setattr(plugins, "missing_extra", missing)
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    rows = {
+        "name": "esmda",
+        "options": {"inflation": [2, 2]},
+        "strategy": {"name": "adaptive_rows", "options": {"threshold": 0.5}},
+    }
+    ert = {"name": "esmda", "options": {"inflation": [2, 2]}, "strategy": {"name": "ert_adaptive"}}
+
+    def call(methods: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = plan.handler(plan.arguments(
+            case="alpha/config.toml", goal="adaptive localization in APEX and ERT",
+            budget=5000, methods=methods,
+            variants=[{"name": "plain", "rationale": "as configured"}]))  # fmt: skip
+        return result
+
+    with pytest.raises(ValueError, match="need an extra") as refused:
+        call({"esmda_rows": rows, "esmda_ert": ert})
+    message = str(refused.value)
+    assert "method esmda_ert: update_strategies 'ert_adaptive' needs" in message
+    assert "esmda_rows" not in message
+    assert "keeping every other arm" in message
+    assert set(call({"esmda_rows": rows})["methods"]) == {"esmda_rows"}  # the rest is planned

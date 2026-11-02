@@ -40,7 +40,7 @@ By the end of this lesson you will be able to:
 - Access to the `apex` command line from the APEX folder.
 - A working run configuration (the TOML file you pass to `apex run`).
 
-The window is not an option of these plugins. It comes from the rest of your run configuration. If you start from a configuration that already runs and change only the attribute plugin, the window stays as it was. The worked examples below simply assume a window is given.
+The window is not an option of these plugins; it is defined by the rest of your run configuration. If you start from a configuration that already runs and change only the attribute plugin, the window stays as it was, which is exactly what you want when comparing attributes. The worked examples below simply assume a window is given.
 
 ## The plugins
 
@@ -53,8 +53,10 @@ None of these plugins has any options, so there is nothing to tune. You choose t
 | `mean` | The mean amplitude. |
 | `rms` | The root mean square amplitude, `sqrt(mean(s²))`. This is the default. |
 | `sum_negative` | The sum of the negative amplitudes (a soft-sand or gas indicator). |
-| `time_shift` | The two-way time to the reservoir's base, for the time shift. |
+| `time_shift` | The two-way time to the reservoir's base, used for the time shift. |
 | `trace` | The whole trace: the samples in the window, zero outside it. |
+
+Two terms used by `time_shift`: the *two-way time* is the time a seismic wave needs to travel down to a reflector and back up to the surface, and the *time shift* is a change in the arrival time of a reflection.
 
 ## Steps
 
@@ -79,7 +81,7 @@ None of these plugins has any options, so there is nothing to tune. You choose t
    uv run apex plugins --json
    ```
 
-4. Open a run configuration that already works and find where it names its AVO attribute plugin (for example `rms`). Replace only that name with the plugin you picked (for example `max`). Add no options, because these plugins have none. If the file does not name an attribute plugin at all, the run uses the default, `rms`. Leave everything else unchanged, including the window. Save the file under a new name for each attribute you try, such as `config_max.toml`, so the copies stay apart.
+4. Open a run configuration that already works and find the line where it names its AVO attribute plugin (for example `rms`). Replace only that name with the plugin you picked (for example `max`). Add no options, because these plugins have none. If the file does not name an attribute plugin at all, the run uses the default, `rms`. Leave everything else unchanged, including the window. Save the file under a new name for each attribute you try, such as `config_max.toml`, so the copies stay apart.
 5. Start the run:
 
    ```
@@ -99,7 +101,7 @@ None of these plugins has any options, so there is nothing to tune. You choose t
    ```
 
    Progress is shown on standard error. Use `--no-progress` to turn it off (`--progress` is the default; both commands accept it).
-6. Note the directory of each run you start, and which configuration it belongs to. Then look at the result. `apex report` prints the data mismatch history and the performance metrics of a run:
+6. Note the directory of each run you start, and which configuration it belongs to. Every later command takes that directory as `RUN_DIR`. Then look at the result. `apex report` prints the data mismatch history and the performance metrics of a run:
 
    ```
    uv run apex report RUN_DIR
@@ -111,7 +113,7 @@ None of these plugins has any options, so there is nothing to tune. You choose t
    uv run apex report RUN_DIR --plots --output figures
    ```
 
-7. To compare two plugins, make one copy of the configuration per plugin, change only the attribute plugin in each copy, and run both. Run `apex report` on each run directory. Read two things in each report: the final mismatch, and whether the history is still falling at the last step or has flattened out.
+7. To compare two plugins, make one copy of the configuration per plugin, change only the attribute plugin in each copy, and run both **to the same number of steps**. A run stopped early with `--max-steps` cannot be compared with one that ran longer, so continue the shorter one with `apex resume` first. Run `apex report` on each run directory. Read two things in each report: the final mismatch, and whether the history is still falling at the last step or has flattened out. As a rough rule of thumb, treat a history as flattened when the last few steps change the mismatch by only a small fraction of its value (a few percent or less).
 
    The amplitude attributes `max`, `min`, `mean`, `rms` and `sum_negative` are different statistics of the same samples, so their mismatch values are not interchangeable numbers. Compare the shape of the histories, not the raw values. `trace` returns samples and `time_shift` returns a time, so do not compare their mismatch values with those of the amplitude attributes at all.
 
@@ -121,7 +123,7 @@ None of these plugins has any options, so there is nothing to tune. You choose t
 
 ### Reading two histories
 
-The numbers below are made up to show the pattern. Suppose the mismatch after each of six steps is:
+The numbers below are made up to show the pattern. Both runs have the same six steps, and the mismatch after each is:
 
 | Step | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|
@@ -162,11 +164,11 @@ The five samples inside the window are kept unchanged. The four outside it are s
 
 ### The `time_shift` plugin
 
-`time_shift` returns the two-way time to the reservoir's base, for the time shift. It does not average or sum amplitudes, and it has no options, so you give it no value yourself.
+`time_shift` returns the two-way time to the reservoir's base, used for the time shift. It does not average or sum amplitudes, and it has no options, so you give it no value yourself.
 
 Choose it when your question is about *when* the reservoir's base appears in two-way time, rather than *how strong* the amplitude is. "How deep in time is the base of the reservoir?" is a question for `time_shift`, while "is the reflection from the reservoir stronger?" is a question for `max` or `rms`.
 
-Because the result is a time and not a sample statistic, there is no sample arithmetic to check by hand. Do not compare it, or its mismatch, with the amplitude attributes.
+What a value looks like: the result is one time, not a statistic of samples. For illustration only, suppose the model's reservoir base lies at a two-way time of 2.150 s, and the data you matched against has it at 2.162 s. Then the model's base arrives 0.012 s earlier, and a run with `time_shift` works to bring those two times together. The numbers are made up; the point is that the quantity compared is a time, so there is no sample arithmetic to check by hand. Do not compare it, or its mismatch, with the amplitude attributes.
 
 ## Pitfalls
 
@@ -178,11 +180,12 @@ Because the result is a time and not a sample statistic, there is no sample arit
 - **Reading `trace` as a single number.** It returns samples. Inside the window they are unchanged, and outside it they are zero.
 - **Mixing up `time_shift` with an amplitude attribute.** It returns a two-way time, so do not average it with, or plot it on the same scale as, amplitudes.
 - **Comparing mismatch values across attributes.** Compare the shape of the histories, and never compare `trace` or `time_shift` runs with amplitude runs.
+- **Comparing runs of different length.** Bring both runs to the same number of steps before you compare them.
 - **Letting two runs get mixed up.** Give each configuration copy its own name and write down which run directory came from which.
 - **Treating `sum_negative` as proof.** It is an indicator of soft sand or gas, not a confirmation. Compare it with other evidence.
 
 ## What to read next
 
 - `uv run apex plugins` shows every plugin and its options, and `uv run apex plugins --json` gives the full descriptions in a form other tools can read.
-- Run `uv run apex run config_max.toml --max-steps 1` on a small case, then continue with `uv run apex resume RUN_DIR`.
-- Inspect a finished or partial run with `uv run apex report RUN_DIR`.
+- Try the comparison from step 7 on a small case of your own: start with `uv run apex run config_max.toml --max-steps 1`, continue with `uv run apex resume RUN_DIR`, and read the result with `uv run apex report RUN_DIR --plots`.
+- Use `uv run apex stop RUN_DIR` to pause a run at its next checkpoint when you want to look at a partial history.

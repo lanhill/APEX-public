@@ -317,9 +317,9 @@ def test_an_optimization_request_never_gets_a_history_matching_study(tmp_path: P
 
     answer = assistant.run(chat.id, "plan an optimization study in the 5spots case")
 
-    # The draft's card was added (the model did not propose it), and the answer says so.
+    # The model did not propose its draft: no card (#273), and the answer names the draft.
     assert answer.startswith("I drafted the optimization; please confirm the assumptions.\n\n")
-    assert answer.endswith("launched from the card.")
+    assert "Saved without a launch card: `hm_npv.toml`" in answer
     results = [e.data for e in store.events(chat.id) if e.kind == "tool_result"]
     assert results[0]["ok"] is False
     assert "call draft_optimization" in results[0]["error"]
@@ -341,8 +341,9 @@ def test_an_optimization_request_never_gets_a_history_matching_study(tmp_path: P
 
     tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
     propose = tools["propose_action"]
-    # The turn ended with the draft and no propose_action: its card was shown anyway
-    # (a reported issue, 2026-10-24), before the study below is planned and proposed.
+    # The turn ended with the draft and no propose_action: no card (#273); proposed now.
+    assert store.proposals(chat.id) == []
+    propose.handler(propose.arguments(draft=drafted["draft"], summary="launch it"))
     [card] = store.proposals(chat.id)
     assert (card.kind, card.draft, card.state) == (
         "launch_optimization",

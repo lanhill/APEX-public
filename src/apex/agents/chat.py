@@ -236,6 +236,47 @@ def named_methods(goal: str, names: Iterable[str]) -> set[str]:
     return found
 
 
+#: A method section's plugins, by registry: what an arm of a study names.
+_ARM_PLUGINS = (("strategy", "update_strategies"), ("localization", "localizations"),
+                ("damping", "damping_schemes"))  # fmt: skip
+
+
+def unavailable_arms(proposal: "StudyProposal") -> list[str]:
+    """Return the arms of a study that need an extra not installed here (#271).
+
+    Each as ``method <name>: <registry> <plugin> needs ...`` or ``variant <name>: ...``,
+    so that the assistant drops those arms and keeps the others, rather than a design
+    refused as a whole (2026-11-02: the ert_adaptive arm took the adaptive_rows one with
+    it). A variant's patch over the case is read the same way.
+    """
+    from apex.services.plugins import unavailable_errors
+
+    def problems(method: Mapping[str, Any]) -> list[str]:
+        found = []
+        if isinstance(method.get("name"), str):
+            found += unavailable_errors("methods", method["name"])
+            options = method.get("options")
+            split = wrapped(
+                "methods", method["name"], options if isinstance(options, Mapping) else {}
+            )
+            if split is not None:  # a wrapper's (CHOP's) inner method runs too
+                found += unavailable_errors("methods", split[1])
+        for key, registry in _ARM_PLUGINS:
+            section = method.get(key)
+            if isinstance(section, Mapping) and isinstance(section.get("name"), str):
+                found += unavailable_errors(registry, section["name"])
+        return found
+
+    arms = []
+    for name, entry in proposal.methods.items():
+        arms += [f"method {name}: {p}" for p in problems(entry.model_dump(exclude_none=True))]
+    for variant in proposal.variants:
+        method = variant.patch.get("method")
+        if isinstance(method, Mapping):
+            arms += [f"variant {variant.name}: {p}" for p in problems(method)]
+    return arms
+
+
 class DraftOptimizationArguments(BaseModel):
     """What ``draft_optimization`` drafts from a history-matching case."""
 
@@ -539,22 +580,13 @@ class _Turn:
 
 #: The assistant's turn when the user stops it (the web UI's Stop).
 STOPPED_ANSWER = "Stopped. Nothing more was done for that request; ask again when you want."
-#: Closes an answer whose draft got its card from _propose_drafts, not from the model,
-#: whose text may say it did not propose (a reported issue, 2026-10-24: "planned but not
-#: proposed" above the card); the card is what the user reviews, launches or discards.
-AUTO_PROPOSED = (
-    "A card to review, launch or discard {drafts} is shown below; nothing runs until it is "
-    "launched from the card."
-)
-#: The same, for several drafts (one card each).
-AUTO_PROPOSED_MANY = (
-    "Cards to review, launch or discard {drafts} are shown below; nothing runs until one is "
-    "launched from its card."
-)
-#: The same, for a sign-in that may not launch ([actions] submit off): its card says so.
-AUTO_PROPOSED_NO_LAUNCH = (
-    "A card for {drafts} is shown below; launching is not allowed for this sign-in, so "
-    "nothing runs from this chat."
+#: Closes an answer that saved drafts it did not propose: a card is shown only for a draft
+#: the assistant proposes itself (the user's decision on #273, 2026-11-02: a card appeared
+#: for a plan the answer had said does not answer the request). Earlier, such drafts got
+#: cards anyway (a reported issue, 2026-10-24); now the answer says where they are.
+UNPROPOSED = (
+    "Saved without a launch card: {drafts}, in this chat's drafts folder. A card appears "
+    "only for a draft that is proposed; ask for it if you want to launch one."
 )
 
 
@@ -950,6 +982,14 @@ class ChatAssistant:
             # A setting both arms' strategies take (the truncation energy) is the case's
             # unless the arm sets it (#256); the rest of how compared algorithms differ is
             # reported, never changed: each algorithm is its own base.
+            if missing := unavailable_arms(proposal):
+                raise ValueError(
+                    "these arms need an extra that is not installed on this server: "
+                    + "; ".join(missing)
+                    + ". Plan the study again without them, keeping every other arm the "
+                    "user asked for, and tell the user which you left out and why (the "
+                    "extra it needs); do not fall back to a default design"
+                )
             proposal, matched = match_strategies(facts, proposal)
             differences = method_differences(facts, proposal) if args.methods else []
             spec, _, total, errors = planner.check(facts, proposal)
@@ -1808,37 +1848,20 @@ class ChatAssistant:
             return []  # no workspace: no drafts to write
         return self.planning_tools(chat_id, access)
 
-    def _propose_drafts(
-        self, chat_id: str, access: "Access | None", first: int, turn: "_Turn"
-    ) -> list[str]:
-        """Show a card for each draft this turn wrote and left without one (a reported issue).
+    def _unproposed_drafts(self, chat_id: str, first: int, turn: "_Turn") -> list[str]:
+        """Return the drafts this turn wrote or revised and did not propose (#273).
 
-        The model is told to call ``propose_action`` after ``plan_study`` and the other
-        drafting tools, but may answer without it (seen on 2026-10-20: a valid plan within the
-        user's budget, and no card to launch it). A draft planned or revised in this turn,
-        with no proposal after its last change, gets the card ``propose_action`` would have
-        shown; it still launches only on the user's click. A draft that is no longer valid
-        is left alone, and so is everything after a stop: a stopped turn proposes nothing
-        (its events are dropped, and a later turn's drafts are not its own). A draft whose
-        answer asks the user to confirm assumptions (draft_optimization's) gets its card
-        too: the card lists them, and nothing runs before the user's click.
-
-        Returns
-        -------
-        list[str]
-            The drafts proposed here.
+        No card is shown for them: only ``propose_action`` shows one (the user's decision,
+        2026-11-02). They stay in the chat's drafts folder, and the answer names them. A
+        stopped turn names none (its events are dropped, and a later turn's drafts are not
+        its own); drafts that no longer exist are left out.
         """
-
-        def stopped() -> bool:
-            with self._lock:
-                return turn.stop.is_set() or not self._current(chat_id, turn.number)
-
-        if stopped():
-            return []
-        events = self.store.events(chat_id, first)
+        with self._lock:
+            if turn.stop.is_set() or not self._current(chat_id, turn.number):
+                return []
         changed: dict[str, int] = {}  # draft -> its last change in this turn
         shown: dict[str, int] = {}  # draft -> its last proposal in this turn
-        for event in events:
+        for event in self.store.events(chat_id, first):
             draft = event.data.get("draft")
             if not isinstance(draft, str) or not draft:
                 continue
@@ -1846,28 +1869,17 @@ class ChatAssistant:
                 changed[draft] = event.n
             elif event.kind == "proposal":
                 shown[draft] = event.n
-        missing = [d for d, n in changed.items() if shown.get(d, -1) < n]
-        if not missing:
-            return []
-        propose = next((t for t in self._planning(chat_id, access) if t.name == "propose_action"),
-                       None)  # fmt: skip
-        if propose is None:
-            return []
-        proposed = []
-        for draft in missing:
-            if stopped():
-                break
-            name = draft.rsplit("/", 1)[-1]
-            summary = f"Launch {name}, the draft planned in this answer."
-            try:
-                propose.handler(ProposeArguments(draft=draft, summary=summary))
-            # Gone, no longer valid or unreadable: no card, and the answer already written
-            # stays (the errors the loop catches for a tool).
-            except (ApexError, KeyError, ValueError, OSError, ValidationError) as error:
-                logger.info("draft not proposed", extra={"draft": draft, "reason": str(error)})
+        space = self.service.workspace()
+        found = []
+        for draft, n in changed.items():
+            if shown.get(draft, -1) >= n:
                 continue
-            proposed.append(draft)
-        return proposed
+            try:
+                if space.file(draft).exists():
+                    found.append(draft)
+            except (ApexError, KeyError, ValueError, OSError):
+                continue
+        return found
 
     def _check(self, chat_id: str, text: str) -> None:
         chat = self.store.get(chat_id)
@@ -1973,7 +1985,7 @@ class ChatAssistant:
                 if self._current(chat_id, number):
                     store.add_event(chat_id, kind, shown)
 
-        # This turn's events start after the last one written so far (for _propose_drafts).
+        # This turn's events start after the last one written so far (for _unproposed_drafts).
         first = max((e.n for e in store.events(chat_id)), default=0) + 1
         recorder = CallRecorder(store.traces(chat_id), "chat")
         system, recorder.advice = advise_prompt(SYSTEM, "chat", self.service.root)
@@ -2011,10 +2023,10 @@ class ChatAssistant:
             "tools": [t["tool"] for t in outcome.tool_calls],
             "trace": Path(outcome.trace).name,
         }
-        proposed = self._propose_drafts(chat_id, access, first, turn)
-        note = _auto_proposed_note(proposed, access)
-        if proposed:
-            data["auto_proposed"] = proposed
+        unproposed = self._unproposed_drafts(chat_id, first, turn)
+        note = _unproposed_note(unproposed)
+        if unproposed:
+            data["unproposed"] = unproposed
         if outcome.fell_back:
             data["reason"] = outcome.reason
             # The activity line is the user's: a timeout in plain words (issue #239); the
@@ -2030,19 +2042,14 @@ class ChatAssistant:
         return outcome.decision.answer + note, data
 
 
-def _auto_proposed_note(proposed: list[str], access: "Access | None") -> str:
-    """Return the sentence closing an answer whose drafts got cards it did not propose.
+def _unproposed_note(drafts: list[str]) -> str:
+    """Return the sentence closing an answer that saved drafts without proposing them.
 
     Empty when there are none; names the drafts by file name.
     """
-    if not proposed:
+    if not drafts:
         return ""
-    names = ", ".join(f"`{d.rsplit('/', 1)[-1]}`" for d in proposed)
-    if access is not None and not access.rules.actions.submit:
-        closing = AUTO_PROPOSED_NO_LAUNCH
-    else:
-        closing = AUTO_PROPOSED if len(proposed) == 1 else AUTO_PROPOSED_MANY
-    return "\n\n" + closing.format(drafts=names)
+    return "\n\n" + UNPROPOSED.format(drafts=", ".join(f"`{d.rsplit('/', 1)[-1]}`" for d in drafts))
 
 
 #: The tools that may take long (a large deck or run): each runs in a worker process,
