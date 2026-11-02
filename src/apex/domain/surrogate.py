@@ -693,6 +693,24 @@ class FitRecord(_Frozen):
     stream_state: dict[str, JsonValue] | None = None
 
 
+class BuildCost(_Frozen):
+    """What a build's full runs cost, kept beside its model (decision 14).
+
+    A history-matching run with the model compares its surrogate forecasts' time with
+    these, after the build's directory may be gone. Not part of the model's identity
+    (``<manifest stem>.cost.json``): times differ between builds that give identical
+    models. Seconds are each full run's own (start to end of one member, whatever ran
+    beside it), over the design's successful runs.
+    """
+
+    identity: str = Field(description="The identity of the model whose build it is.")
+    runs: int = Field(ge=0, description="The successful full runs timed.")
+    mean_seconds: float = Field(ge=0, description="Their mean run time.")
+    median_seconds: float = Field(ge=0, description="Their median run time.")
+    total_seconds: float = Field(ge=0, description="Their summed run times (one-off cost).")
+    fit_seconds: float | None = Field(default=None, description="The fit's time.")
+
+
 class ArraysReference(_Frozen):
     """The arrays file beside the manifest (a bare file name) and its SHA-256."""
 

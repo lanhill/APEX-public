@@ -1384,12 +1384,17 @@ def summarise_run(path: Path, annotations: Annotations | None = None) -> RunSumm
         posterior = results.posterior_iteration
         record = next(r for r in history if r.iteration == posterior and r.accepted)
         posterior_metrics = record.metrics or {}
+        # a surrogate run's posterior numbers are the simulator's forecast of it.
+        full = ((summary.get("surrogate") or {}).get("posterior") or {}).get("simulator_metrics")
+        if full:
+            posterior_metrics = full
     runs = 0
     events = path / "events.jsonl"
     if events.exists():
         for line in events.read_text().splitlines():
             raw = json.loads(line)
-            if raw.get("event") == "forecast_done":
+            # A surrogate's forecasts are evaluations, not simulator runs.
+            if raw.get("event") == "forecast_done" and raw.get("label") != "surrogate":
                 runs += int(raw["n_ok"]) + int(raw["n_failed"])
     state: Literal["complete", "stopped", "not started"] = (
         "not started" if not history else "complete" if summary.get("complete") else "stopped"

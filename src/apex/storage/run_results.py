@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 
 from apex.domain.results import IterationRecord
 from apex.domain.state import StateLayout
-from apex.storage.run_directory import RunDirectory
+from apex.storage.run_directory import SIMULATOR, SURROGATE, RunDirectory, upgrade_iterate
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,12 @@ class Iterate:
         Forecasts of the simulator's auxiliary keys, never assimilated, e.g. a model-error
         model's residuals, ``(n_auxiliary, n_members)``, and their keys as text
         (``"MEC:WOPR:P1@2008-01-02"``).
+    forecast_source
+        Where each member's forecast came: ``"simulator"`` or
+        ``"surrogate"``, ``(n_members,)``; runs without ``[surrogate]``, and older run
+        directories, are the simulator's throughout.
+    surrogate_id
+        The identity of the surrogate that forecast them, if any (``None``: none did).
     """
 
     iteration: int
@@ -61,6 +67,13 @@ class Iterate:
     test_predicted: NDArray[np.float64] | None = None
     auxiliary_predicted: NDArray[np.float64] | None = None
     auxiliary_keys: tuple[str, ...] = ()
+    forecast_source: tuple[str, ...] = ()
+    surrogate_id: str | None = None
+
+    @property
+    def by_surrogate(self) -> bool:
+        """Whether any member's forecast is a surrogate's."""
+        return SURROGATE in self.forecast_source
 
 
 class RunResults:
@@ -134,11 +147,39 @@ class RunResults:
         """Load a rejected trial's ensemble (``trial_<k>.npz``, if the run kept trials)."""
         return self._load(f"trial_{iteration}", iteration)
 
+    def full(self, iteration: int) -> Iterate | None:
+        """Load the simulator's forecast of a surrogate run's posterior (``full_<k>.npz``).
+
+        ``None`` when the run has none (no ``[surrogate]``, not finished, or the iterate was
+        forecast by the simulator already). Its ``predicted`` is what the run reports for
+        the posterior.
+        """
+        if not (self.run_dir.checkpoints / f"full_{iteration}.npz").exists():
+            return None
+        return self._load(f"full_{iteration}", iteration)
+
+    @property
+    def surrogate(self) -> dict[str, Any] | None:
+        """A surrogate run's report (``summary.json``'s ``surrogate``), ``None`` for others."""
+        path = self.run_dir.path / "summary.json"
+        if not path.exists():
+            return None
+        found = json.loads(path.read_text()).get("surrogate")
+        return found if isinstance(found, dict) else None
+
+    def sources(self) -> dict[int, str]:
+        """Return each scored forecast's source by iteration.
+
+        ``"simulator"`` for runs without ``[surrogate]`` and older run directories.
+        """
+        return {r.iteration: r.forecast_source or SIMULATOR for r in self.history}
+
     def _load(self, name: str, iteration: int) -> Iterate:
         path = self.run_dir.checkpoints / f"{name}.npz"
         if not path.exists():
             raise FileNotFoundError(f"{self.path} has no saved ensemble {name}")
-        arrays = self.run_dir.load_arrays(name)
+        arrays = upgrade_iterate(self.run_dir.load_arrays(name))
+        identity = str(arrays.get("surrogate_id", ""))
         return Iterate(
             iteration=iteration,
             state=self.layout.split(arrays["state"]),
@@ -151,6 +192,8 @@ class RunResults:
             test_predicted=arrays.get("test_predicted"),
             auxiliary_predicted=arrays.get("auxiliary_predicted"),
             auxiliary_keys=tuple(str(k) for k in arrays.get("auxiliary_keys", ())),
+            forecast_source=tuple(str(s) for s in arrays["forecast_source"]),
+            surrogate_id=identity or None,
         )
 
     def per_member(self, iteration: int) -> dict[str, NDArray[np.float64]]:

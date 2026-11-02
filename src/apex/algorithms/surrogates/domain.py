@@ -583,3 +583,20 @@ def check_members(
     coordinates, residuals = model.coordinates(inputs)
     found = check_coordinates(domain, coordinates, residuals, member_ids)
     return found.merged(check_request(domain, keys, fields=fields, times=times))
+
+
+def refuse_outside(
+    domain: TrainingDomain,
+    model: SurrogateModel,
+    inputs: SurrogateInputs,
+    member_ids: Sequence[int],
+    keys: Sequence[DataKey] = (),
+) -> None:
+    """Raise unless every member and key lies inside the domain (a surrogate simulator's guard).
+
+    Raises
+    ------
+    SurrogateDomainError
+        Naming the members, keys and times outside, and by how much.
+    """
+    check_members(domain, model, inputs, member_ids, keys).raise_if_outside()

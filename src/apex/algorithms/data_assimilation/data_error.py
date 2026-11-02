@@ -110,6 +110,26 @@ class DataErrorCovariance:
         factor = np.sqrt(values) if self.is_diagonal else np.sqrt(alpha) * self._factor
         return type(self)(values, factor)
 
+    def plus_diagonal(self, variances: ArrayLike) -> Self:
+        """Return ``C_d + diag(variances)``: further uncorrelated errors added.
+
+        E.g. a surrogate's predictive variance per datum (``variance_in_errors``).
+        A diagonal covariance stays diagonal (factor ``sqrt(values + variances)``); a dense
+        one is factorised again.
+
+        Raises
+        ------
+        ValueError
+            If ``variances`` is not ``(n_data,)``, finite and non-negative.
+        """
+        added = np.asarray(variances, dtype=np.float64)
+        if added.shape != (self.n_data,) or not np.all(np.isfinite(added)) or np.any(added < 0):
+            raise ValueError(f"added variances must be ({self.n_data},), finite and >= 0")
+        if self.is_diagonal:
+            values = self._values + added
+            return type(self)(values, np.sqrt(values))
+        return type(self).dense(self._values + np.diag(added))
+
     def whiten(self, matrix: NDArray[np.float64]) -> NDArray[np.float64]:
         """Return ``L^-1 @ matrix`` for a data-space ``matrix`` of shape ``(n_data, k)``."""
         self._check_rows(matrix)

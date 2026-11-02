@@ -1053,6 +1053,57 @@ class GIES(EmitsDiagnostics):
             converged=run.converged,
         )
 
+    def accepted_ensemble(self) -> tuple[NDArray[np.float64], NDArray[np.int64], bool]:
+        """Return the accepted iterate a pending trial is judged against.
+
+        Its state ``(n_state, n)``, its member ids, and whether the method needs its mean
+        model's forecast (RLM-MAC's reference). Only while a trial waits for its forecast.
+
+        Raises
+        ------
+        RuntimeError
+            If no trial is pending.
+        """
+        run = self._require_run()
+        if run.phase != "trial":
+            raise RuntimeError(f"GIES has no pending trial (phase {run.phase!r})")
+        return run.state, run.member_ids, run.reference is not None
+
+    def rescore_accepted(
+        self, predicted: NDArray[np.float64], reference: NDArray[np.float64] | None
+    ) -> None:
+        """Replace the accepted iterate's forecast before the pending trial is judged.
+
+        When the forecasts change source within a run (a surrogate's replaced by the
+        simulator's or by a refitted surrogate's), the trial is forecast by the
+        new source, and must be judged against the accepted iterate forecast by it too:
+        like with like, as after a member drop. ``predicted`` is ``(n_data, n)`` on the
+        accepted members, ``reference`` the mean model's forecast ``(n_data,)`` (with
+        RLM-MAC). The data mismatch is scored again; the trial's proposal is kept.
+
+        Raises
+        ------
+        RuntimeError
+            If no trial is pending.
+        ValueError
+            If the shapes do not fit the accepted iterate, or a needed reference is missing.
+        """
+        run = self._require_run()
+        if run.phase != "trial":
+            raise RuntimeError(f"GIES has no pending trial (phase {run.phase!r})")
+        if predicted.shape != run.predicted.shape:
+            raise ValueError(
+                f"the accepted forecast must be {run.predicted.shape}, got {predicted.shape}"
+            )
+        if (run.reference is None) != (reference is None):
+            raise ValueError("the mean model's forecast must be given exactly when it is used")
+        run.predicted = keep(predicted)
+        if reference is not None:
+            run.reference = np.ascontiguousarray(reference, dtype=np.float64)
+        run.data_mismatch = self.mean_data_mismatch(
+            run.predicted, run.perturbed, run.setup.data_error
+        )
+
     def export_state(self) -> AlgorithmState:
         """Return the accepted iterate, the pending trial and the damping state."""
         run = self._require_run()

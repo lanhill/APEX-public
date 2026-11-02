@@ -352,6 +352,27 @@ def test_a_surrogate_round_trips_through_its_files_to_identical_predictions(
     assert load_surrogate(tmp_path / "model" / "surrogate.json", identity=loaded.identity)
 
 
+def test_a_plugins_scalar_arrays_keep_their_shape_through_the_files(
+    tmp_path: Path, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 0-d array is read back 0-d (it came back 1-d: flow_diagnostics' schema version)."""
+    original = _Affine.to_arrays
+
+    def with_scalars(self: _Affine) -> SurrogateParts:
+        own, arrays = original(self)
+        return own, {**arrays, "version": np.asarray(1, dtype=">i8"), "scale": np.asarray(2.5)}
+
+    monkeypatch.setattr(_Affine, "to_arrays", with_scalars)
+    path = tmp_path / "surrogate.json"
+    _, stored = _write(path)
+    read = read_surrogate(path)
+    for arrays in (stored.arrays, read.arrays):
+        assert (arrays["version"].shape, arrays["scale"].shape) == ((), ())
+        assert int(arrays["version"]) == 1
+        assert arrays["version"].dtype == np.dtype("<i8")
+        assert arrays["weights"].ndim == 2
+
+
 def test_any_changed_byte_changes_the_identity_and_is_refused(
     tmp_path: Path, registered: None
 ) -> None:

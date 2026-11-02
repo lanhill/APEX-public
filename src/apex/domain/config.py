@@ -1088,11 +1088,88 @@ class GeophysicsSection(_Strict):
         return self
 
 
+class SurrogateRunSection(_Strict):
+    """``[surrogate]``: forecasts by a fitted surrogate, checked by the simulator.
+
+    Every ensemble forecast the method asks for is made by the surrogate whose manifest
+    ``model_file`` names (built by ``apex surrogate build``), on local workers; the configured
+    ``[simulator]`` and ``[execution]`` run only the checks, the fallbacks and the forecast
+    of the posterior iterate, which is always the simulator's.
+    """
+
+    model_file: Path = Field(
+        description="The surrogate's manifest (`.json`, its arrays beside it), e.g. "
+        "`runs/<build>/model/surrogate.json`."
+    )
+    check_every: int = Field(
+        default=3,
+        ge=0,
+        description="Iterations whose forecast is also run by the simulator for some members "
+        "and gated (iterations 3, 6, 9, ... by default); 0: no checks.",
+    )
+    check_members: int | Literal["all"] = Field(
+        default=10,
+        description="Members checked at a check iteration, drawn from the stream `surrogate` "
+        '(or "all").',
+    )
+    on_check_failure: Literal["stop", "refit", "simulator"] = Field(
+        default="stop",
+        description="A check that fails: `stop` the run before the update (resumable); "
+        "`refit` the surrogate with the checked runs added and repeat the iteration's "
+        "forecast; or use the `simulator` for the rest of the run.",
+    )
+    outside: Literal["stop", "simulator"] = Field(
+        default="stop",
+        description="Members outside the surrogate's validated domain: `stop` the run, or "
+        "run them by the `simulator` (recorded as such).",
+    )
+    max_refits: int = Field(
+        default=2, ge=0, description="Refits allowed before a failing check stops the run."
+    )
+    refit_held_out: float = Field(
+        default=0.5,
+        gt=0,
+        lt=1,
+        description="A refit's share of the checked runs held out for its gate (the rest are "
+        "fitted on), drawn from the stream `surrogate`.",
+    )
+    variance_in_errors: bool = Field(
+        default=False,
+        description="Add the surrogate's predictive variance (a plugin with `predict_std`), "
+        "the members' mean per datum, to the observation errors of the update it serves.",
+    )
+    sigma_ratio: float | None = Field(
+        default=None,
+        gt=0,
+        description="The checks' tolerance: may only tighten the model's own gate.",
+    )
+    workers: int | None = Field(
+        default=None,
+        ge=1,
+        description="Local worker processes for the surrogate's forecasts; none: in this "
+        "process (serial).",
+    )
+    max_evaluations: int = Field(
+        default=50_000,
+        ge=1,
+        description="The run's bound on surrogate evaluations (one per member forecast).",
+    )
+
+    @field_validator("check_members")
+    @classmethod
+    def _positive(cls, value: int | str) -> int | str:
+        if isinstance(value, int) and value < 1:
+            raise ValueError('check_members must be at least 1 (or "all")')
+        return value
+
+
 class HistoryMatchConfig(_Strict):
     """A complete history-matching run.
 
     ``data_transforms`` (``[[data_transforms]]``) are applied in order to the
     observations and to every forecast before the analysis, e.g. ``wavelet`` compression.
+    ``surrogate`` (``[surrogate]``) makes the ensemble forecasts with a fitted
+    surrogate, checked by the simulator.
     """
 
     run: RunSection
@@ -1121,6 +1198,10 @@ class HistoryMatchConfig(_Strict):
     output: OutputSection = Field(default_factory=OutputSection)
     case: CaseSection = Field(default_factory=CaseSection)
     validation: ValidationSection | None = None
+    surrogate: SurrogateRunSection | None = Field(
+        default=None,
+        description="Forecasts by a fitted surrogate, checked by the simulator.",
+    )
     metrics: list[MetricSection] | None = Field(
         default=None,
         description="Performance metrics; default `normalized_data_mismatch`, plus `rmse` in a "

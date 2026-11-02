@@ -99,7 +99,7 @@ class StoredRunView:
     def _workflow(self) -> Any:  # noqa: ANN401 (the composition's workflow)
         from apex.services.composition import build_run
 
-        return build_run(self.config).workflow
+        return build_run(self.config, surrogate=False).workflow
 
     def observations(self) -> ObservationsView:
         """Return the observations in the analysis data space."""

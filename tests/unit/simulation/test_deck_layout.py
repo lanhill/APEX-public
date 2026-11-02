@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from apex.simulation.deck import deck_layout
+from apex.simulation.deck import deck_keywords, deck_layout
 
 TEMPLATE = """\
 <%!
@@ -120,3 +120,17 @@ def test_paths_aliases_reach_the_wells(tmp_path: Path) -> None:
         "SCHEDULE\nINCLUDE\n '$FLOC/Welspecs' /\n"
     )
     assert deck_layout(template)["wells"] == {"P1": [[2, 3, 1], [2, 3, 2]]}
+
+
+def test_deck_keywords_follow_the_includes(tmp_path: Path) -> None:
+    """Tables in included files come back as records, a table's rows up to its / as one."""
+    (tmp_path / "props").mkdir()
+    (tmp_path / "props" / "fluids.inc").write_text(
+        "SWOF\n-- Sw krw krow pc\n0.2 0 1 0\n0.8 0.5 0 0 /\n\nPVTW\n200 1.02 4E-5 0.5 0 /\n"
+    )
+    template = tmp_path / "deck.mako"
+    template.write_text("RUNSPEC\nOIL\nWATER\nPROPS\nINCLUDE\n 'props/fluids.inc' /\n")
+    found = dict(deck_keywords(template))
+    assert found["SWOF"] == ["0.2 0 1 0 0.8 0.5 0 0"]
+    assert found["PVTW"] == ["200 1.02 4E-5 0.5 0"]
+    assert "OIL" in found

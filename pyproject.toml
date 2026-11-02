@@ -181,6 +181,7 @@ module = [
     "h5py",
     "h5py.*",
     "pygments.*",
+    "sklearn.*",
 ]
 ignore_missing_imports = true
 

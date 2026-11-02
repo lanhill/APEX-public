@@ -19,6 +19,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,7 +33,11 @@ from apex.core.advice import advise_prompt
 from apex.core.llm import LLMProvider
 from apex.domain.services import Comparison, RunSteps, RunSummary
 from apex.services.api import ApexService, steps_document
+from apex.services.compatibility import default_damping, plugin_settings
+from apex.services.plugins import strategy_localization
 from apex.services.summaries import summarize_one
+from apex.storage.locks import in_use
+from apex.storage.run_directory import RunDirectory
 
 #: Numbers in prose are rounded: a key number within 0.5% of a fact matches it.
 NUMBER_RTOL = 0.005
@@ -61,6 +66,39 @@ class RunReportFacts(BaseModel):
     compared_with: "ComparedRun | None" = Field(
         default=None, description="Another run the user asked to compare with."
     )
+    stop: "StopReason | None" = Field(
+        default=None,
+        description="Why the run ended, from its records; the only source of a stated cause.",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Every warning of the run: how it ended (not converged, stopped early) "
+        "and the monitor's and diagnosis' causes above info.",
+    )
+
+
+#: How a run ended (:class:`StopReason`).
+StopCode = Literal[
+    "converged", "stalled", "trials_exhausted", "damping_maximum", "cross_validation",
+    "iteration_budget", "schedule_complete", "stopped_on_request", "step_limit", "stopped",
+    "running", "not_started",
+]  # fmt: skip
+
+
+class StopReason(BaseModel):
+    """Why a run ended, read from its records (a reported issue, #259).
+
+    A report said a run did not converge, its Warnings said none, and the assistant gave a
+    cause no record held. ``recorded`` is false when the records do not say why: a report
+    then says the reason is not recorded rather than guess one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: StopCode
+    recorded: bool
+    text: str = Field(description="The reason, in a sentence.")
+    evidence: list[str] = Field(description="The records it is read from.")
 
 
 class ComparedRun(BaseModel):
@@ -72,7 +110,7 @@ class ComparedRun(BaseModel):
     setup: dict[str, object]
 
 
-RunReportFacts.model_rebuild()  # its compared_with names ComparedRun, defined after it
+RunReportFacts.model_rebuild()  # its compared_with and stop name models defined after it
 
 
 class StudyReportFacts(BaseModel):
@@ -127,16 +165,242 @@ def run_facts(service: ApexService, run_path: Path) -> RunReportFacts:
 
     diagnosis = diagnose_facts(run_path)
     settings = service.jobs.settings.agents
+    summary = summarise_run(run_path)
+    causes = [
+        c.model_dump()
+        for c in diagnosis_rules(diagnosis, settings.diagnosis, settings.monitor).causes
+    ]
+    stop = run_stop(run_path, summary)
     return RunReportFacts(
         setup=run_setup(run_path),
-        summary=summarise_run(run_path),
+        summary=summary,
         steps=steps_document(summarize_one(run_path)),
         monitor=monitor_rules(diagnosis.observation, settings.monitor).model_dump(),
-        causes=[
-            c.model_dump()
-            for c in diagnosis_rules(diagnosis, settings.diagnosis, settings.monitor).causes
-        ],
+        causes=causes,
+        stop=stop,
+        warnings=run_warnings(summary, stop, causes),
     )
+
+
+#: The events (``events.jsonl``) that say why a finished run ended, by the step they name.
+_STOP_EVENTS = frozenset({"converged", "stalled", "trials_exhausted"})
+#: The events that say why a run stopped before its end.
+_EARLY_STOPS: dict[str, tuple[StopCode, str]] = {
+    "stopped_on_request": ("stopped_on_request", "It was stopped on request at a checkpoint "
+                           "before its end; resuming it continues the run."),
+    "max_steps": ("step_limit", "It stopped after its step limit (--max-steps) at a "
+                  "checkpoint; resuming it continues the run."),
+}  # fmt: skip
+
+
+def _json_file(path: Path) -> dict[str, Any]:
+    """Return a JSON object from ``path`` (empty when missing, unreadable or not an object)."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _events_since_resume(run_path: Path) -> list[dict[str, Any]]:
+    """Return the run's events after its last ``resume`` (all of them if never resumed).
+
+    Events before a resume belong to an earlier process (one that crashed, or stopped):
+    they do not explain how the run ended (#259, a review).
+    """
+    events: list[dict[str, Any]] = []
+    try:
+        lines = (run_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return events
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a line cut short by a killed process says nothing
+        if isinstance(event, dict):
+            if event.get("event") == "resume":
+                events = []
+            else:
+                events.append(event)
+    return events
+
+
+def _section(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def run_stop(run_path: Path, summary: RunSummary) -> StopReason:
+    """Return why a run ended, from its records alone (#259).
+
+    Read from the run's lock (a run still running), ``summary.json`` (complete, converged,
+    a cross-validation stop), the events the methods and the workflow log since the last
+    resume (``converged``, ``stalled``, ``trials_exhausted``, ``stopped_on_request``,
+    ``max_steps``), the last history record (accepted or not), the damping checkpointed in
+    ``state.json`` and the configuration snapshot (``max_iterations``, the damping scheme).
+    Only an event naming the run's last step explains its end: a GIES iteration that
+    exhausted its trials goes on, while LM-EnRML's stops there.
+    """
+    if in_use(run_path):  # summary.json says "not complete" of a run that is running
+        return StopReason(code="running", recorded=True, text="The run is still running.",
+                          evidence=["run.lock: held by a live process"])  # fmt: skip
+    if summary.state == "not started":
+        return StopReason(code="not_started", recorded=True, text="The run has no steps yet.",
+                          evidence=["history.json: no records"])  # fmt: skip
+    config, recorded = _json_file(run_path / "config.json"), _json_file(run_path / "summary.json")
+    method = _section(config.get("method"))
+    events = _events_since_resume(run_path)
+    if summary.state == "stopped":
+        early = [e.get("event") for e in events if e.get("event") in _EARLY_STOPS]
+        if early:
+            code, text = _EARLY_STOPS[str(early[-1])]
+            return StopReason(code=code, recorded=True, text=text,
+                              evidence=["summary.json: complete = false",
+                                        f"events.jsonl: {early[-1]}"])  # fmt: skip
+        return StopReason(
+            code="stopped", recorded=False,
+            text="It stopped before its end (resuming it continues the run); why it stopped "
+            "(a failure or a killed process) is not recorded.",
+            evidence=["summary.json: complete = false"],
+        )  # fmt: skip
+    # summary.json's flag decides: the cv_stop event is logged before the checkpoint that
+    # makes the stop take effect.
+    if _section(recorded.get("validation")).get("stopped_by_cv"):
+        return StopReason(
+            code="cross_validation", recorded=True,
+            text="Cross validation stopped it: the held-out data's mismatch stopped improving "
+            f"(the posterior is step record {summary.selected_iteration}).",
+            evidence=["summary.json: validation.stopped_by_cv = true"],
+        )  # fmt: skip
+    if summary.converged is None:
+        return StopReason(
+            code="schedule_complete", recorded=True,
+            text=f"It ran its fixed schedule of {max(len(summary.accepted_iterations) - 1, 0)} "
+            "update step(s); the method has no convergence test.",
+            evidence=["summary.json: complete = true, converged = null"],
+        )  # fmt: skip
+    if summary.converged:
+        return _converged(run_path, summary, method, events)
+    # Complete and not converged: an iterative method that ends otherwise ends on its
+    # budget (GIES, LM- and GN-EnRML: the convergence test or the budget).
+    budget = method.get("max_iterations")
+    budget_text = f"max_iterations = {budget}" if budget is not None else "max_iterations"
+    return StopReason(
+        code="iteration_budget", recorded=True,
+        text=f"It used its whole iteration budget ({budget_text}) without meeting its "
+        "convergence test.",
+        evidence=["summary.json: complete = true, converged = false",
+                  f"config.json: method.{budget_text}"],
+    )  # fmt: skip
+
+
+def _converged(
+    run_path: Path, summary: RunSummary, method: dict[str, Any], events: list[dict[str, Any]]
+) -> StopReason:
+    """Return why a converged run stopped (see :func:`run_stop`).
+
+    A review of #259: "converged" is not always a small improvement. A rejected trial within
+    the tolerance stops a run too (``converge_on_rejection``; GN-EnRML's fixed step), and
+    LM's scheme stops at its maximum damping; neither logs an event.
+    """
+    last = summary.iterations[-1] if summary.iterations else None
+    # The step an event names: "iteration" (GIES's converged, stalled) or "trial"
+    # (trials_exhausted).
+    at_end = [e for e in events if e.get("event") in _STOP_EVENTS
+              and last is not None and last in (e.get("iteration"), e.get("trial"))]  # fmt: skip
+    final = at_end[-1].get("event") if at_end else None
+    evidence = ["summary.json: converged = true"]
+    if final == "stalled":
+        return StopReason(
+            code="stalled", recorded=True,
+            text="Its update stalled: consecutive rejected trials changed the data "
+            "mismatch by less than the tolerance, so it stopped (counted as converged).",
+            evidence=[*evidence, "events.jsonl: stalled"],
+        )  # fmt: skip
+    if final == "trials_exhausted":
+        return StopReason(
+            code="trials_exhausted", recorded=True,
+            text="No improving step was found within its trials per iteration, so it "
+            "stopped (counted as converged).",
+            evidence=[*evidence, "events.jsonl: trials_exhausted"],
+        )  # fmt: skip
+    damping = _section(_json_file(run_path / "state.json").get("algorithm")).get("damping")
+    scheme = _scheme_settings(method)
+    maximum = scheme.get("maximum")
+    if isinstance(damping, int | float) and isinstance(maximum, int | float) and damping >= maximum:
+        return StopReason(
+            code="damping_maximum", recorded=True,
+            text=f"Its damping reached the scheme's maximum ({damping:g} >= {maximum:g}), "
+            "so it stopped (counted as converged).",
+            evidence=[*evidence, "state.json: algorithm.damping",
+                      "config.json: the damping scheme's maximum"],
+        )  # fmt: skip
+    records = RunDirectory(run_path).history()
+    accepted = records[-1].accepted if records else None
+    tolerance = scheme.get("data_mismatch_tolerance")
+    within = f" (relative data-mismatch tolerance {tolerance:g})" if isinstance(
+        tolerance, int | float) else ""  # fmt: skip
+    if accepted is False:
+        return StopReason(
+            code="converged", recorded=True,
+            text="A rejected trial changed the mean data mismatch by less than its "
+            f"tolerance{within}, so it stopped (counted as converged).",
+            evidence=[*evidence, "history.json: the last trial was rejected"],
+        )  # fmt: skip
+    if final == "converged":
+        return StopReason(
+            code="converged", recorded=True,
+            text=f"It met its convergence test{within}: two small improving trials in a row.",
+            evidence=[*evidence, "events.jsonl: converged"],
+        )  # fmt: skip
+    return StopReason(code="converged", recorded=True,
+                      text=f"It met its convergence test{within}.", evidence=evidence)  # fmt: skip
+
+
+def _scheme_settings(method: dict[str, Any]) -> dict[str, Any]:
+    """Return the settings of the damping scheme a method's snapshot runs (empty: not told).
+
+    The ``[method.damping]`` section's scheme, or the method's own (with
+    ``[method.schedule]``'s options), as the composition builds it.
+    """
+    section = _section(method.get("damping")) or None
+    if section is None and isinstance(method.get("name"), str):
+        schedule = method.get("schedule")
+        section = default_damping(
+            method["name"], _section(method.get("options")),
+            schedule=schedule if isinstance(schedule, dict) else None,
+        )  # fmt: skip
+    if section is None or not isinstance(section.get("name"), str):
+        return {}
+    return plugin_settings("damping_schemes", section["name"], _section(section.get("options")))
+
+
+#: How a run ended that is a warning, by its stop code (#259): not converging, or stopping
+#: before its end. Cross validation and a fixed schedule are ends by design.
+_NOT_CONVERGED = frozenset({"iteration_budget"})
+_NOT_FINISHED = frozenset({"stopped", "stopped_on_request", "step_limit"})
+
+
+def run_warnings(
+    summary: RunSummary, stop: StopReason, causes: Iterable[dict[str, str]]
+) -> list[str]:
+    """Return a run's warnings: how it ended, then the causes above info (#259).
+
+    A run that ended without converging is a warning, said in code: a report's Warnings
+    said "None were reported" of a run that did not converge. A run stopped by cross
+    validation, one with a fixed schedule and one still running get none.
+    """
+    warnings = []
+    if stop.code in _NOT_FINISHED:
+        warnings.append(f"The run did not finish. {stop.text}")
+    elif stop.code in _NOT_CONVERGED:
+        warnings.append(f"The run did not converge. {stop.text}")
+    warnings += [
+        f"{c['code']} ({c['severity']}): {c['evidence']}"
+        for c in causes
+        if c.get("severity") != "info"
+    ]
+    return warnings
 
 
 def run_setup(run_path: Path) -> dict[str, object]:
@@ -160,13 +424,21 @@ def run_setup(run_path: Path) -> dict[str, object]:
 
     method = config.get("method") or {}
     prior = config.get("prior") or {}
+    sections: dict[str, object] = {
+        key: plugin(method[key])
+        for key in ("strategy", "localization", "damping")
+        if isinstance(method, dict) and method.get(key) is not None
+    }
+    if isinstance(method, dict):
+        # #261: an adaptive_rows run's report said it had no localization.
+        within = strategy_localization(method.get("strategy"), method.get("localization"))
+        if within is not None:
+            sections = {**{k: v for k, v in sections.items() if k == "strategy"},
+                        "localization": within,
+                        **{k: v for k, v in sections.items() if k != "strategy"}}  # fmt: skip
     setup: dict[str, object] = {
         "method": plugin(method),
-        **{
-            key: plugin(method[key])
-            for key in ("strategy", "localization", "damping")
-            if isinstance(method, dict) and method.get(key) is not None
-        },
+        **sections,
         "ensemble_size": prior.get("ensemble_size"),
         "prior": {
             "generator": plugin(prior.get("generator")),
@@ -301,14 +573,20 @@ def run_rules(facts: RunReportFacts) -> NarrativeReport:
                 name=f"{name} at step {result_step}", value=end.mean,
                 source=f"steps.metrics {metric}/{label} iteration {selected}",
             ))  # fmt: skip
+    running = facts.stop is not None and facts.stop.code == "running"
+    # A run still running reads "stopped" in its steps (its summary is not complete).
+    status = "running" if running else steps.status
     overview = (
         # The prior counted apart, as `apex summary` does ("4 steps after the prior").
-        f"{s.method} run **{s.name}** is {steps.status}: {max(len(steps.steps) - 1, 0)} steps "
+        f"{s.method} run **{s.name}** is {status}: {max(len(steps.steps) - 1, 0)} steps "
         "after the prior, "
         f"{steps.forecasts} forecasts, {s.simulator_runs} simulator runs, "
-        f"{s.members} members at the end. The result is step {result_step}"
+        f"{s.members} members {'so far' if running else 'at the end'}. The "
+        f"{'latest' if running else 'result'} is step {result_step}"
         + (" (selected by cross validation)." if s.selected_iteration is not None else ".")
     )
+    if facts.stop is not None:
+        overview += f" {facts.stop.text}"
     causes = facts.causes
     health = (
         "\n".join(f"- `{c['code']}` ({c['severity']}): {c['evidence']}" for c in causes)
@@ -324,12 +602,91 @@ def run_rules(facts: RunReportFacts) -> NarrativeReport:
     sections += [
         Section(heading="Performance metrics", text="\n".join(lines) or "No metrics."),
         Section(heading="Health and diagnosis", text=health),
+        warnings_section(facts),
     ]
     if facts.compared_with is not None:
         sections.append(Section(heading="Comparison", text=_comparison_text(facts)))
     return NarrativeReport(
         title=f"History matching of {s.name}", sections=sections, key_numbers=numbers
     )
+
+
+#: The heading of a run report's warnings, which code writes (#259).
+WARNINGS = "Warnings"
+
+
+def warnings_section(facts: RunReportFacts) -> Section:
+    """Return a run report's warnings section, from the facts' warnings alone (#259)."""
+    if facts.warnings:
+        return Section(heading=WARNINGS, text="\n".join(f"- {w}" for w in facts.warnings))
+    if facts.stop is not None and facts.stop.code == "running":
+        return Section(
+            heading=WARNINGS,
+            text="None so far: the run is still running, and the monitor and diagnosis rules "
+            "found nothing above info yet.",
+        )
+    return Section(
+        heading=WARNINGS,
+        text="None: the run ended as planned, and the monitor and diagnosis rules found "
+        "nothing above info.",
+    )
+
+
+def hold_warnings(
+    report: NarrativeReport, facts: RunReportFacts
+) -> tuple[NarrativeReport, list[str]]:
+    """Hold a model's run report to the facts' end and warnings; return it and corrections.
+
+    A reported issue (#259): the model's Warnings said "None were reported" of a run that
+    did not converge, and the reason it gave for that was its own. So:
+
+    - its sections headed as warnings are replaced by code's (in the first one's place,
+      else at the end), prose and all: a model's warning prose may carry a cause it
+      inferred, the #259 failure. One that left out a recorded warning is a correction;
+    - the overview (the section so headed, else the first) ends with the facts' stop
+      reason unless it already holds it, as the template's does.
+    """
+    ours = warnings_section(facts)
+    sections, corrections, placed = [], [], False
+    for section in report.sections:
+        if "warning" not in section.heading.lower():
+            sections.append(section)
+            continue
+        said = section.text.lower()
+        missing = [w for w in facts.warnings if not _mentions(said, w)]
+        if missing:
+            corrections.append(
+                f"the section '{section.heading}' left out recorded warnings ("
+                + "; ".join(missing)
+                + "); replaced by the facts' warnings"
+            )
+        if not placed:
+            sections.append(ours)
+            placed = True
+    if not placed:
+        sections.append(ours)
+    stop = facts.stop
+    if stop is not None and sections:
+        where = next((n for n, x in enumerate(sections) if x.heading.lower() == "overview"), 0)
+        if stop.text not in sections[where].text:
+            text = f"{sections[where].text.rstrip()} {stop.text}"
+            sections[where] = sections[where].model_copy(update={"text": text})
+    return report.model_copy(update={"sections": sections}), corrections
+
+
+#: Words that say a run did not converge ("converged" alone does not, #259 review).
+_NOT_CONVERGED_WORDS = ("not converge", "non-converge", "nonconverge", "without converging",
+                        "unconverged", "failed to converge", "no convergence")  # fmt: skip
+
+
+def _mentions(said: str, warning: str) -> bool:
+    """Return whether lower-case text ``said`` mentions ``warning``."""
+    if warning.startswith("The run did not converge"):
+        return any(word in said for word in _NOT_CONVERGED_WORDS)
+    if warning.startswith("The run did not finish"):
+        return any(word in said for word in ("not finish", "stopped", "unfinished"))
+    code = warning.split(" (")[0].lower()  # a cause: "poor_fit (warning): ..."
+    return code in said or code.replace("_", " ") in said
 
 
 def _summary(facts: RunReportFacts, result_step: int | None, numbers: list[KeyNumber]) -> str:
@@ -343,6 +700,11 @@ def _summary(facts: RunReportFacts, result_step: int | None, numbers: list[KeyNu
     )
     ends = [n for n in numbers if n.name.endswith(f"at step {result_step}")]
     shown = "; ".join(f"{n.name}: {_fmt(n.value)}" for n in ends[:4])
+    if facts.stop is not None and facts.stop.code == "running":
+        # Neither "stopped" nor "did not converge": it has not ended (a review of #259).
+        return f"{s.method} on {s.members} members, still running, with {found} so far." + (
+            f" Latest: {shown}." if shown else ""
+        )
     return (
         f"{s.method} on {s.members} members, {s.state}; it {state[s.converged]}, with "
         f"{found}." + (f" Result: {shown}." if shown else "")
@@ -534,7 +896,12 @@ SYSTEM = (
     "better when it is below the noise). Do not invent causes; use the diagnosis given. "
     "Open with a short summary of the key results; for a run, describe its setup (method, "
     "strategy, localization, damping, prior, data, simulator) from the facts' setup, and "
-    "when the facts have compared_with, add a comparison with that run."
+    "when the facts have compared_with, add a comparison with that run. "
+    # #259: a cause of non-convergence was stated with no record behind it.
+    "Why a run ended (converged, its iteration budget, a stall, cross validation, a stop) "
+    "comes only from the facts' stop: state its text as the cause, and when stop.recorded "
+    "is false say that the reason is not recorded; never infer one from the settings or the "
+    "numbers. Do not write a warnings section: APEX adds one from the facts' warnings."
 )
 _RULE = "the report agent's template"
 
@@ -644,6 +1011,11 @@ class Reporter:
                 recorder.record_action(
                     "dropped key numbers that match no fact", corrections=corrections
                 )
+            if isinstance(facts, RunReportFacts):
+                report, missed = hold_warnings(report, facts)
+                if missed:
+                    recorder.record_action("replaced the model's warnings", corrections=missed)
+                corrections += missed
         by = {"model": "model", "fallback": "template, the model failed", "rules": "template"}[
             decision.decided_by
         ]

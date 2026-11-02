@@ -425,6 +425,19 @@ def deck_layout(template_path: Path, case_dir: Path | None = None) -> dict[str, 
     return {"grid": grid, "wells": wells, "files": files, "skipped": skipped[:20]}
 
 
+def deck_keywords(template_path: Path, case_dir: Path | None = None) -> list[tuple[str, list[str]]]:
+    """Return a deck's keywords and their ``/``-terminated records, its includes followed.
+
+    In the order the files are read (the template, then each included file, each once);
+    comments dropped; a table's rows up to its ``/`` are one record. For readers of a
+    deck's tables (e.g. ``SWOF``, ``PVTW``) outside the simulators.
+    """
+    found: list[tuple[str, list[str]]] = []
+    for path in _deck_files(template_path, case_dir):
+        found.extend(_keyword_records(path.read_text(errors="replace")))
+    return found
+
+
 def _deck_files(template_path: Path, case_dir: Path | None = None) -> list[Path]:
     """Return the template and the files it includes, recursively (each once)."""
     case_dir = (case_dir or template_path.resolve().parent).resolve()

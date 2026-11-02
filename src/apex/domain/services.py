@@ -96,6 +96,16 @@ class RunPlan(_Document):
         "forecasts twice while they are stacked and, with data transforms, the transformed "
         "copy.",
     )
+    surrogate_evaluations: int | None = Field(
+        default=None,
+        description="With [surrogate]: the surrogate's evaluations the run may "
+        "take (one per member forecast, refits' repeats included); max_simulator_runs then "
+        "counts only the simulator's runs (checks, fallbacks, the posterior's forecast), the "
+        "only runs that count towards approval.",
+    )
+    surrogate: str | None = Field(
+        default=None, description="With [surrogate]: the model's plugin and identity."
+    )
     warnings: list[str] = Field(default_factory=list)
 
 

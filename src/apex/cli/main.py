@@ -21,7 +21,7 @@ from apex.cli.surrogate_commands import register as register_surrogate
 from apex.core.errors import ApexError, RunStopped
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.results import HistoryMatchResult
-from apex.reporting.summary import history_table, metrics_table
+from apex.reporting.summary import history_table, metrics_table, surrogate_lines
 from apex.services import composition
 from apex.storage.run_directory import RunDirectory
 
@@ -199,6 +199,10 @@ def report(
     table = metrics_table(history, _selected_iteration(run_dir))
     if table is not None:
         typer.echo("\n" + table)
+    summary_path = run_dir / "summary.json"
+    if summary_path.is_file():  # a surrogate's checks and the posterior's forecasts
+        for line in surrogate_lines(json.loads(summary_path.read_text())):
+            typer.echo(line)
     if plots:
         for figure in _guard_paths(
             lambda: composition.write_report_figures(run_dir, output, font_size=font_size)

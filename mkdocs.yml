@@ -76,6 +76,7 @@ nav:
       - guide/plugins/chop_components.md
       - guide/plugins/converter_skills.md
       - guide/plugins/variogram_estimators.md
+      - guide/cli/surrogate.md
   - Reference:
       - reference/agents.md
       - reference/assistant-tools.md

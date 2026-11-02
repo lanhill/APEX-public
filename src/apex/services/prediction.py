@@ -6,6 +6,7 @@ case-study runner and notebooks may too.
 
 import hashlib
 import json
+import logging
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -28,7 +29,7 @@ from apex.storage import provenance
 from apex.storage.inputs import read_observation_section
 from apex.storage.locks import exclusive
 from apex.storage.prediction_directory import PredictionDirectory
-from apex.storage.run_directory import RunDirectory
+from apex.storage.run_directory import SURROGATE, RunDirectory
 from apex.storage.run_results import RunResults
 from apex.workflows.parameterization import PropertyMap, parameterized
 from apex.workflows.prediction import (
@@ -37,6 +38,8 @@ from apex.workflows.prediction import (
     StoredForecast,
     first_prediction_time,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def load_prediction_config(path: Path) -> PredictionConfig:
@@ -182,9 +185,27 @@ def _stored(
     """
     observations, role_rows = keys_rows
     iterate = results.iterate(iteration)
+    # a surrogate run's posterior is the simulator's forecast of it (full_<k>);
+    # other members a surrogate forecast cannot be reproduced exactly, so they are left out
+    # of the check (phase 4 compares them within the model's gate).
+    full = results.full(iteration)
+    if full is not None:
+        iterate = full
     predicted = composition.all_roles(iterate, role_rows, observations.n_data)
     scalar = [i for i, key in enumerate(observations.keys) if key.index is None]
-    keep = np.array([int(m) not in coarse for m in iterate.member_ids], dtype=bool)
+    keep = np.array(
+        [
+            int(m) not in coarse and source != SURROGATE
+            for m, source in zip(iterate.member_ids, iterate.forecast_source, strict=True)
+        ],
+        dtype=bool,
+    )
+    if iterate.by_surrogate:
+        logger.warning(
+            "members forecast by a surrogate are left out of the history check",
+            extra={"event": "history_check_surrogate", "iteration": iteration,
+                   "left_out": int(np.count_nonzero(~keep))},
+        )  # fmt: skip
     return StoredForecast(
         tuple(observations.keys[i] for i in scalar),
         predicted[scalar][:, keep],
@@ -195,7 +216,7 @@ def _stored(
 def _ensembles(
     config: PredictionConfig, run_config: HistoryMatchConfig, results: RunResults
 ) -> tuple[list[EnsembleInput], np.ndarray | None]:
-    workflow = composition.build_run(run_config).workflow
+    workflow = composition.build_run(run_config, surrogate=False).workflow
     keys_rows = (workflow.analysis_observations, workflow.role_rows())
     # Every member is forecast on the prediction's (fine) model; a multilevel run's coarse
     # members were not, so the history check skips them.

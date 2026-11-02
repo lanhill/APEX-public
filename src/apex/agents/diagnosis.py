@@ -40,6 +40,7 @@ from apex.domain.config import HistoryMatchConfig
 from apex.domain.study import merge_patch
 from apex.services import composition
 from apex.services.api import ApexService
+from apex.services.plugins import strategy_localization
 from apex.services.qaqc import qaqc_report
 from apex.services.settings import DiagnosisSection, MonitorSection
 from apex.storage.run_directory import RunDirectory
@@ -109,7 +110,13 @@ class DiagnosisFacts(BaseModel):
     observation: RunObservation
     iteration: int = Field(description="The iterate diagnosed (the posterior).")
     strategy: str | None
-    localization: str | None
+    localization: str | None = Field(description="[method.localization]'s plugin, if set.")
+    strategy_localizes: bool = Field(
+        default=False,
+        description="Whether the update strategy localizes by itself (adaptive_rows, the "
+        "local analyses, ERT's ert_adaptive and ert_localized), with or without a "
+        "localization plugin (#261).",
+    )
     has_validation: bool = Field(description="Whether [validation] holds data out.")
     synthetic: bool
     coverage: list[TypeCoverageFact]
@@ -251,6 +258,12 @@ def diagnose_facts(
         iteration=iteration,
         strategy=config.method.strategy.name if config.method.strategy else None,
         localization=config.method.localization.name if config.method.localization else None,
+        # #261: a strategy that localizes by itself (adaptive_rows) is not "no localization",
+        # so the rules do not recommend adding one.
+        strategy_localizes=strategy_localization(
+            {"name": config.method.strategy.name} if config.method.strategy else None, None
+        )
+        is not None,
         has_validation=config.validation is not None,
         synthetic=config.case.kind == "synthetic",
         coverage=coverage,
@@ -359,7 +372,7 @@ def _recommend(facts: DiagnosisFacts, codes: set[str]) -> list[Recommendation]:
     """Return the rules' recommendations for the causes found."""
     out: list[Recommendation] = []
     spurious = codes & {"ensemble_collapse", "overcorrection", "mismatch_increased"}
-    if spurious and facts.localization is None:
+    if spurious and facts.localization is None and not facts.strategy_localizes:
         name = default_localization(facts.observation.method)
         out.append(Recommendation(
             change=f"Localize the update with adaptive localization ({name})",

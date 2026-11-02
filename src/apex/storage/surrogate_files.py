@@ -41,6 +41,7 @@ from apex.core.errors import ConfigError, validation_problems
 from apex.core.surrogates import SurrogateModel
 from apex.domain.surrogate import (
     ArraysReference,
+    BuildCost,
     FitRecord,
     GateResult,
     SnapshotProvenance,
@@ -120,8 +121,10 @@ def _checked_arrays(arrays: Mapping[str, NDArray[np.generic]]) -> dict[str, NDAr
                 "booleans and text are stored (never objects)"
             )
         # Little-endian always: equal values give equal bytes, so equal identities, whatever
-        # byte order the plugin's arrays came in.
-        result[name] = np.ascontiguousarray(array.astype(array.dtype.newbyteorder("<")))
+        # byte order the plugin's arrays came in. The shape is kept: ascontiguousarray makes
+        # a 0-d array 1-d, and a plugin's scalars (a schema version) must come back as stored.
+        little = np.ascontiguousarray(array.astype(array.dtype.newbyteorder("<")))
+        result[name] = little.reshape(array.shape)
     return result
 
 
@@ -221,6 +224,35 @@ def write_surrogate(
         arrays=MappingProxyType(arrays),
         identity=identity_of(manifest_bytes, arrays_bytes),
     )
+
+
+def cost_path(manifest: Path) -> Path:
+    """Return the file of a model's build cost: ``<manifest stem>.cost.json`` beside it."""
+    return Path(manifest).with_name(f"{Path(manifest).stem}.cost.json")
+
+
+def write_cost(manifest: Path, cost: BuildCost) -> Path:
+    """Write a model's build cost beside its manifest (outside its identity); return the file."""
+    path = cost_path(manifest)
+    _write_atomically(path, (cost.model_dump_json(indent=2) + "\n").encode())
+    return path
+
+
+def read_cost(manifest: Path) -> BuildCost | None:
+    """Return a model's build cost, ``None`` when it has none (a refit, an older build).
+
+    Raises
+    ------
+    ConfigError
+        If the file is there but is not a build cost.
+    """
+    path = cost_path(manifest)
+    if not path.is_file():
+        return None
+    try:
+        return BuildCost.model_validate_json(path.read_bytes())
+    except ValueError as error:
+        raise ConfigError(f"{path} is not a surrogate's build cost: {error}") from error
 
 
 def read_surrogate(path: Path, *, identity: str | None = None) -> StoredSurrogate:

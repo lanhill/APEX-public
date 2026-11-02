@@ -666,3 +666,24 @@ def objective_plugins(config: OptimizationConfig) -> list[tuple[str, PluginSecti
         ("response_objectives" if section.name in simulated else "objectives", section)
         for section in config.objective_sections
     ]
+
+
+def strategy_localization(strategy: object, localization: object) -> str | None:
+    """Return how a method's localization reads when its update strategy localizes itself.
+
+    A reported issue (#261): a local analysis (``local_analysis``, ``local_rlmmac``,
+    ``adaptive_rows``) or ERT's ``ert_adaptive``/``ert_localized`` localizes its update
+    whether or not ``[method.localization]`` is set (the strategy class's ``localizes``), yet
+    plans, reports and diagnoses read the unset section as no localization. ``strategy``
+    and ``localization`` are the method's sections as in a configuration snapshot (dicts or
+    ``None``). ``None`` when the localization is set, the strategy does not localize or is
+    not known (e.g. its extra is missing).
+    """
+    name = strategy.get("name") if isinstance(strategy, Mapping) else None
+    if localization is not None or not isinstance(name, str):
+        return None
+    try:
+        localizes = getattr(REGISTRIES["update_strategies"].factory(name), "localizes", False)
+    except (PluginError, ImportError):
+        return None
+    return f"within the strategy {name} (it localizes by itself)" if localizes is True else None

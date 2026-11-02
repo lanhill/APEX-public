@@ -1112,7 +1112,11 @@ def test_the_comparison_gives_the_defaults_an_arm_leaves_out() -> None:
     # The wrapper runs GIES unless told otherwise, with GIES's own options' defaults.
     assert chop["method.options.inner"] == "gies"
     assert chop["method.options.max_trials_per_iteration"] is None
-    assert chop["method.strategy"] == chop["method.damping"] == "not set: the method's own default"
+    # The default named, with the values it runs with (#260).
+    assert chop["method.strategy"].startswith("not set: the method's own default, rlmmac (")
+    assert chop["method.damping"].startswith(
+        "not set: the method's own default, rlmmac (initial = 1.0, factor = 2.0, "
+    )
     esmda = by_arm["c | esmda"]
     assert "method.options.inflation" not in esmda  # set, so no default
     assert "method.strategy.options.energy" not in esmda
@@ -1147,9 +1151,12 @@ def test_the_comparison_tells_another_methods_option_from_a_default() -> None:
     chop, gies, esmda = differs["c | chop"], differs["c | gies"], differs["c | esmda"]
     assert chop["method.options.inflation"] == "not an option of chop"
     assert gies["method.options.inflation"] == "not an option of gies"
-    own = "not set: the method's own default"
-    assert chop["method.strategy"] == chop["method.strategy.name"] == own
-    assert chop["method.strategy.options.energy"] == own
+    own = chop["method.strategy"]
+    assert own.startswith("not set: the method's own default, rlmmac (energy = ")
+    assert gies["method.strategy"] == own
+    # In full on the section's key only; its entries point there (the review of #260).
+    entry = "not set: the method's own default (see method.strategy)"
+    assert chop["method.strategy.name"] == chop["method.strategy.options.energy"] == entry
     assert esmda["method.strategy"] == "(set: see its entries)"
     assert esmda["method.strategy.name"] == "approx"
     assert esmda["method.options.inflation"] == [4, 4]
@@ -2040,3 +2047,124 @@ def test_the_assistant_never_copies_files_a_deck_includes_from_elsewhere(
         tools["convert_case"].handler(tools["convert_case"].arguments(
             source="decks/CASE.DATA", name="evil"))  # fmt: skip
     assert not list(tmp_path.rglob("drafts/**/secret.inc"))
+
+
+def test_an_unset_damping_names_the_methods_default_scheme() -> None:
+    """A reported issue (#260): asked to compare LM damping against the GIES case's own, the
+    plan said only "not set: the method's own default", and nobody could tell what LM was
+    compared with. The default scheme is named, with the values it runs with."""
+    from types import SimpleNamespace
+
+    from apex.agents.chat import _comparison
+
+    def cell(variant: str, method: dict[str, object]) -> SimpleNamespace:
+        dumped = {"method": method}
+        config = SimpleNamespace(run=SimpleNamespace(seed=1), model_dump=lambda mode: dumped)
+        return SimpleNamespace(config=config, replicate=0, case="c", method=method["name"],
+                               variant=variant)  # fmt: skip
+
+    cells = [
+        cell("", {"name": "gies", "options": {}, "damping": None}),
+        cell("lm", {"name": "gies", "options": {}, "damping": {"name": "lm", "options": {}}}),
+    ]
+    comparison = _comparison(cells)
+    differs = comparison["differs"]
+
+    base = differs["c | gies"]["method.damping"]
+    assert base == (
+        "not set: the method's own default, rlmmac (initial = 1.0, factor = 2.0, minimum = "
+        "none, data_mismatch_tolerance = 0.01, reduction = 0.9, converge_on_rejection = "
+        "false, max_stalled_rejections = 3, confirm_convergence = false)"
+    )
+    assert differs["c | gies | lm"]["method.damping.name"] == "lm"
+    # Its entries point to it, and defaults does not repeat it (the review of #260).
+    assert differs["c | gies"]["method.damping.name"] == (
+        "not set: the method's own default (see method.damping)"
+    )
+    shown_defaults = [g["defaults"] for g in comparison.get("defaults", [])]
+    assert not any("method.damping" in d for d in shown_defaults)
+    # The case's [method.schedule] options are the default scheme's, and shown as such.
+    scheduled = [cell("", {"name": "gies", "options": {}, "damping": None,
+                           "schedule": {"reduction": 0.5}}),
+                 cell("lm", {"name": "gies", "options": {},
+                             "damping": {"name": "lm", "options": {}}})]  # fmt: skip
+    shown = _comparison(scheduled)["differs"]["c | gies"]["method.damping"]
+    assert "reduction = 0.5" in shown
+    # LM-EnRML's own is lm; a method with no damping has no such entry (ES-MDA).
+    lm = [cell("", {"name": "lm_enrml", "options": {}, "damping": None}),
+          cell("r", {"name": "lm_enrml", "options": {},
+                     "damping": {"name": "rlmmac", "options": {}}})]  # fmt: skip
+    assert _comparison(lm)["differs"]["c | lm_enrml"]["method.damping"].startswith(
+        "not set: the method's own default, lm (initial = 100.0, factor = 5.0, "
+    )
+
+
+def test_the_assistant_is_told_to_name_the_methods_default() -> None:
+    """#260: the prompt asked the assistant not to name a value for a method's own default."""
+    from apex.agents.chat import SYSTEM
+
+    assert "so do not name a value for it" not in SYSTEM
+    assert "name them when you say what an arm is compared with" in SYSTEM
+
+
+def test_a_strategy_that_localizes_by_itself_shows_its_localization() -> None:
+    """A reported issue (#261): in an approx against adaptive_rows study, both arms showed
+    no localization, and the assistant's caveat about it was judged wrong, though
+    adaptive_rows is ERT's per-row adaptive localization."""
+    from types import SimpleNamespace
+
+    from apex.agents.chat import SYSTEM, _comparison
+
+    def cell(method: str, strategy: str, localization: object = None) -> SimpleNamespace:
+        dumped = {"method": {"name": "esmda", "options": {"inflation": [4, 4]},
+                             "strategy": {"name": strategy, "options": {}},
+                             "localization": localization}}  # fmt: skip
+        config = SimpleNamespace(run=SimpleNamespace(seed=1), model_dump=lambda mode: dumped)
+        return SimpleNamespace(config=config, replicate=0, case="c", method=method, variant="")
+
+    differs = _comparison([cell("approx", "approx"), cell("rows", "adaptive_rows")])["differs"]
+
+    assert differs["c | approx"]["method.localization"] == "none"
+    within = "within the strategy adaptive_rows (it localizes by itself)"
+    assert differs["c | rows"]["method.localization"] == within
+    # An entry of the section reads the same (the review of #261), against an arm that sets
+    # one.
+    against = _comparison(
+        [
+            cell("rows", "adaptive_rows"),
+            cell("dist", "local_analysis", {"name": "distance", "options": {}}),
+        ]
+    )
+    assert against["differs"]["c | rows"]["method.localization.name"] == within  # fmt: skip
+    # Every local analysis and ERT's localizing smoothers say so; a given section is kept.
+    for strategy in ("local_analysis", "local_rlmmac", "ert_adaptive", "ert_localized"):
+        shown = _comparison([cell("a", "approx"), cell("s", strategy)])["differs"]["c | s"]
+        assert (
+            shown["method.localization"]
+            == f"within the strategy {strategy} (it localizes by itself)"
+        )
+    given = {"name": "distance", "options": {}}
+    held = _comparison([cell("a", "local_analysis", given), cell("b", "local_analysis", given)])
+    assert held["held_fixed"]["method.localization.name"] == "distance"
+    assert "caveat you add about a plan concerns a setting the plan shows" in SYSTEM
+
+
+def test_the_assistant_takes_a_runs_stop_reason_from_the_tools() -> None:
+    """#259: the assistant stated a cause of non-convergence no tool result gave."""
+    from apex.agents.chat import SYSTEM
+
+    assert "Why a run stopped or did not converge comes only from a tool's result" in SYSTEM
+
+
+def test_a_cut_section_key_leaves_its_entries_the_full_default() -> None:
+    """The re-review of #260: when MAX_DIFFERENCES cuts the section's own key, its entries
+    give the full default rather than point to a key the plan does not show."""
+    from apex.agents.chat import _shown_value
+
+    flat = {"method.damping": None}
+    defaults = {"method.damping": "not set: the method's own default, rlmmac (factor = 2.0)"}
+    shown = _shown_value(flat, "method.damping.name", defaults, None, ["method.damping.name"])
+    assert shown == defaults["method.damping"]
+    pointed = _shown_value(flat, "method.damping.name", defaults, None,
+                           ["method.damping", "method.damping.name"])  # fmt: skip
+    assert pointed == "not set: the method's own default (see method.damping)"

@@ -113,3 +113,42 @@ def test_whiten_rejects_wrong_row_count() -> None:
 def test_inflated_rejects_invalid_factors(alpha: float) -> None:
     with pytest.raises(ValueError, match="inflation"):
         DataErrorCovariance.diagonal([1.0]).inflated(alpha)
+
+
+def test_plus_diagonal_adds_variances_to_a_diagonal_covariance() -> None:
+    """``C_d + diag(v)``: stays diagonal, its factor the new standard deviations."""
+    base = DataErrorCovariance.diagonal([0.04, 0.09, 1.0])
+    added = base.plus_diagonal([0.01, 0.0, 2.0])
+    assert added.is_diagonal
+    np.testing.assert_array_equal(added.values, [0.05, 0.09, 3.0])
+    z = np.ones((3, 1))
+    np.testing.assert_allclose(added.correlate(z)[:, 0], np.sqrt([0.05, 0.09, 3.0]), rtol=1e-15)
+    np.testing.assert_array_equal(base.plus_diagonal(np.zeros(3)).values, base.values)
+
+
+def test_plus_diagonal_refactors_a_dense_covariance() -> None:
+    matrix = np.array([[1.0, 0.3], [0.3, 2.0]])
+    added = DataErrorCovariance.dense(matrix).plus_diagonal([0.5, 0.25])
+    expected = matrix + np.diag([0.5, 0.25])
+    np.testing.assert_allclose(added.values, expected, rtol=1e-15)
+    factor = added.correlate(np.eye(2))
+    np.testing.assert_allclose(factor @ factor.T, expected, rtol=1e-14)
+    residual = np.array([[1.0], [-2.0]])
+    np.testing.assert_allclose(
+        added.data_mismatch(residual), residual.T @ np.linalg.solve(expected, residual)[:, 0]
+    )
+
+
+@pytest.mark.parametrize("bad", [[0.1], [-0.1, 0.0, 0.0], [np.nan, 0.0, 0.0]])
+def test_plus_diagonal_refuses_bad_variances(bad: list[float]) -> None:
+    with pytest.raises(ValueError, match="added variances"):
+        DataErrorCovariance.diagonal([1.0, 1.0, 1.0]).plus_diagonal(bad)
+
+
+def test_gain_error_adds_nothing_without_a_variance() -> None:
+    """A forecast without ``error_variance`` leaves ``C_d`` the very same object."""
+    from apex.algorithms.data_assimilation.algorithm import gain_error
+
+    base = DataErrorCovariance.diagonal([1.0, 2.0])
+    assert gain_error(base, None) is base
+    np.testing.assert_array_equal(gain_error(base, np.array([1.0, 1.0])).values, [2.0, 3.0])

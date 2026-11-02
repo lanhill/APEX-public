@@ -115,12 +115,25 @@ class Forecast:
     sensitivity
         With ``with_sensitivities``: the survivors' mean sensitivity of the predictions to
         the state, ``(n_data, n_state)`` (analysis data rows); else ``None``.
+    error_variance
+        A further error variance of these predictions per datum, ``(n_data,)``: a
+        surrogate's mean predictive variance (``variance_in_errors``). The
+        update that steps from this forecast adds it to the diagonal of ``C_d``; ``None``
+        (every forecast of a simulator): nothing is added.
     """
 
     ok: NDArray[np.bool_]
     predicted: NDArray[np.float64]
     raw: NDArray[np.float64] | None = None
     sensitivity: NDArray[np.float64] | None = None
+    error_variance: NDArray[np.float64] | None = None
+
+
+def gain_error(
+    data_error: DataErrorCovariance, error_variance: NDArray[np.float64] | None
+) -> DataErrorCovariance:
+    """Return the ``C_d`` an update uses: with a forecast's ``error_variance`` added, if any."""
+    return data_error if error_variance is None else data_error.plus_diagonal(error_variance)
 
 
 #: The forecasts of a step's requests, by request name.

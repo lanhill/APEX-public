@@ -106,6 +106,9 @@ class LocalAnalysisUpdate(EmitsDiagnostics):
     relative_damping = False
     #: The localization selects data; it does not taper a global gain (LM-EnRML allows it).
     localization_role: ClassVar[str] = "selection"
+    #: The update is localized by the strategy itself, with or without
+    #: ``[method.localization]`` (#261: a plan showed "localization: none" for it).
+    localizes: ClassVar[bool] = True
 
     available_diagnostics: ClassVar[Mapping[str, str]] = {
         "groups": "number of parameter groups (distinct data subsets), ()",

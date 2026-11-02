@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from apex.core.errors import ConfigError, PluginError
+from apex.core.errors import ApexError, ConfigError, PluginError
 from apex.domain.config import MethodSection, PluginSection
 from apex.domain.state import StateLayout, StateVariable
 from apex.services import composition
@@ -100,6 +100,90 @@ def default_strategy(
     except Exception:  # noqa: BLE001 (not told: the caller keeps the entry as given)
         return None
     return section if _settings(named) == _settings(implicit) else None
+
+
+#: What building a method or plugin from options alone may raise (an unknown plugin, an
+#: option it refuses or misses, a value out of range, a missing extra).
+_NOT_BUILT = (ApexError, TypeError, ValueError, KeyError, AttributeError, ImportError)
+
+
+def default_damping(
+    method: str,
+    options: Mapping[str, Any] | None = None,
+    *,
+    schedule: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return the damping scheme ``method`` runs when none is given, as a damping section.
+
+    A reported issue (#260): a study of LM against "the case's damping" said only "not set:
+    the method's own default", so nobody could tell what LM was compared with. The method is
+    built as the composition builds it without ``[method.damping]`` (``schedule``: the
+    case's ``[method.schedule]``, the default scheme's options), and its scheme is named by
+    its type in ``damping_schemes``. ``{"name": ..., "options": {...}}``: the options where
+    the method's scheme differs from the scheme's own defaults (``[method.schedule]``'s, or
+    a method's own). It is returned only when building the method with that section gives
+    the same scheme, so naming it changes nothing (a wrapper, CHOP, names its inner
+    method's). ``None`` when that cannot be told (the method adapts no damping, as ES-MDA or
+    GN-EnRML's step length, needs more to be built, or runs a scheme that is not
+    registered).
+    """
+    damping_schemes = REGISTRIES["damping_schemes"]
+    layout = StateLayout([StateVariable("x", 4)])
+    base = {**_REQUIRED_OPTIONS.get(method, {}), **(options or {})}
+    try:
+        built = composition.build_method(
+            MethodSection.model_validate(
+                {"name": method, "options": base,
+                 **({"schedule": dict(schedule)} if schedule else {})}
+            ),
+            layout,
+        )  # fmt: skip
+        implicit = getattr(built, "schedule", None)
+        name = next((n for n in damping_schemes.registered()
+                     if type(implicit) is damping_schemes.factory(n)), None)  # fmt: skip
+        if implicit is None or name is None:
+            return None
+        own = damping_schemes.create(name)
+        differs = {
+            key: value
+            for key in inspect.signature(type(implicit)).parameters
+            if _plain(value := getattr(implicit, key, None)) and value != getattr(own, key, None)
+        }
+        section = {"name": name, "options": differs}
+        named = getattr(
+            composition.build_method(
+                MethodSection.model_validate({"name": method, "options": base, "damping": section}),
+                layout,
+            ),
+            "schedule",
+            None,
+        )
+    except _NOT_BUILT:
+        # Not told: the caller says the method chooses (logged, as the table's faults are).
+        logger.debug("default damping of %s not told", method, exc_info=True)
+        return None
+    return section if named == implicit else None
+
+
+def plugin_settings(
+    registry: str, name: str, options: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return the settings a plugin runs with: every option, given or its default (#260).
+
+    Only the values a TOML file holds (numbers, text, flags; unset ones as ``None``), so a
+    default can be named with its values. Empty when the plugin cannot be built from
+    ``options`` alone (e.g. a strategy that needs a file).
+    """
+    try:
+        plugin = REGISTRIES[registry].create(name, **dict(options or {}))
+    except _NOT_BUILT:
+        logger.debug("settings of %s %s not told", registry, name, exc_info=True)
+        return {}
+    return {
+        key: value
+        for key in inspect.signature(type(plugin)).parameters
+        if (value := getattr(plugin, key, None)) is None or _plain(value)
+    }
 
 
 def _plain(value: object) -> bool:

@@ -87,13 +87,15 @@ def metric_figure(
     log: bool = False,
     selected: int | None = None,
     font_size: float = FONT_SIZE,
+    sources: Sequence[str] | None = None,
 ) -> Path:
     """Plot the distribution over members of a per-member quantity at each iteration.
 
     PET-fork's ``metric_plots`` (box and violin plots). ``values[i]`` is
     ``(n_members,)`` at ``iterations[i]``; rejected trials (``accepted`` false) are drawn
     muted and labelled. ``selected`` (an iteration) marks the posterior chosen by cross
-    validation with a dashed line.
+    validation with a dashed line. ``sources`` (a surrogate run) names
+    each forecast's source: the surrogate's and mixed ones are marked ``S`` and ``M``.
     """
     plt = _pyplot(font_size)
     accepted = [True] * len(values) if accepted is None else list(accepted)
@@ -169,8 +171,17 @@ def metric_figure(
         )
     if log:
         ax.set_yscale("log")
-    ax.set_xticks(positions, [str(i) for i in iterations])
-    ax.set_xlabel("iteration (0 = prior)")
+    marks = {"surrogate": " S", "mixed": " M"}
+    ticks = [
+        str(i) + ("" if sources is None else marks.get(s, ""))
+        for i, s in zip(iterations, sources or [""] * len(iterations), strict=True)
+    ]
+    ax.set_xticks(positions, ticks)
+    ax.set_xlabel(
+        "iteration (0 = prior)"
+        if sources is None
+        else "iteration (0 = prior; S: surrogate forecasts, M: mixed)"
+    )
     ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left")
     ax.grid(axis="x", visible=False)

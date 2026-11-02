@@ -21,6 +21,16 @@ ES-MDA's inflated ones, as PET's ``enObs``) or every accepted iterate (iterative
 ``trial_<k>.npz`` for rejected trials; ``data_mismatch_<k>.npz`` with per-member data mismatches and
 metrics for every forecast; ``posterior.npz`` at the end. Bookkeeping for resume:
 ``algorithm_state_<n>.npz`` (the algorithm's state, the latest only) and ``state.json``.
+
+**With a surrogate** (``[surrogate]``, :mod:`apex.workflows.surrogate_forecasts`)
+every forecast the method asks for is the surrogate's, made on local workers; members
+outside its validated domain stop the run (or are run by the simulator), and at the check
+iterations some members are run by the simulator too and gated against the surrogate
+(``check_<k>.npz``). Every decision of the loop (acceptance, damping, stopping, the
+cross-validation rule) is made on the surrogate's forecasts, and each saved ensemble records
+its members' ``forecast_source``. When the run completes, the posterior iterate is
+forecast by the simulator (``full_<k>.npz``), and ``posterior.npz`` holds the simulator's
+forecast. Without ``[surrogate]`` none of this runs: the loop is the one above.
 """
 
 import dataclasses
@@ -47,6 +57,8 @@ from apex.algorithms.data_assimilation.algorithm import (
     keep,
 )
 from apex.algorithms.data_assimilation.data_error import DataErrorCovariance
+from apex.algorithms.surrogates.domain import check_members
+from apex.algorithms.surrogates.gate import gate
 from apex.core.diagnostics import DiagnosticsPlan, NoDiagnostics, RecordingDiagnostics
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.metrics import MetricContext, PerformanceMetric
@@ -69,8 +81,15 @@ from apex.domain.data_split import DataSplit
 from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.results import HistoryMatchResult, IterationRecord
 from apex.domain.state import StateLayout
-from apex.storage.run_directory import RunDirectory
+from apex.domain.surrogate import GateResult
+from apex.storage.run_directory import SIMULATOR, SURROGATE, RunDirectory, upgrade_iterate
 from apex.workflows.parameterization import PropertyMap, parameterized
+from apex.workflows.surrogate_forecasts import (
+    SURROGATE_LABEL,
+    SurrogateCheckFailed,
+    SurrogateForecasting,
+    forecast_timing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +99,9 @@ DATA_MISMATCH = "data_mismatch"
 
 #: Names of the independent random streams spawned from the run seed. New names are only
 #: ever appended: spawned children depend on their position, so existing streams (and
-#: results) do not change.
-STREAM_NAMES = ("prior", "perturbations", "analysis", "localization", "chop")
+#: results) do not change. ``surrogate``: the members a check runs by the
+#: simulator, and refits.
+STREAM_NAMES = ("prior", "perturbations", "analysis", "localization", "chop", "surrogate")
 
 #: Member id used for the forecast of the ensemble-mean state.
 MEAN_MODEL_ID = -1
@@ -176,6 +196,10 @@ class HistoryMatchingWorkflow:
     auxiliary_variables
         State variables that are not reservoir properties, e.g. a model-error model's
         parameters: the quantity metrics leave them out unless named.
+    surrogate
+        A fitted surrogate makes the forecasts (``[surrogate]``); ``simulator``
+        and ``executor`` then run only its checks, its fallbacks and the posterior's
+        forecast. ``None`` (default): the simulator makes every forecast.
 
     A simulator with ``auxiliary_keys(keys)`` (a model-error simulator's residuals) is
     asked for those keys after the observations'; their values are saved with each saved
@@ -204,6 +228,7 @@ class HistoryMatchingWorkflow:
         progress: ProgressReporter | None = None,
         parameterizations: Sequence[Parameterization] = (),
         auxiliary_variables: frozenset[str] = frozenset(),
+        surrogate: SurrogateForecasting | None = None,
     ) -> None:
         if not 0 < min_success_fraction <= 1:
             raise ValueError(f"min_success_fraction must be in (0, 1], got {min_success_fraction}")
@@ -280,6 +305,22 @@ class HistoryMatchingWorkflow:
             )
         )
         self._last_raw: NDArray[np.float64] | None = None
+        self.surrogate = surrogate
+        if surrogate is not None and (self._transformed_remotely or self.auxiliary_keys):
+            # Composition refuses both first ("Refused"); kept here for other callers.
+            raise ValueError(
+                "a surrogate's forecasts stay on local workers: no executor transforming "
+                "members remotely, no simulator with auxiliary keys (model error)"
+            )
+        # A surrogate run's forecast sources of each iteration until its record is saved:
+        # (member ids, their sources, the surrogate's identity, its predictive variance).
+        self._pending_sources: dict[
+            int,
+            tuple[NDArray[np.int64], NDArray[np.str_], str, NDArray[np.float64] | None],
+        ] = {}
+        self._posterior_report: dict[str, Any] | None = None
+        # The iteration whose check changed the forecasts' source (a switch or a refit).
+        self._source_changed: int | None = None
         rows: dict[str, list[int]] = {}
         for i, key in enumerate(observations.keys):
             rows.setdefault(key.datatype, []).append(i)
@@ -349,6 +390,7 @@ class HistoryMatchingWorkflow:
         else:
             saved = self._load()
             self._restore_validation(saved)
+            self._restore_surrogate(saved)
             setup = self._setup(np.empty((self.layout.n_state, 0)))
             if saved["driver"] == "generic":
                 arrays = self.run_dir.load_arrays(str(saved["algorithm_file"]))
@@ -374,8 +416,20 @@ class HistoryMatchingWorkflow:
         )
         while step.requests and not self._cv_stopped:
             if step.checkpoint and max_steps is not None and step.iteration > completed + max_steps:
+                # Recorded so that a report can say why the run stopped (#259); an event
+                # only, so the run itself is unchanged.
+                logger.info(
+                    "step limit reached: stopping at this checkpoint",
+                    extra={"event": "max_steps", "iteration": step.iteration,
+                           "max_steps": max_steps},
+                )  # fmt: skip
                 break
             forecasts = {request.name: self._forecast_request(request) for request in step.requests}
+            if self._source_changed is not None:
+                # The trial is judged against its accepted iterate forecast by
+                # the same source (after a switch to the simulator, or a refit).
+                self._rescore_accepted(algorithm, self._source_changed)
+                self._source_changed = None
             if self._diagnostics is not None:
                 # Items offered during this step belong to the update it may produce.
                 self._diagnostics.iteration = step.iteration + 1
@@ -417,6 +471,7 @@ class HistoryMatchingWorkflow:
                 estimate.member_ids,
                 converged=step.converged,
                 complete=complete,
+                iteration=None if self.surrogate is None else self._last_accepted(),
             )
         self.progress.run_finished(status=run_status(result))
         return result
@@ -547,12 +602,17 @@ class HistoryMatchingWorkflow:
         """Forecast one request; a ``required`` one (the mean model) must fully succeed."""
         if request.required and request.with_sensitivities:
             raise ValueError("a required (mean-model) forecast does not return sensitivities")
+        if self.surrogate is not None and request.with_sensitivities:
+            raise WorkflowError(
+                "the adjoint update needs the simulator's gradients; it is refused with a surrogate"
+            )
         if not request.required:
             ok, predicted, raw, sensitivity = self._forecast(
                 request.state,
                 request.member_ids,
                 request.iteration,
                 sensitivities=request.with_sensitivities,
+                outputs=None if self.surrogate is None else self._surrogate_outputs(request),
             )
             if self._held_out:
                 self._pending_held_out[request.iteration] = (
@@ -564,14 +624,21 @@ class HistoryMatchingWorkflow:
                     request.member_ids[ok],
                     self._last_auxiliary,
                 )
+            pending = self._pending_sources.get(request.iteration)
             return Forecast(
                 ok,
                 self._assimilated(predicted),
                 None if raw is None else keep(raw),
                 None if sensitivity is None else self._assimilated(sensitivity),
+                # the surrogate's variance, with variance_in_errors only.
+                error_variance=None if pending is None else pending[3],
             )
-        outputs = self._run_members(
-            request.state, request.member_ids, request.iteration, "mean model", auxiliary=False
+        outputs = (
+            self._run_members(
+                request.state, request.member_ids, request.iteration, "mean model", auxiliary=False
+            )
+            if self.surrogate is None
+            else self._surrogate_outputs(request)
         )
         values = [out for out in outputs if not isinstance(out, MemberFailure)]
         failed = [out for out in outputs if isinstance(out, MemberFailure)]
@@ -604,6 +671,7 @@ class HistoryMatchingWorkflow:
         """
         held_out = self._held_out_of(record)
         auxiliary = self._pending_auxiliary.pop(record.iteration, None)
+        sources = self._sources_of(record)
         if record.kind == "iterate" or self.save_rejected_trials:
             arrays: dict[str, NDArray[Any]] = {
                 "state": record.state,
@@ -618,6 +686,8 @@ class HistoryMatchingWorkflow:
                 ids, values = auxiliary
                 arrays["auxiliary_predicted"] = keep(values[:, _columns_of(ids, record.member_ids)])
                 arrays["auxiliary_keys"] = np.array([str(k) for k in self.auxiliary_keys])
+            if sources is not None:
+                arrays.update(sources)
             prefix = "iter" if record.kind == "iterate" else "trial"
             self.run_dir.save_arrays(f"{prefix}_{record.iteration}", arrays)
         scores = {
@@ -635,6 +705,7 @@ class HistoryMatchingWorkflow:
             accepted=record.accepted,
             damping=record.damping,
             held_out_scores=scores,
+            forecast_source=None if sources is None else _source_of(sources["forecast_source"]),
         )
         stops = (
             self.stopping is not None
@@ -667,8 +738,19 @@ class HistoryMatchingWorkflow:
         assert self.stopping is not None
         self.stopping.restore(self._rule_initial)
         stop = False
+        # after the forecasts' source changed (a surrogate run's switch or
+        # refit), the rule compares like with like: it starts again from the accepted
+        # iterate forecast again by the new source, and takes the iterates after it.
+        latest = self.surrogate.rescores[-1] if self.surrogate and self.surrogate.rescores else None
+        since = -1
+        if latest is not None:
+            since = int(latest["accepted"])
+            saved = self.run_dir.load_arrays(f"rescored_{latest['iteration']}")
+            columns = _columns_of(saved["member_ids"], member_ids)
+            value = float(saved["metric:cv_normalized_data_mismatch:all"][columns].mean())
+            stop = self.stopping.observe(since, value)
         for entry in self.run_dir.history_dicts():
-            if not entry["accepted"]:
+            if not entry["accepted"] or int(entry["iteration"]) <= since:
                 continue
             iteration = int(entry["iteration"])
             saved = self.run_dir.load_arrays(f"data_mismatch_{iteration}")
@@ -710,11 +792,800 @@ class HistoryMatchingWorkflow:
                 "algorithm": dict(state.values),
                 "converged": step.converged,
                 **self._validation_state(),
+                **({} if self.surrogate is None else {"surrogate": self.surrogate.state()}),
             }
         )
         for path in self.run_dir.checkpoints.glob("algorithm_state_*.npz"):
             if path.stem != name:
                 path.unlink()
+
+    # ------------------------------------------------------------------ surrogate
+
+    def _surrogate_inputs(self, state: NDArray[np.float64]) -> dict[str, NDArray[np.float64]]:
+        """Return the surrogate's inputs of an ensemble: its properties, C-contiguous."""
+        blocks = self.layout.split(state)
+        properties = blocks if self.property_map.identity else self.property_map.ensemble(blocks)
+        return {
+            name: np.ascontiguousarray(np.asarray(value, dtype=np.float64))
+            for name, value in properties.items()
+        }
+
+    def _surrogate_outputs(
+        self, request: ForecastRequest
+    ) -> list[NDArray[np.float64] | MemberFailure]:
+        """Forecast a request with the surrogate; check it at the check iterations.
+
+        Returns each member's raw forecast (or its failure, only for members the simulator
+        ran), in member order. The sources of an ensemble forecast wait for its record.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        label = "mean model" if request.required else "ensemble"
+        state, ids, iteration = request.state, request.member_ids, request.iteration
+        if surrogate.switched_at is not None:  # on_check_failure = "simulator" happened
+            outputs = self._run_members(state, ids, iteration, label, auxiliary=False)
+            surrogate.simulator_runs += len(ids)
+            sources = [SIMULATOR] * len(ids)
+        else:
+            outputs, sources = self._surrogate_members(state, ids, iteration, label)
+            if not request.required and surrogate.checks_at(iteration):
+                outputs, sources = self._check_surrogate(
+                    state, ids, iteration, outputs, sources, label
+                )
+        if not request.required:
+            variance = None
+            if surrogate.section.variance_in_errors and SURROGATE in sources:
+                variance = self._surrogate_variance(state, ids, sources)
+            self._pending_sources[iteration] = (
+                np.array(ids, dtype=np.int64),
+                np.array(sources),
+                surrogate.active.identity if SURROGATE in sources else "",
+                variance,
+            )
+        return outputs
+
+    def _surrogate_members(
+        self,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        iteration: int,
+        label: str,
+        *,
+        folder: str | None = None,
+        simulated: Mapping[int, NDArray[np.float64] | MemberFailure] | None = None,
+    ) -> tuple[list[NDArray[np.float64] | MemberFailure], list[str]]:
+        """Predict the members inside the domain; the others stop the run or are simulated.
+
+        ``folder``: where the simulator's runs go when not ``iter_<iteration>`` (an accepted
+        iterate's forecast again). ``simulated``: the members' simulator outputs made
+        already in this forecast, by column (a refit repeating it): a member outside reuses
+        its own instead of being run again.
+
+        Raises
+        ------
+        SurrogateDomainError
+            With ``outside = "stop"``, if a member lies outside the surrogate's domain; and
+            always, if a key or time does.
+        WorkflowError
+            If the surrogate fails a member (never a dropped member), or its evaluations
+            would exceed ``max_evaluations``.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        active = surrogate.active
+        found = check_members(
+            active.domain,
+            active.model,
+            self._surrogate_inputs(state),
+            [int(m) for m in member_ids],
+            self.raw_observations.keys,
+        )
+        stops = found.unknown_keys or found.times_outside or surrogate.section.outside == "stop"
+        if not found.inside:
+            logger.log(
+                logging.ERROR if stops else logging.WARNING,
+                "members outside the surrogate's domain",
+                extra={"event": "surrogate_outside", "iteration": iteration, "label": label,
+                       "members": [int(m) for m in found.members],
+                       "policy": "stop" if stops else "simulator", "details": found.message()},
+            )  # fmt: skip
+            if stops:
+                found.raise_if_outside()
+        outside = {int(m) for m in found.members}
+        inside = [j for j, m in enumerate(member_ids) if int(m) not in outside]
+        rest = [j for j, m in enumerate(member_ids) if int(m) in outside]
+        outputs: list[NDArray[np.float64] | MemberFailure | None] = [None] * len(member_ids)
+        if inside:
+            surrogate.charge(len(inside), iteration)
+            predicted = self._run_surrogate(
+                keep(state[:, inside]), member_ids[inside], iteration, label
+            )
+            for column, out in zip(inside, predicted, strict=True):
+                if isinstance(out, MemberFailure):
+                    # Loud: dropping members the surrogate cannot predict would bias the
+                    # posterior silently.
+                    logger.error(
+                        "the surrogate failed a member",
+                        extra={"event": "surrogate_failed", "iteration": iteration,
+                               "member_id": out.member_id, "reason": out.message},
+                    )  # fmt: skip
+                    raise WorkflowError(
+                        f"iteration {iteration}: the surrogate failed member {out.member_id} "
+                        f"({out.message}); the run stops at its last checkpoint"
+                    )
+                outputs[column] = out
+        known = dict(simulated or {})
+        reused = [j for j in rest if j in known]
+        for column in reused:
+            outputs[column] = known[column]
+        to_run = [j for j in rest if j not in known]
+        if to_run:
+            outcome = self._run_members(
+                keep(state[:, to_run]), member_ids[to_run], iteration, f"{label} (outside)",
+                auxiliary=False, folder=folder,
+            )  # fmt: skip
+            surrogate.simulator_runs += len(to_run)
+            for column, out in zip(to_run, outcome, strict=True):
+                outputs[column] = out
+        logger.info(
+            "surrogate forecast",
+            extra={"event": "surrogate_forecast", "iteration": iteration, "label": label,
+                   "surrogate": len(inside), "simulator": len(rest), "reused": len(reused),
+                   "identity": active.identity, "evaluations": surrogate.evaluations},
+        )  # fmt: skip
+        simulated_columns = set(rest)
+        sources = [
+            SIMULATOR if j in simulated_columns else SURROGATE for j in range(len(member_ids))
+        ]
+        done = [out for out in outputs if out is not None]
+        assert len(done) == len(member_ids)  # every member is predicted or simulated
+        return done, sources
+
+    def _run_surrogate(
+        self,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        iteration: int,
+        label: str,
+    ) -> list[NDArray[np.float64] | MemberFailure]:
+        """Run the active surrogate on the members, on its local executor."""
+        surrogate = self.surrogate
+        assert surrogate is not None
+        blocks = self.layout.split(state)
+        members = [
+            MemberInput(
+                member_id=int(member_id),
+                state={name: block[:, column].copy() for name, block in blocks.items()},
+            )
+            for column, member_id in enumerate(member_ids)
+        ]
+        self.progress.forecast_started(
+            iteration=iteration, label=f"surrogate {label}", n_members=len(members)
+        )
+        began = time.monotonic()
+        outputs = surrogate.executor.run_all(
+            parameterized(surrogate.active.simulator, self.property_map),
+            members,
+            self.raw_observations.keys,
+            on_result=lambda member_id, ok: self.progress.member_finished(
+                member_id=member_id, ok=ok
+            ),
+        )
+        seconds = time.monotonic() - began
+        n_failed = sum(isinstance(out, MemberFailure) for out in outputs)
+        self.progress.forecast_finished(
+            n_ok=len(outputs) - n_failed, n_failed=n_failed, seconds=seconds
+        )
+        logger.info(
+            "forecast done",
+            extra={"event": "forecast_done", "iteration": iteration, "label": SURROGATE_LABEL,
+                   "n_ok": len(outputs) - n_failed, "n_failed": n_failed,
+                   # Unrounded: a fast surrogate's forecast takes well under a millisecond.
+                   "seconds": seconds,
+                   # Members at once (local executors: serial is one), for its cost (§14).
+                   "workers": min(int(getattr(surrogate.executor, "workers", 1)), len(members))},
+        )  # fmt: skip
+        return outputs
+
+    def _check_keys(self) -> tuple[DataKey, ...]:
+        """Keys a check runs: the observations', and the model's own others for a refit."""
+        surrogate = self.surrogate
+        assert surrogate is not None
+        keys = tuple(self.raw_observations.keys)
+        if surrogate.section.on_check_failure != "refit":
+            return keys
+        known = set(keys)
+        return keys + tuple(k for k in surrogate.active.model.keys if k not in known)
+
+    def _gate_roles(
+        self,
+        surrogate_raw: NDArray[np.float64],
+        simulator_raw: NDArray[np.float64],
+        member_ids: Sequence[int],
+    ) -> dict[str, GateResult]:
+        """Gate the surrogate against the simulator per role, in the analysis space (§3).
+
+        ``*_raw`` are ``(n_raw, n)``; both are transformed as every forecast is, and gated
+        against the observation errors there: the assimilated data, and with
+        ``[validation]`` the cv data apart.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        transformed = self._transform(keep(surrogate_raw))
+        reference = self._transform(keep(simulator_raw))
+        analysis = self.analysis_observations
+        rows = self.role_rows()
+        verdicts: dict[str, GateResult] = {}
+        for role in ("history_matching", "cv"):
+            if role not in rows or not len(rows[role]):
+                continue
+            chosen = rows[role]
+            verdicts[role] = gate(
+                keep(transformed[chosen]),
+                keep(reference[chosen]),
+                [analysis.keys[int(i)] for i in chosen],
+                [int(m) for m in member_ids],
+                tolerances=surrogate.tolerances,
+                variances=np.ascontiguousarray(analysis.variances[chosen]),
+                kinds=surrogate.kinds,
+            )
+        return verdicts
+
+    def _check_surrogate(
+        self,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        iteration: int,
+        outputs: list[NDArray[np.float64] | MemberFailure],
+        sources: list[str],
+        label: str,
+    ) -> tuple[list[NDArray[np.float64] | MemberFailure], list[str]]:
+        """Run some members by the simulator too and gate the surrogate on them (§5).
+
+        Returns the forecast the update uses: the surrogate's when the check passes (every
+        member's, so that the members' errors stay equal), a refit's, or the simulator's.
+
+        Raises
+        ------
+        SurrogateCheckFailed
+            If the check fails and the run stops (``stop``, or no refit left).
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        candidates = [j for j, source in enumerate(sources) if source == SURROGATE]
+        if not candidates:
+            logger.info(
+                "nothing to check: no member was forecast by the surrogate",
+                extra={"event": "surrogate_check", "iteration": iteration, "skipped": True},
+            )
+            return outputs, sources
+        n = surrogate.check_count(len(candidates))
+        if n < len(candidates):
+            drawn = self.streams["surrogate"].choice(len(candidates), size=n, replace=False)
+            columns = [candidates[int(i)] for i in np.sort(drawn)]
+        else:
+            columns = candidates
+        keys = self._check_keys()
+        n_raw = self.raw_observations.n_data
+        simulated = self._run_members(
+            keep(state[:, columns]), member_ids[columns], iteration, "check", auxiliary=False,
+            keys=keys, folder=f"check_{iteration}",
+        )  # fmt: skip
+        surrogate.simulator_runs += len(columns)
+        good = [
+            (j, out)
+            for j, out in zip(columns, simulated, strict=True)
+            if not isinstance(out, MemberFailure)
+        ]
+        failed = [int(out.member_id) for out in simulated if isinstance(out, MemberFailure)]
+        verdicts: dict[str, GateResult] = {}
+        checked_ids = [int(member_ids[j]) for j, _ in good]
+        if good:
+            full = np.ascontiguousarray(np.column_stack([out for _, out in good]))
+            simulator_raw = keep(full[:n_raw])
+            surrogate_raw = np.ascontiguousarray(
+                np.column_stack([_values(outputs[j]) for j, _ in good])
+            )
+            verdicts = self._gate_roles(surrogate_raw, simulator_raw, checked_ids)
+            self.run_dir.save_arrays(
+                f"check_{iteration}",
+                {
+                    "member_ids": np.array(checked_ids, dtype=np.int64),
+                    "state": keep(state[:, [j for j, _ in good]]),
+                    "simulator_predicted": self._transform(simulator_raw),
+                    "surrogate_predicted": self._transform(surrogate_raw),
+                    "failed": np.array(failed, dtype=np.int64),
+                    "surrogate_id": np.array(surrogate.active.identity),
+                    "gate": np.array(
+                        json.dumps({r: v.model_dump(mode="json") for r, v in verdicts.items()})
+                    ),
+                },
+            )
+        passed = bool(verdicts) and all(v.passed for v in verdicts.values())
+        problems = [f"{role}: {line}" for role, v in verdicts.items() for line in v.failures()]
+        if not good:
+            problems.append("no checked run of the simulator succeeded")
+        errors = {role: {d.datatype: d.error for d in v.datatypes} for role, v in verdicts.items()}
+        surrogate.checks.append({
+            "iteration": iteration, "passed": passed, "members": checked_ids,
+            "failed": failed, "errors": errors, "identity": surrogate.active.identity,
+        })  # fmt: skip
+        logger.info(
+            "surrogate checked",
+            extra={"event": "surrogate_check", "iteration": iteration, "passed": passed,
+                   "members": checked_ids, "failed": failed, "errors": errors},
+        )  # fmt: skip
+        if passed:
+            return outputs, sources
+        policy = surrogate.section.on_check_failure
+        exhausted = policy == "refit" and len(surrogate.refits) >= surrogate.section.max_refits
+        if policy == "stop" or exhausted or (policy == "refit" and not good):
+            reason = (
+                f"after {len(surrogate.refits)} refit(s), [surrogate] max_refits"
+                if exhausted
+                else f'on_check_failure = "{policy}"'
+            )
+            logger.error(
+                "surrogate check failed",
+                extra={"event": "surrogate_check_failed", "iteration": iteration,
+                       "errors": errors, "problems": problems, "policy": policy},
+            )  # fmt: skip
+            raise SurrogateCheckFailed(
+                f"iteration {iteration}: the surrogate fails its check against the simulator "
+                f"({'; '.join(problems)}); the run stops before the update ({reason}), at "
+                "its last checkpoint. Resume it once [surrogate] in its config.json says what "
+                'to do (on_check_failure = "refit" or "simulator"), or rebuild the surrogate'
+            )
+        if policy == "refit":
+            model_keys = surrogate.active.model.keys
+            index = {key: row for row, key in enumerate(keys)}
+            rows = [index[key] for key in model_keys]
+            surrogate.refit(
+                iteration,
+                self._surrogate_inputs(keep(state[:, [j for j, _ in good]])),
+                keep(full[rows]),
+                checked_ids,
+                self.streams["surrogate"],
+                self.run_dir.path,
+            )
+            # The iteration's forecast again, with the refit (not checked again: the checked
+            # runs are now its training and held-out runs). Members the simulator ran
+            # already (outside the old domain) keep their runs.
+            self._source_changed = iteration
+            done = {j: out for j, (out, s) in enumerate(zip(outputs, sources, strict=True))
+                    if s == SIMULATOR}  # fmt: skip
+            return self._surrogate_members(state, member_ids, iteration, label, simulated=done)
+        surrogate.switched_at = iteration
+        self._source_changed = iteration
+        logger.warning(
+            "the surrogate failed its check: the rest of the run uses the simulator",
+            extra={"event": "surrogate_switched", "iteration": iteration, "errors": errors},
+        )  # fmt: skip
+        checked = {j: out[:n_raw] for j, out in good}
+        rest = [j for j in range(len(member_ids)) if j not in checked]
+        merged: list[NDArray[np.float64] | MemberFailure] = list(outputs)
+        if rest:
+            simulated_rest = self._run_members(
+                keep(state[:, rest]), member_ids[rest], iteration, label, auxiliary=False
+            )
+            surrogate.simulator_runs += len(rest)
+            for j, out in zip(rest, simulated_rest, strict=True):
+                merged[j] = out
+        for j, out in checked.items():
+            merged[j] = out
+        return merged, [SIMULATOR] * len(member_ids)
+
+    def _rescore_accepted(self, algorithm: EnsembleAlgorithm, iteration: int) -> None:
+        """Forecast the accepted iterate again by the new source; let the method rescore it.
+
+        An iterative method judges a trial against its accepted iterate: after
+        a switch to the simulator or a refit, the trial is the new source's and so must the
+        accepted iterate (and its mean model, with RLM-MAC) be. Methods without acceptance
+        (ES-MDA) have nothing to rescore.
+
+        Raises
+        ------
+        WorkflowError
+            If an iterative method cannot rescore its accepted iterate (refused at
+            validation), or a member of the accepted iterate fails the new forecast.
+        """
+        accepted = getattr(algorithm, "accepted_ensemble", None)
+        rescore = getattr(algorithm, "rescore_accepted", None)
+        if accepted is None or rescore is None:
+            if getattr(algorithm, "iterative", False):
+                raise WorkflowError(
+                    f"{type(algorithm).__name__} cannot judge its trials after the forecasts' "
+                    "source changed (no rescore_accepted)"
+                )
+            return
+        state, member_ids, needs_reference = accepted()
+        folder = f"accepted_{iteration}"
+        forecast, sources = self._accepted_forecast(state, member_ids, iteration, folder)
+        predicted = self._assimilated(forecast)
+        reference = None
+        if needs_reference:
+            mean = keep(state.mean(axis=-1, keepdims=True))
+            ids = np.array([MEAN_MODEL_ID], dtype=np.int64)
+            mean_forecast, _ = self._accepted_forecast(mean, ids, iteration, folder)
+            reference = self._assimilated(mean_forecast)[:, 0].copy()
+        rescore(predicted, reference)
+        surrogate = self.surrogate
+        assert surrogate is not None
+        source = SIMULATOR if surrogate.switched_at is not None else SURROGATE
+        # Saved, so that cross validation compares like with like (_replay_stopping) and the
+        # posterior's forecast can reuse the simulator's runs (_forecast_full).
+        accepted_iteration = self._last_accepted()
+        held = {role: keep(forecast[rows]) for role, (rows, _) in self._held_out.items()}
+        arrays: dict[str, NDArray[Any]] = {
+            "state": keep(state),
+            "predicted": predicted,
+            "member_ids": member_ids,
+            "forecast_source": np.array(sources),
+            "surrogate_id": np.array(surrogate.active.identity if source == SURROGATE else ""),
+            "accepted_iteration": np.array(accepted_iteration),
+            **{f"{role}_predicted": values for role, values in held.items()},
+        }
+        for role, values in held.items():
+            for label, per_member in _mean_square_by_type(self._held_out[role][1], values).items():
+                arrays[f"metric:{role}_normalized_data_mismatch:{label}"] = per_member
+        self.run_dir.save_arrays(f"rescored_{iteration}", arrays)
+        surrogate.rescores.append(
+            {"iteration": iteration, "accepted": accepted_iteration, "source": source}
+        )
+        logger.info(
+            "accepted iterate forecast again by the new source",
+            extra={"event": "surrogate_rescored", "iteration": iteration,
+                   "accepted": accepted_iteration, "source": source,
+                   "identity": surrogate.active.identity, "members": len(member_ids)},
+        )  # fmt: skip
+
+    def _accepted_forecast(
+        self,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        iteration: int,
+        folder: str,
+    ) -> tuple[NDArray[np.float64], list[str]]:
+        """Forecast members by the current source; every one must succeed.
+
+        Returns their forecast in the analysis space (every row, held-out ones included)
+        and each member's source.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        if surrogate.switched_at is not None:
+            outputs = self._run_members(
+                state, member_ids, iteration, "accepted iterate", auxiliary=False, folder=folder
+            )
+            surrogate.simulator_runs += len(member_ids)
+            sources = [SIMULATOR] * len(member_ids)
+        else:
+            outputs, sources = self._surrogate_members(
+                state, member_ids, iteration, "accepted iterate", folder=folder
+            )
+        failed = [out for out in outputs if isinstance(out, MemberFailure)]
+        if failed:
+            raise WorkflowError(
+                f"iteration {iteration}: the accepted iterate's member {failed[0].member_id} "
+                f"failed its forecast by the new source ({failed[0].message}); the run stops at "
+                "its last checkpoint"
+            )
+        raw = np.ascontiguousarray(np.column_stack([_values(out) for out in outputs]))
+        return keep(self._transform(raw)), sources
+
+    def _surrogate_variance(
+        self, state: NDArray[np.float64], member_ids: NDArray[np.int64], sources: Sequence[str]
+    ) -> NDArray[np.float64] | None:
+        """Return the members' mean predictive variance per datum, analysis rows (§2).
+
+        Only the members the surrogate forecast count. ``None`` when nothing applies.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        predict_std = getattr(surrogate.active.model, "predict_std", None)
+        if predict_std is None:
+            return None
+        columns = [j for j, source in enumerate(sources) if source == SURROGATE]
+        std = np.asarray(
+            predict_std(
+                self._surrogate_inputs(keep(state[:, columns])), self.raw_observations.keys
+            ),
+            dtype=np.float64,
+        )
+        # Raw rows are the analysis rows here: composition refuses variance_in_errors with
+        # data transforms.
+        variance = np.mean(np.square(std), axis=-1)
+        return np.ascontiguousarray(variance[self.role_rows()["history_matching"]])
+
+    def _sources_of(self, record: Record) -> dict[str, NDArray[Any]] | None:
+        """Return a surrogate run's source arrays for a record's members (``None`` otherwise)."""
+        if self.surrogate is None:
+            return None
+        pending = self._pending_sources.get(record.iteration)
+        if pending is None:
+            # Never saved unlabelled: it would read as the simulator's.
+            raise WorkflowError(
+                f"no forecast of iteration {record.iteration} for its record (the algorithm "
+                "must emit a record after the forecast of its own iteration)"
+            )
+        ids, sources, identity, variance = pending
+        # A record is the last use of its iteration's forecast (one record per forecast).
+        self._pending_sources.pop(record.iteration, None)
+        arrays: dict[str, NDArray[Any]] = {
+            "forecast_source": sources[_columns_of(ids, record.member_ids)],
+            "surrogate_id": np.array(identity),
+        }
+        if variance is not None:
+            arrays["surrogate_variance"] = variance
+        return arrays
+
+    def _restore_surrogate(self, saved: Mapping[str, Any]) -> None:
+        if self.surrogate is None:
+            if "surrogate" in saved:
+                raise WorkflowError(
+                    "the run was started with [surrogate]; it cannot be resumed without it"
+                )
+            return
+        self.surrogate.restore(saved.get("surrogate"), self.run_dir.path)
+
+    def _last_accepted(self) -> int:
+        """Return the iteration of the last kept ensemble (the posterior without CV)."""
+        accepted = [int(h["iteration"]) for h in self.run_dir.history_dicts() if h["accepted"]]
+        return accepted[-1]
+
+    def _full_posterior(
+        self, iteration: int, state: NDArray[np.float64], member_ids: NDArray[np.int64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.int64]]:
+        """Forecast the posterior iterate by the simulator (``full_<k>.npz``; §5).
+
+        Mandatory (decision 3): the run's reported posterior is the simulator's. An iterate
+        the simulator forecast already (after a switch to it) is not run again, nor is one
+        whose ``full_<k>.npz`` a finished run saved; members the simulator forecast already
+        (outside the domain, or the accepted iterate forecast again after a switch) keep
+        those runs (``reused_ids``). Returns the members that succeeded: their state,
+        forecast (history-matching rows) and ids.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        saved = upgrade_iterate(self.run_dir.load_arrays(f"iter_{iteration}"))
+        columns = _columns_of(saved["member_ids"], member_ids)
+        sources = saved["forecast_source"][columns]
+        name = f"full_{iteration}"
+        if not np.any(sources == SURROGATE):
+            self._posterior_report = {"iteration": iteration, "forecast": "simulator already",
+                                      "members": len(member_ids)}  # fmt: skip
+            return state, keep(saved["predicted"][:, columns]), member_ids
+        reused = self.run_dir.has_arrays(name) and np.array_equal(
+            self.run_dir.load_arrays(name)["requested_ids"], member_ids
+        )
+        if not reused:
+            self._forecast_full(iteration, state, member_ids, self._simulated_of(iteration))
+        full = self.run_dir.load_arrays(name)
+        self._posterior_report = self._compare_posterior(iteration, saved, full)
+        logger.info(
+            "posterior forecast by the simulator",
+            extra={"event": "surrogate_posterior", "iteration": iteration, "reused": reused,
+                   **{k: v for k, v in self._posterior_report.items() if k != "gates"}},
+        )  # fmt: skip
+        return keep(full["state"]), keep(full["predicted"]), full["member_ids"]
+
+    def _simulated_of(self, iteration: int) -> dict[int, NDArray[np.float64]]:
+        """Return the simulator's forecasts of iterate ``iteration`` made already, by member.
+
+        Each in the analysis space, every row: the members its ``iter_<k>`` records as the
+        simulator's, and an accepted iterate forecast again by the simulator after a switch
+        (``rescored_<j>``).
+        """
+        found: dict[int, NDArray[np.float64]] = {}
+        sources = [upgrade_iterate(self.run_dir.load_arrays(f"iter_{iteration}"))]
+        for record in self.surrogate.rescores if self.surrogate else []:
+            if int(record["accepted"]) == iteration and record["source"] == SIMULATOR:
+                sources.append(self.run_dir.load_arrays(f"rescored_{record['iteration']}"))
+        rows = self.role_rows()
+        for saved in sources:
+            for column, (member, source) in enumerate(
+                zip(saved["member_ids"], saved["forecast_source"], strict=True)
+            ):
+                if str(source) != SIMULATOR:
+                    continue
+                values = np.full(self.analysis_observations.n_data, np.nan)
+                values[rows["history_matching"]] = saved["predicted"][:, column]
+                for role in self._held_out:
+                    values[rows[role]] = saved[f"{role}_predicted"][:, column]
+                found[int(member)] = values
+        return found
+
+    def _forecast_full(
+        self,
+        iteration: int,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        simulated: Mapping[int, NDArray[np.float64]],
+    ) -> None:
+        """Run the simulator on the posterior's members; score and save ``full_<k>.npz``.
+
+        ``simulated``: the simulator's forecasts made already (analysis space, by member),
+        kept rather than run again.
+        """
+        to_run = [j for j, m in enumerate(member_ids) if int(m) not in simulated]
+        ran = (
+            self._run_members(
+                keep(state[:, to_run]), member_ids[to_run], iteration, "posterior (simulator)",
+                auxiliary=False, folder=f"full_{iteration}",
+            )
+            if to_run
+            else []
+        )  # fmt: skip
+        succeeded = [
+            j for j, o in zip(to_run, ran, strict=True) if not isinstance(o, MemberFailure)
+        ]
+        columns: dict[int, NDArray[np.float64]] = {}
+        if succeeded:
+            raw = np.column_stack([o for o in ran if not isinstance(o, MemberFailure)])
+            transformed = self._transform(raw)
+            columns = {j: transformed[:, c] for c, j in enumerate(succeeded)}
+        by_column = dict(zip(to_run, ran, strict=True))
+        outputs: list[NDArray[np.float64] | MemberFailure] = []
+        for j, member in enumerate(member_ids):
+            if j not in by_column:
+                outputs.append(simulated[int(member)])
+            elif j in columns:
+                outputs.append(columns[j])
+            else:
+                outputs.append(by_column[j])
+        failures = [out for out in outputs if isinstance(out, MemberFailure)]
+        for failure in failures:
+            logger.warning(
+                "member failed",
+                extra={"event": "member_failed", "iteration": iteration,
+                       "member_id": failure.member_id, "reason": failure.message,
+                       "label": "posterior (simulator)"},
+            )  # fmt: skip
+        ok = np.array([not isinstance(out, MemberFailure) for out in outputs])
+        if int(ok.sum()) < max(2, self.min_success_fraction * len(outputs)):
+            raise WorkflowError(
+                f"the posterior's forecast by the simulator: only {int(ok.sum())} of "
+                f"{len(outputs)} members succeeded (minimum fraction "
+                f"{self.min_success_fraction}); first failure: "
+                f"{failures[0].message if failures else 'n/a'}"
+            )
+        # Already in the analysis space: run members transformed above, kept ones as saved.
+        analysis = np.ascontiguousarray(
+            np.column_stack([out for out in outputs if not isinstance(out, MemberFailure)])
+        )
+        predicted = self._assimilated(analysis)
+        kept, ids = keep(state, ok), member_ids[ok]
+        arrays: dict[str, NDArray[Any]] = {
+            "state": kept,
+            "predicted": predicted,
+            "member_ids": ids,
+            "requested_ids": member_ids,
+            "reused_ids": np.array(
+                [int(m) for m in member_ids if int(m) in simulated], dtype=np.int64
+            ),
+            "forecast_source": np.array([SIMULATOR] * len(ids)),
+            "surrogate_id": np.array(""),
+        }
+        held = {role: keep(analysis[rows]) for role, (rows, _) in self._held_out.items()}
+        arrays.update({f"{role}_predicted": values for role, values in held.items()})
+        if self.run_dir.has_arrays("perturbed_observations"):
+            # Scored as _record scores every forecast: overall and per data type.
+            perturbed = self._perturbed_for(ids)
+            arrays["data_mismatch"] = self.data_error.data_mismatch(perturbed - predicted)
+            arrays["metric:data_mismatch:all"] = arrays["data_mismatch"]
+            sigma = np.sqrt(self.observations.variances)[:, None]
+            weighted = ((perturbed - predicted) / sigma) ** 2
+            for name, rows in self._type_rows.items():
+                arrays[f"metric:data_mismatch:{name}"] = weighted[rows].sum(axis=0)
+        values = {
+            **self._evaluate_metrics(kept, predicted, self._previous_state(iteration, ids)),
+            **{
+                f"{role}_normalized_data_mismatch": _mean_square_by_type(self._held_out[role][1], v)
+                for role, v in held.items()
+            },
+        }
+        arrays.update({
+            f"metric:{key}:{label}": per_member
+            for key, result in values.items()
+            for label, per_member in result.items()
+        })  # fmt: skip
+        self.run_dir.save_arrays(f"full_{iteration}", arrays)
+
+    def _compare_posterior(
+        self, iteration: int, saved: Mapping[str, NDArray[Any]], full: Mapping[str, NDArray[Any]]
+    ) -> dict[str, Any]:
+        """Compare the surrogate's and the simulator's forecasts of the posterior (§5).
+
+        Both scores on the members the simulator forecast, their difference, and the
+        gate of the surrogate's forecast against the simulator's (the report flags a
+        difference beyond it).
+        """
+        ids = full["member_ids"]
+        columns = _columns_of(saved["member_ids"], ids)
+        scores = self.run_dir.load_arrays(f"data_mismatch_{iteration}")
+        score_columns = _columns_of(scores["member_ids"], ids)
+        surrogate_side: dict[str, float] = {}
+        simulator_side: dict[str, float] = {}
+        for metric in ("data_mismatch", "normalized_data_mismatch", "cv_normalized_data_mismatch"):
+            key = f"metric:{metric}:all"
+            if key in scores and key in full:
+                surrogate_side[metric] = float(np.mean(scores[key][score_columns]))
+                simulator_side[metric] = float(np.mean(full[key]))
+        # Both in the analysis space already (the saved forecasts are transformed).
+        forecast = {"history_matching": keep(saved["predicted"][:, columns])}
+        reference = {"history_matching": full["predicted"]}
+        if "cv_predicted" in saved and "cv_predicted" in full:
+            forecast["cv"] = keep(saved["cv_predicted"][:, columns])
+            reference["cv"] = full["cv_predicted"]
+        gates = self._gate_analysis(forecast, reference, [int(m) for m in ids])
+        metrics: dict[str, dict[str, float]] = {}
+        for key in full:
+            if key.startswith("metric:"):
+                _, metric, label = key.split(":", 2)
+                metrics.setdefault(metric, {})[label] = float(np.mean(full[key]))
+        return {
+            "iteration": iteration,
+            "forecast": "simulator",
+            "members": len(ids),
+            "failed": [int(m) for m in full["requested_ids"] if int(m) not in set(ids.tolist())],
+            "reused": [int(m) for m in full.get("reused_ids", ())],
+            "surrogate": surrogate_side,
+            "simulator": simulator_side,
+            "difference": {k: simulator_side[k] - surrogate_side[k] for k in simulator_side},
+            "simulator_metrics": metrics,
+            "gates": {role: g.model_dump(mode="json") for role, g in gates.items()},
+            "beyond_gate": not all(g.passed for g in gates.values()),
+        }
+
+    def _gate_analysis(
+        self,
+        surrogate: Mapping[str, NDArray[np.float64]],
+        reference: Mapping[str, NDArray[np.float64]],
+        member_ids: Sequence[int],
+    ) -> dict[str, GateResult]:
+        """Gate forecasts already in the analysis space, by role (history_matching, cv)."""
+        assert self.surrogate is not None
+        verdicts = {}
+        for role, values in surrogate.items():
+            observations = (
+                self.observations if role == "history_matching" else self._held_out[role][1]
+            )
+            verdicts[role] = gate(
+                keep(values),
+                keep(reference[role]),
+                observations.keys,
+                member_ids,
+                tolerances=self.surrogate.tolerances,
+                variances=np.ascontiguousarray(observations.variances),
+                kinds=self.surrogate.kinds,
+            )
+        return verdicts
+
+    def surrogate_report(self) -> dict[str, Any] | None:
+        """Return a surrogate run's facts for ``summary.json`` (``None`` without a surrogate).
+
+        The model, its checks and refits, the evaluations and simulator runs, each scored
+        forecast's source, and the posterior: both forecasts' scores and their difference.
+        """
+        if self.surrogate is None:
+            return None
+        report = self.surrogate.describe()
+        posterior = self._posterior_report
+        full_runs = 0
+        if posterior is not None and posterior.get("forecast") == "simulator":
+            full_runs = (
+                int(posterior["members"])
+                + len(posterior.get("failed", []))
+                - len(posterior.get("reused", []))
+            )
+        report["simulator_runs"] = self.surrogate.simulator_runs + full_runs
+        report["sources"] = {
+            str(h["iteration"]): h.get("forecast_source", SIMULATOR)
+            for h in self.run_dir.history_dicts()
+        }
+        report["posterior"] = posterior
+        report["timing"] = forecast_timing(self.run_dir.events(), self.surrogate.cost)
+        return report
 
     # ------------------------------------------------------------------ shared steps
 
@@ -734,14 +1605,18 @@ class HistoryMatchingWorkflow:
         return _members_of(saved["perturbed_observations"], saved["member_ids"], member_ids)
 
     def _members(
-        self, state: NDArray[np.float64], member_ids: Sequence[int], iteration: int
+        self,
+        state: NDArray[np.float64],
+        member_ids: Sequence[int],
+        iteration: int,
+        folder: str | None = None,
     ) -> list[MemberInput]:
         blocks = self.layout.split(state)
         return [
             MemberInput(
                 member_id=int(member_id),
                 state={name: block[:, column].copy() for name, block in blocks.items()},
-                work_dir=self.run_dir.simulation_dir(iteration, int(member_id))
+                work_dir=self.run_dir.simulation_dir(iteration, int(member_id), folder)
                 if bool(getattr(self.simulator, "needs_work_dir", False))
                 else None,
             )
@@ -757,15 +1632,19 @@ class HistoryMatchingWorkflow:
         simulator: Simulator | None = None,
         *,
         auxiliary: bool = True,
+        keys: Sequence[DataKey] | None = None,
+        folder: str | None = None,
     ) -> list[NDArray[np.float64] | MemberFailure]:
         """Run the members through the executor, reporting progress as they finish.
 
         ``auxiliary``: also request the simulator's auxiliary keys (saved with the record;
-        a required forecast such as the mean model's has none).
+        a required forecast such as the mean model's has none). ``keys``: other keys than
+        the observations' (a surrogate's check, which may need the model's too); ``folder``:
+        the work directories' folder when not ``iter_<iteration>``.
         """
         self.progress.forecast_started(iteration=iteration, label=label, n_members=len(member_ids))
         began = time.monotonic()
-        keys = self.raw_observations.keys
+        keys = self.raw_observations.keys if keys is None else tuple(keys)
         extra = self.auxiliary_keys if simulator is None and auxiliary else ()
         # A required forecast (the mean model's) keeps no raw rows: an executor applying the
         # transforms elsewhere sends none back for it.
@@ -773,7 +1652,7 @@ class HistoryMatchingWorkflow:
         with nullcontext() if auxiliary or without_raw is None else without_raw():
             outputs = self.executor.run_all(
                 self.simulator if simulator is None else simulator,
-                self._members(state, list(member_ids), iteration),
+                self._members(state, list(member_ids), iteration, folder),
                 [*keys, *extra] if extra else keys,
                 on_result=lambda member_id, ok: self.progress.member_finished(
                     member_id=member_id, ok=ok
@@ -800,14 +1679,14 @@ class HistoryMatchingWorkflow:
             # policy that keeps them can tell them apart later.
             for out in outputs:
                 if isinstance(out, MemberFailure):
-                    self.run_dir.mark_failed(iteration, out.member_id, out.message)
+                    self.run_dir.mark_failed(iteration, out.member_id, out.message, folder)
             # an executor that keeps members' files on other hosts (a failed
             # one's marked there by its worker) removes them there, before their markers
             # here go.
             remove = getattr(self.executor, "remove_member_files", None)
             if remove is not None:
-                remove(self.run_dir.simulations_to_prune(iteration, self.keep_simulations))
-            self.run_dir.prune_simulations(iteration, self.keep_simulations)
+                remove(self.run_dir.simulations_to_prune(iteration, self.keep_simulations, folder))
+            self.run_dir.prune_simulations(iteration, self.keep_simulations, folder)
         n_failed = sum(isinstance(out, MemberFailure) for out in outputs)
         self.progress.forecast_finished(
             n_ok=len(outputs) - n_failed, n_failed=n_failed, seconds=seconds
@@ -821,9 +1700,24 @@ class HistoryMatchingWorkflow:
                 "n_ok": len(outputs) - n_failed,
                 "n_failed": n_failed,
                 "seconds": round(seconds, 3),
+                **self._concurrency(len(member_ids)),
             },
         )
         return outputs
+
+    def _concurrency(self, n_members: int) -> dict[str, int]:
+        """Return ``{"workers": members run at once}`` when the executor states its workers.
+
+        A surrogate run's timing report (decision 14) turns wall time into
+        worker-seconds with it; executors that place members elsewhere state none.
+        """
+        workers = getattr(self.executor, "workers", None)
+        if not isinstance(workers, int):
+            return {}
+        # The process executor runs no more than the simulator's licences at once.
+        cap = getattr(self.simulator, "max_parallel_runs", None)
+        cap = cap if isinstance(cap, int) and cap > 0 else workers
+        return {"workers": max(1, min(workers, cap, n_members))}
 
     def _forecast(
         self,
@@ -832,6 +1726,7 @@ class HistoryMatchingWorkflow:
         iteration: int,
         *,
         sensitivities: bool = False,
+        outputs: list[NDArray[np.float64] | MemberFailure] | None = None,
     ) -> tuple[
         NDArray[np.bool_],
         NDArray[np.float64],
@@ -843,6 +1738,8 @@ class HistoryMatchingWorkflow:
         Returns the success mask, the survivors' predictions in the analysis data space,
         their raw (untransformed) predictions when those are to be saved, else ``None``,
         and with ``sensitivities`` their mean sensitivity ``(n_data, n_state)``.
+        ``outputs``: the members' raw forecasts made already (a surrogate's), in
+        member order; ``None`` runs them here.
         """
         simulator: Simulator | None = None
         n_keys = len(self.raw_observations.keys)
@@ -853,7 +1750,8 @@ class HistoryMatchingWorkflow:
                 raise WorkflowError("sensitivities with data transforms are not supported")
             # The executors run it unchanged: each output is [values, jacobian.ravel()].
             simulator = SensitivityRun(self.simulator, state.shape[0])
-        outputs = self._run_members(state, member_ids, iteration, "ensemble", simulator)
+        if outputs is None:
+            outputs = self._run_members(state, member_ids, iteration, "ensemble", simulator)
         sensitivity = None
         if sensitivities:
             jacobians = [out[n_keys:] for out in outputs if not isinstance(out, MemberFailure)]
@@ -912,6 +1810,7 @@ class HistoryMatchingWorkflow:
         accepted: bool = True,
         damping: float | None = None,
         held_out_scores: Mapping[str, dict[str, NDArray[np.float64]]] | None = None,
+        forecast_source: str | None = None,
     ) -> None:
         data_mismatches = self.data_error.data_mismatch(perturbed - predicted)
         # C_d is diagonal here, so the per-type shares add up to the data mismatch.
@@ -964,6 +1863,7 @@ class HistoryMatchingWorkflow:
                 key: {label: float(v.mean()) for label, v in result.items()}
                 for key, result in values.items()
             },
+            forecast_source=forecast_source,
         )
         self.run_dir.append_history(record)
         logger.info("forecast scored", extra={"event": "scored", **dataclasses.asdict(record)})
@@ -1047,6 +1947,7 @@ class HistoryMatchingWorkflow:
             saved["member_ids"],
             converged=converged,
             complete=complete,
+            iteration=iteration,
         )
         return dataclasses.replace(
             result, selected_iteration=iteration, stopped_by_cv=self._cv_stopped
@@ -1190,10 +2091,32 @@ class HistoryMatchingWorkflow:
         *,
         converged: bool | None,
         complete: bool,
+        iteration: int | None = None,
     ) -> HistoryMatchResult:
+        """Save the posterior and return the result.
+
+        With a surrogate, ``iteration`` is the posterior iterate: once the run
+        is complete it is forecast by the simulator, whose forecast ``posterior.npz`` holds
+        (members failing that forecast are left out, as failed members always are).
+        """
+        extra: dict[str, NDArray[Any]] = {}
+        if self.surrogate is not None and iteration is not None:
+            if complete:
+                state, predicted, member_ids = self._full_posterior(iteration, state, member_ids)
+                extra = {
+                    "forecast_source": np.array([SIMULATOR] * len(member_ids)),
+                    "surrogate_id": np.array(""),
+                }
+            else:  # stopped before the end: the iterate's own (surrogate) forecast, labelled
+                saved = upgrade_iterate(self.run_dir.load_arrays(f"iter_{iteration}"))
+                columns = _columns_of(saved["member_ids"], member_ids)
+                extra = {
+                    "forecast_source": saved["forecast_source"][columns],
+                    "surrogate_id": saved["surrogate_id"],
+                }
         blocks = self.layout.split(state)
         self.run_dir.save_arrays(
-            "posterior", {**blocks, "predicted": predicted, "member_ids": member_ids}
+            "posterior", {**blocks, "predicted": predicted, "member_ids": member_ids, **extra}
         )
         return HistoryMatchResult(
             posterior=state,
@@ -1252,6 +2175,19 @@ class SensitivityRun:
                 f"{jacobian.shape}"
             )
         return np.concatenate([values, jacobian.ravel()])
+
+
+def _values(output: NDArray[np.float64] | MemberFailure) -> NDArray[np.float64]:
+    """Return a member's forecast; a failure here is a bug (a surrogate member never fails)."""
+    if isinstance(output, MemberFailure):
+        raise WorkflowError(f"member {output.member_id} has no forecast: {output.message}")
+    return output
+
+
+def _source_of(sources: NDArray[np.str_]) -> str:
+    """Return a forecast's source from its members': theirs if all agree, else ``"mixed"``."""
+    found = {str(s) for s in sources}
+    return found.pop() if len(found) == 1 else "mixed"
 
 
 def _columns_of(saved_ids: NDArray[np.int64], member_ids: NDArray[np.int64]) -> NDArray[np.intp]:

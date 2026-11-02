@@ -25,7 +25,11 @@
                               raw_predicted too with [output] save_raw_forecasts
                               with [validation] predicted holds the
                               history-matching data only, cv_predicted and
-                              test_predicted the held-out data
+                              test_predicted the held-out data; with [surrogate]
+                              forecast_source per member ("surrogate" or
+                              "simulator") and surrogate_id (the model's identity);
+                              runs before snapshot version 6 hold neither and were
+                              forecast by the simulator (upgrade_iterate)
         trial_<k>.npz         rejected trials, with [output] save_rejected_trials
         data_mismatch_<k>.npz every forecast's per-member data mismatch, its share per data type,
                               and performance metrics as metric:<key>:<label>
@@ -43,10 +47,24 @@
                               (history matching, cv, test, unused) and the stopping rule
         truth.npz             the true model of a synthetic case (the run's own copy)
         posterior.npz         final ensemble per variable and its forecast
+        check_<k>.npz         with [surrogate]: a check of iteration k, the
+                              checked members' simulator and surrogate forecasts and the
+                              gate's verdict (gate, as JSON text)
+        rescored_<k>.npz      with [surrogate]: an iterative method's accepted iterate
+                              forecast again by the new source after a switch or refit
+                              at iteration k (the trial is judged against it)
+        full_<k>.npz          with [surrogate]: the simulator's forecast of the posterior
+                              iterate k, scored as data_mismatch_<k>.npz is
+      surrogates/refit_<k>/   with [surrogate]: a refit at iteration k, its snapshot set
+                              (snapshots.npz) and model (model/surrogate.json, .npz)
       simulations/iter_<k>/member_<id>/   simulator work directories (if the simulator
                                           needs files); a failed member's holds
                                           APEX_FAILED (the reason); which are kept is
-                                          [output] keep_simulations (all by default)
+                                          [output] keep_simulations (all by default);
+                                          a surrogate run's checks, its accepted
+                                          iterate forecast again after a change of
+                                          source and its posterior's forecast in
+                                          check_<k>/, accepted_<k>/ and full_<k>/
       agents/               traces of runtime agents about the run: each
                             model call, decision and action as JSON, e.g. the run monitor's
 """
@@ -67,7 +85,10 @@ from apex.core.errors import WorkflowError
 from apex.domain.results import IterationRecord
 
 #: Version of new runs' configuration snapshots (see :meth:`RunDirectory.snapshot_version`).
-SNAPSHOT_VERSION = 5
+SNAPSHOT_VERSION = 6
+
+#: Where a member's forecast came: the simulator, or a surrogate.
+SIMULATOR, SURROGATE = "simulator", "surrogate"
 
 #: Metrics renamed on 2026-09-30: the mean-square
 #: data mismatch became ``normalized_data_mismatch``, and ``data_mismatch`` now names what
@@ -131,6 +152,31 @@ def upgrade_scores(arrays: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def record_document(record: IterationRecord) -> dict[str, Any]:
+    """Return a history record as saved: without ``forecast_source`` when it is not known."""
+    document = dataclasses.asdict(record)
+    if document.get("forecast_source") is None:
+        document.pop("forecast_source", None)
+    return document
+
+
+def upgrade_iterate(arrays: dict[str, Any]) -> dict[str, Any]:
+    """Return a saved ensemble's arrays with their forecasts' sources.
+
+    ``iter_<k>.npz``, ``trial_<k>.npz`` and ``posterior.npz`` of runs before snapshot version
+    6, and of runs without ``[surrogate]``, hold no ``forecast_source``: every member was
+    forecast by the simulator, which is what this adds (and ``surrogate_id`` empty).
+    """
+    if "forecast_source" in arrays or "member_ids" not in arrays:
+        return arrays
+    n = int(np.asarray(arrays["member_ids"]).size)
+    return {
+        **arrays,
+        "forecast_source": np.array([SIMULATOR] * n),
+        "surrogate_id": np.array(""),
+    }
+
+
 class RunDirectory:
     """Files of one run. Every write is atomic (temporary file, then rename).
 
@@ -176,6 +222,9 @@ class RunDirectory:
         snapshots without one divided by the factor.
         Version 5 (2026-10-19): the ``lm`` scheme's ``confirm_convergence`` defaults to
         true; older snapshots stopped on the first small improvement (PET's rule).
+        Version 6 (2026-11-01): ``[surrogate]``: saved ensembles may hold
+        ``forecast_source`` and ``surrogate_id``; older ones were forecast by the simulator
+        (:func:`upgrade_iterate`).
         """
         marker = self.path / "snapshot_version"
         return int(marker.read_text().strip()) if marker.exists() else 1
@@ -187,13 +236,15 @@ class RunDirectory:
     #: Written into a member's work directory when its run fails (kept by retention).
     FAILED_MARKER = "APEX_FAILED"
 
-    def mark_failed(self, iteration: int, member_id: int, message: str) -> None:
+    def mark_failed(
+        self, iteration: int, member_id: int, message: str, folder: str | None = None
+    ) -> None:
         """Mark a member's work directory as failed (if it exists), with the reason."""
-        directory = self.simulation_dir(iteration, member_id)
+        directory = self.simulation_dir(iteration, member_id, folder)
         if directory.is_dir():
             (directory / self.FAILED_MARKER).write_text(message + "\n")
 
-    def prune_simulations(self, current: int, policy: str) -> None:
+    def prune_simulations(self, current: int, policy: str, folder: str | None = None) -> None:
         """Apply a retention policy to ``simulations/`` after a forecast of ``current``.
 
         ``failed``/``none`` prune the current forecast's directories (keeping failed
@@ -206,7 +257,7 @@ class RunDirectory:
             For an unknown policy.
         """
         pruned: set[Path] = set()
-        for member in self.simulations_to_prune(current, policy):
+        for member in self.simulations_to_prune(current, policy, folder):
             if member.is_dir():
                 shutil.rmtree(member)
             else:
@@ -216,11 +267,15 @@ class RunDirectory:
             if not any(iteration_dir.iterdir()):
                 iteration_dir.rmdir()
 
-    def simulations_to_prune(self, current: int, policy: str) -> list[Path]:
+    def simulations_to_prune(
+        self, current: int, policy: str, folder: str | None = None
+    ) -> list[Path]:
         """Return what :meth:`prune_simulations` would remove (see it), sorted.
 
         For an executor whose members' files are elsewhere: it removes them
-        there first, from the markers in these folders.
+        there first, from the markers in these folders. ``folder`` names the current
+        forecast's folder when it is not ``iter_<current>`` (a surrogate run's checks and
+        its posterior's forecast).
 
         Raises
         ------
@@ -233,8 +288,15 @@ class RunDirectory:
         if policy == "all" or not root.is_dir():
             return []
         found: list[Path] = []
-        for iteration_dir in sorted(root.glob("iter_*")):
-            is_current = iteration_dir.name == f"iter_{current}"
+        name = folder or f"iter_{current}"
+        # check_*, accepted_* and full_* exist only in surrogate runs: other runs
+        # prune as they always did.
+        folders = sorted(
+            {*root.glob("iter_*"), *root.glob("check_*"), *root.glob("accepted_*"),
+             *root.glob("full_*")}
+        )  # fmt: skip
+        for iteration_dir in folders:
+            is_current = iteration_dir.name == name
             if is_current and policy in ("last", "failed_and_last"):
                 continue
             if not is_current and policy in ("failed", "none"):
@@ -246,10 +308,14 @@ class RunDirectory:
                 found.append(member)
         return found
 
-    def simulation_dir(self, iteration: int, member_id: int) -> Path:
-        """Work directory for one forward run (``member_id = -1`` is the mean model)."""
+    def simulation_dir(self, iteration: int, member_id: int, folder: str | None = None) -> Path:
+        """Work directory for one forward run (``member_id = -1`` is the mean model).
+
+        In ``simulations/iter_<iteration>/``, or in ``simulations/<folder>/`` (a surrogate
+        run's checks and its posterior's forecast).
+        """
         member = "mean" if member_id < 0 else f"member_{member_id}"
-        return self.path / "simulations" / f"iter_{iteration}" / member
+        return self.path / "simulations" / (folder or f"iter_{iteration}") / member
 
     def save_arrays(self, name: str, arrays: Mapping[str, NDArray[Any]]) -> None:
         """Write ``checkpoints/<name>.npz`` atomically."""
@@ -302,14 +368,33 @@ class RunDirectory:
         return state
 
     def append_history(self, record: IterationRecord) -> None:
-        """Add one record to ``history.json``."""
+        """Add one record to ``history.json``.
+
+        ``forecast_source`` is written only when known (a surrogate run): other
+        runs' histories are as they always were.
+        """
         history = self.history_dicts()
-        history.append(dataclasses.asdict(record))
+        history.append(record_document(record))
         self._write_text(self.path / "history.json", json.dumps(history, indent=2) + "\n")
 
     def history(self) -> list[IterationRecord]:
         """Return all records written so far."""
         return [IterationRecord(**entry) for entry in self.history_dicts()]
+
+    def events(self) -> list[dict[str, Any]]:
+        """``events.jsonl``: every session's structured events (torn lines left out)."""
+        path = self.path / "events.jsonl"
+        if not path.is_file():
+            return []
+        found = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue  # a line torn by a killed process
+            if isinstance(record, dict):
+                found.append(record)
+        return found
 
     def history_dicts(self) -> list[dict[str, Any]]:
         """``history.json`` as plain dictionaries."""

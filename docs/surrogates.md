@@ -6,9 +6,9 @@ audience: public
 
 ## Goal
 
-A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs. After this page you can build a surrogate of a history-matching case, read its gate, check it again later, and resume a build that stopped.
+A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs. After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator.
 
-Using a surrogate inside history matching, optimization or predictions comes later. A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer.
+Using a surrogate in optimization or predictions comes later. A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer.
 
 ## Prerequisites
 
@@ -114,8 +114,78 @@ runs/<name>/
   snapshots.npz       the snapshots the model was fitted and gated on
   simulations/        work directories ([output] keep_simulations: "failed" by default)
   model/surrogate.json, model/surrogate.npz   the model: a JSON manifest and plain arrays
+  model/surrogate.cost.json   the full runs' times (mean, median, total), for the runs that use it
   gate.json, summary.json
   checks/<id>/        the checks of the model
 ```
 
-A model's files execute no code when they are read: the manifest is JSON and the arrays are numbers. Its identity is the SHA-256 of both; any changed byte gives another identity.
+A model's files execute no code when they are read: the manifest is JSON and the arrays are numbers. Its identity is the SHA-256 of both; any changed byte gives another identity. The plugin's options that name files (`*_file`, `*_dir`, `*_path`) are written in the manifest relative to the model's folder, so a build and its input files moved together keep the model's identity, and a refit in history matching finds the files there. The cost file is not part of the identity, since run times differ between builds that give identical models. It names the model it belongs to, and a run passes over another model's file. Copy it with the model so that runs with the model can compare their times with the full runs. A build whose members run whole on other hosts gets their results back untimed, so it writes no cost file and logs `surrogate_untimed`.
+
+## History matching with a surrogate
+
+A `[surrogate]` section in a history-matching configuration makes every forecast the method asks for with a built model, on this machine; the configured `[simulator]` and `[execution]` run only the checks, the fallbacks and the final forecast of the posterior. The method, its strategy, localization and damping are unchanged: the surrogate stands in for the simulator stack only.
+
+```toml
+[surrogate]
+model_file = "runs/box_surrogate/model/surrogate.json"
+check_every = 3            # iterations 3, 6, 9, ... are also checked by the simulator (0: none)
+check_members = 10         # members checked then (or "all"), drawn from the stream "surrogate"
+on_check_failure = "stop"  # "stop" | "refit" | "simulator"
+outside = "stop"           # members outside the model's domain: "stop" | "simulator"
+max_refits = 2
+# refit_held_out = 0.5     # a refit's share of the checked runs held out for its gate
+# variance_in_errors = false   # ES-MDA, ES: add the model's predictive variance to C_d
+# sigma_ratio = 0.3        # the checks' tolerance: may only tighten the model's gate
+# workers = 4              # local processes for the surrogate's forecasts (none: in this process)
+# max_evaluations = 50000  # the run's bound on surrogate evaluations
+```
+
+1. Validate the run: `uv run apex validate CASE.toml`. The plan counts the surrogate's evaluations apart from the simulator's runs (the checks, the posterior's forecast, and every forecast where the simulator may take over); only the simulator's runs count towards approval. The run is refused when:
+   - the model did not pass its gate, or its last check failed;
+   - it was built for another simulator stack or case;
+   - the run observes a key (any role: history matching, cross validation, test) the model was not gated on;
+   - the case has `[model_error]`, fidelity levels, the adjoint update (`sensitivities`), an executor running members on other hosts (remote mode; use the executor's other mode), or `[[data_transforms]]` on field data (or any, with `refit` or `variance_in_errors`);
+   - the plan would exceed `max_evaluations`;
+   - `sigma_ratio` would loosen the model's gate;
+   - `variance_in_errors` names a model without a predictive variance, or an iterative method (GIES, LM-EnRML, GN-EnRML, CHOP draw their perturbations once and judge trials on the observation errors alone). With ES-MDA and ES, the members' mean predictive variance per datum is added to the observation errors of each step, in its perturbations and gain; the variance is that step's, and diagonal (correlated surrogate errors are left out).
+2. Run it as any run: `uv run apex run CASE.toml`.
+3. Read `summary.json`'s `surrogate` section, or `uv run apex summary runs/NAME`.
+
+What happens during the run:
+
+- **Every decision is made on the surrogate's forecasts:** the acceptance of trials and their damping, the stopping criteria and, with `[validation]`, the cross-validation rule and its choice of the minimum-CV iterate. The update uses the surrogate's forecast of every member, so that the members' errors stay alike.
+- **Members outside the domain** stop the run with the members, the coordinates outside and by how much (`outside = "stop"`), or are run by the simulator and recorded as such (`outside = "simulator"`). They are never dropped.
+- **Checks:** at the check iterations, `check_members` members are run by the simulator too and gated against the surrogate's forecasts, with observation errors (`sigma_ratio`, in the space the method sees), the assimilated data and the cross-validation data apart. A check that fails:
+  - `stop` (default): the run stops before the update, at its last checkpoint, with the event `surrogate_check_failed` and the errors per datatype. Set `on_check_failure` in the run's `config.json` (or rebuild the model) and resume.
+  - `refit`: the checked runs join the model's snapshots, the plugin is fitted again and gated on the held-out runs plus a share of the new ones, and the iteration's forecast is repeated with the refit. After `max_refits` refits a failing check stops the run.
+  - `simulator`: the rest of the run uses the simulator.
+
+  After a refit or a switch, an iterative method's accepted iterate (and its mean model) is forecast again by the new source before the trial is judged, so that the trial is compared with an iterate of the same source (event `surrogate_rescored`, `checkpoints/rescored_<k>.npz`). With `[validation]`, the stopping rule then starts again from that iterate: iterates scored by the old source are no longer candidates for the posterior.
+- **The posterior is always the simulator's:** when the run completes, the posterior iterate (the last accepted one, or the minimum-CV iterate with `[validation]`) is forecast by the simulator. `posterior.npz`, the run's reported data mismatch and metrics of the posterior, and the forecasts predictions start from are the simulator's. `summary.json` gives both forecasts' scores (data mismatch, normalized data mismatch, and the cross-validation mismatch), their difference, and whether the difference is beyond the model's gate. Its `data_mismatch_reduction` compares the simulator's posterior with the prior's forecast, whose source `prior_source` names (`data_mismatch_reduction_basis`); `surrogate_data_mismatch_reduction` compares the surrogate's posterior with the same forecast. Members the simulator forecast already are not run again.
+- **The cost:** `summary.json`'s `surrogate.timing` compares the forecasts' times with the full model's, and `apex summary` states it in one note:
+  - `surrogate` and `simulator`: the forecasts, members, wall seconds, and worker-seconds per member, over every session of the run, including a forecast repeated after an interrupted session.
+    - Worker-seconds are wall time multiplied by the members run at once: the executor's workers, capped by the simulator's licences. They include waiting and retries, and a process pool's start-up, so they overstate the time of a short forecast.
+    - `simulator` is the run's own full runs: checks, members outside the domain, the posterior's forecast, and runs after a switch. Its failed members are counted too.
+    - An executor that does not state its workers gives wall time only.
+  - `full_model`: the build's mean, median and total time per full run, from `model/surrogate.cost.json`, or from the build's journal for an older model.
+  - `speedup`: the full model's mean time over the surrogate's worker-seconds per member.
+  - `simulator_equivalent_worker_seconds`: what the surrogate's members would have taken as full runs, against `run_worker_seconds`. The build's total is a one-off cost beside both.
+
+  The times are measured: they come from the run's events, never from its checkpoints, and they do not change its results.
+- **Resume** is bit-identical to an uninterrupted run, across checks and refits. It refuses a model file whose identity differs from the one the run started with.
+
+What the run directory adds:
+
+```text
+runs/<name>/
+  checkpoints/iter_<k>.npz     forecast_source per member ("surrogate" or "simulator") and surrogate_id
+  checkpoints/check_<k>.npz    a check: the checked members' simulator and surrogate forecasts, the gate
+  checkpoints/rescored_<k>.npz the accepted iterate forecast again after the source changed at k
+  checkpoints/full_<k>.npz     the simulator's forecast of the posterior iterate k, scored
+  surrogates/refit_<k>/        a refit: its snapshot set and model
+  events.jsonl                 surrogate_forecast, surrogate_check, surrogate_check_failed,
+                               surrogate_refit, surrogate_switched, surrogate_rescored,
+                               surrogate_outside, surrogate_posterior
+```
+
+`history.json` records each forecast's source, and `apex report --plots` marks the surrogate's steps (`S`, or `M` where some members were simulated). Run directories written before surrogates existed are read as forecast by the simulator.

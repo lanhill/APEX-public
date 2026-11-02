@@ -18,6 +18,7 @@ import logging
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -47,6 +48,10 @@ class HistoryMatchSummarizer:
     members), plus the data mismatch the method minimises (``data_mismatch``). A run that did not
     record ``model_change`` gets it computed from its saved iterates (with the ``rmse``
     metric's ``actnum``, if it has one), and a note says so.
+
+    A run with a surrogate labels each step with its forecasts' source
+    (``"3 (surrogate)"``), and adds the simulator's forecast of the posterior as the metrics
+    ``simulator:<metric>`` at the result step, with a note comparing the two.
     """
 
     def applies(self, path: Path) -> bool:
@@ -64,17 +69,21 @@ class HistoryMatchSummarizer:
         config = composition.snapshot_config(RunDirectory(path))
         results = composition.load_results(path)
         history = results.history
-        steps, rejected = [], 0
+        surrogate = any(r.forecast_source is not None for r in history)
+        steps: list[StepSummary] = []
+        rejected = 0
         for record in history:
             if not record.accepted:
                 rejected += 1
                 continue
+            label = f"{len(steps)} ({record.forecast_source or 'simulator'})" if surrogate else None
             steps.append(
                 StepSummary(
                     record.iteration,
                     record.n_members,
                     rejected_before=rejected,
                     control=record.damping,
+                    label=label,
                 )
             )
             rejected = 0
@@ -95,6 +104,8 @@ class HistoryMatchSummarizer:
         if "model_change" not in results.metric_labels():
             rows.extend(_model_change(results, config))
             notes.append("model_change computed from the saved iterates (not recorded by the run)")
+        if surrogate:
+            rows.extend(_simulator_posterior(results, notes))
         return RunSummary(
             workflow="history_matching",
             name=config.run.name,
@@ -107,6 +118,96 @@ class HistoryMatchSummarizer:
             forecasts=len(history),
             notes=tuple(notes),
         )
+
+
+def _simulator_posterior(results: RunResults, notes: list[str]) -> list[MetricStatistics]:
+    """Return a surrogate run's posterior as the simulator forecast it.
+
+    The metrics of ``full_<k>.npz`` as ``simulator:<metric>`` at the posterior's step, and
+    a note comparing the surrogate's and the simulator's data mismatch.
+    """
+    iteration = results.posterior_iteration
+    report = (results.surrogate or {}).get("posterior") or {}
+    notes.append(
+        "forecasts by a surrogate: steps are labelled with their source; the "
+        "simulator's forecast of the posterior is the simulator:* metrics"
+    )
+    timing = _surrogate_timing((results.surrogate or {}).get("timing"))
+    if timing:
+        notes.append(timing)
+    for rescore in (results.surrogate or {}).get("rescores", []):
+        notes.append(
+            f"the forecasts' source changed at iteration {rescore['iteration']}: accepted "
+            f"iterate {rescore['accepted']} was forecast again by the {rescore['source']}, "
+            "and cross validation (if any) compared the iterates from it on"
+        )
+    if report.get("forecast") == "simulator already":
+        notes.append("the posterior was forecast by the simulator already (it took over)")
+        return []
+    path = results.run_dir.checkpoints / f"full_{iteration}.npz"
+    if not path.exists():
+        notes.append("the posterior has no forecast by the simulator yet (the run is not finished)")
+        return []
+    full = results.run_dir.load_arrays(f"full_{iteration}")
+    rows = []
+    for key, values in full.items():
+        if not key.startswith("metric:"):
+            continue
+        _, metric, label = key.split(":", 2)
+        v = np.asarray(values, dtype=np.float64)
+        rows.append(MetricStatistics(
+            f"simulator:{metric}", label, iteration, float(v.mean()),
+            float(v.std(ddof=1)) if v.size > 1 else 0.0, float(np.median(v)),
+            float(np.percentile(v, 10)), float(np.percentile(v, 90)),
+        ))  # fmt: skip
+    surrogate_side = report.get("surrogate") or {}
+    simulator_side = report.get("simulator") or {}
+    if "data_mismatch" in surrogate_side and "data_mismatch" in simulator_side:
+        flag = " (beyond the surrogate's gate)" if report.get("beyond_gate") else ""
+        notes.append(
+            f"posterior data mismatch: simulator {simulator_side['data_mismatch']:.4g}, "
+            f"surrogate {surrogate_side['data_mismatch']:.4g}{flag}"
+        )
+    return rows
+
+
+def _surrogate_timing(timing: Mapping[str, Any] | None) -> str | None:
+    """Return a surrogate run's cost as one note (decision 14), ``None`` without it."""
+    if not timing:
+        return None
+    side = timing.get("surrogate") or {}
+    if not side.get("members"):
+        return None
+    per_member = side.get("worker_seconds_per_member")
+    if per_member is None:
+        per_member = side.get("seconds_per_member")
+    text = (
+        f"surrogate forecasts: {side['members']} members in {side['seconds']:.3g} s "
+        f"({per_member:.3g} s per member)"
+    )
+    full = timing.get("full_model")
+    if full:
+        text += (
+            f"; full model: {full['mean_seconds']:.3g} s mean, {full['median_seconds']:.3g} s "
+            f"median per run over the build's {full['runs']} runs"
+        )
+        if timing.get("speedup"):
+            text += f"; speed-up {timing['speedup']:.3g}x"
+        equivalent = timing.get("simulator_equivalent_worker_seconds")
+        run = timing.get("run_worker_seconds")
+        if equivalent is not None and run is not None:  # like with like only
+            text += (
+                f"; as full runs they would take {equivalent:.3g} worker-s, against "
+                f"{run:.3g} worker-s for the run's forecasts, plus the build's "
+                f"{full['total_seconds']:.3g} s once"
+            )
+    simulator = timing.get("simulator") or {}
+    if simulator.get("members"):
+        text += (
+            f"; the run's own simulator runs: {simulator['members']} in "
+            f"{simulator['seconds']:.3g} s"
+        )
+    return text
 
 
 @summaries.register("prediction")

@@ -175,7 +175,9 @@ uv run apex agent report --study NAME
 uv run apex agent report RUN --out summary.md
 ```
 
-The facts are, for a run, its summary, the metrics per step and the monitor's and diagnosis rules' findings; for a study, its comparison. The model writes the sections and lists every number the prose relies on, with its source. A key number that matches no fact is dropped and listed under *Corrections* at the end of the report, so a reader knows which prose to check. Without a model, a template reports each metric from the prior to the posterior, the health findings, and a study's differences.
+The facts are, for a run, its summary, the metrics per step, the monitor's and diagnosis rules' findings, its setup, and why it ended; for a study, its comparison. The model writes the sections and lists every number the prose relies on, with its source. A key number that matches no fact is dropped and listed under *Corrections* at the end of the report, so a reader knows which prose to check. Without a model, a template reports each metric from the prior to the posterior, the health findings, and a study's differences.
+
+Why a run ended is read from its records, never guessed: still running, converged (and by which test: a small improvement, a rejected trial within the tolerance, a stalled update, no improving trial left, the damping at its maximum), its iteration budget spent, its fixed schedule done (ES, ES-MDA), stopped by cross validation, stopped on request or by `--max-steps`. When the records do not say (a run killed before its end), the report says the reason is not recorded. The overview states it. Code writes a run report's *Warnings* section: a run that did not converge or did not finish, and the findings above info. The model does not write warnings. A model section about warnings is replaced, and if it left out a recorded warning, that is listed under *Corrections*.
 
 ### Figures: the plotter
 

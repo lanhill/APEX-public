@@ -92,6 +92,12 @@ def plan_lines(plan: RunPlan) -> list[str]:
         + (f", {plan.parallel_runs} at once" if plan.parallel_runs else "")
         + f"){hours}",
     ]
+    if plan.surrogate is not None:
+        bound = "?" if plan.surrogate_evaluations is None else f"{plan.surrogate_evaluations:,}"
+        lines.append(
+            f"  surrogate {plan.surrogate}: at most {bound} surrogate evaluations; the "
+            "simulator runs above are its checks, fallbacks and the posterior's forecast"
+        )
     if plan.checkpoint_mb is not None and plan.forecast_memory_mb is not None:
         lines.append(
             f"  about {plan.checkpoint_mb:,.1f} MB per checkpointed iterate, "

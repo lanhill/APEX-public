@@ -130,3 +130,39 @@ def test_every_refusal_offers_only_methods_that_accept_the_strategy(
                 if named and row[other] is not None:
                     wrong.append((strategy, method, other, reason))
     assert not wrong, wrong
+
+
+@pytest.mark.parametrize(
+    ("method", "options", "schedule", "expected"),
+    [
+        ("gies", {}, None, {"name": "rlmmac", "options": {}}),
+        ("lm_enrml", {}, None, {"name": "lm", "options": {}}),
+        ("chop", {}, None, {"name": "rlmmac", "options": {}}),  # its inner GIES's
+        ("gies", {}, {"reduction": 0.5}, {"name": "rlmmac", "options": {"reduction": 0.5}}),
+        ("esmda", {}, None, None),  # no damping
+        ("gn_enrml", {}, None, None),  # a step length, not a damping scheme
+        ("no_such_method", {}, None, None),
+    ],
+)
+def test_the_default_damping_is_the_compositions(
+    method: str,
+    options: dict[str, object],
+    schedule: dict[str, object] | None,
+    expected: dict[str, object] | None,
+) -> None:
+    """A reported issue (#260): an unset damping read "the method's own default", unnamed.
+    The scheme is the one the composition builds, and naming it builds the same scheme."""
+    from apex.services.compatibility import default_damping
+
+    assert default_damping(method, options, schedule=schedule) == expected
+
+
+def test_plugin_settings_give_every_option_the_plugin_runs_with() -> None:
+    """#260: the default is named with its values, given or the scheme's own."""
+    from apex.services.compatibility import plugin_settings
+
+    settings = plugin_settings("damping_schemes", "rlmmac", {"reduction": 0.5})
+    assert settings["reduction"] == 0.5
+    assert settings["factor"] == 2.0
+    assert settings["minimum"] is None
+    assert plugin_settings("damping_schemes", "rlmmac", {"no_such_option": 1}) == {}

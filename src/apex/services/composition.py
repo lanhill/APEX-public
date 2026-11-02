@@ -286,6 +286,11 @@ def _resolved_paths(config: HistoryMatchConfig, base: Path) -> HistoryMatchConfi
             "geophysics": None
             if config.geophysics is None
             else _resolve_geophysics(config.geophysics, resolve),
+            "surrogate": None
+            if config.surrogate is None
+            else config.surrogate.model_copy(
+                update={"model_file": resolve(config.surrogate.model_file)}
+            ),
             # e.g. the full update's state_scaling_file (none of the other strategies'
             # options is a path, so existing configurations resolve as before).
             "method": config.method.model_copy(
@@ -595,10 +600,17 @@ def check_field_responses(keys: Sequence[DataKey], provided: Mapping[str, int]) 
     return others
 
 
-def build_run(config: HistoryMatchConfig, progress: ProgressReporter | None = None) -> Run:
+def build_run(
+    config: HistoryMatchConfig,
+    progress: ProgressReporter | None = None,
+    *,
+    surrogate: bool = True,
+) -> Run:
     """Build the workflow and method a configuration describes.
 
     ``progress`` receives the run's progress; by default nothing is shown.
+    ``surrogate = False`` leaves ``[surrogate]`` out: for reading a run's results
+    (figures, predictions, reports), which needs neither its model nor its refusals.
 
     Raises
     ------
@@ -652,6 +664,15 @@ def build_run(config: HistoryMatchConfig, progress: ProgressReporter | None = No
         performance = build_metrics(config)
         plan = build_diagnostics_plan(config, method)
         split, stopping = build_validation(config, observations, method)
+        forecasting = None
+        if config.surrogate is not None and surrogate:
+            # services.surrogates imports this module.
+            from apex.services import surrogates
+
+            surrogates.refuse_parts(method, executor, config.surrogate)
+            forecasting = surrogates.surrogate_forecasting(
+                config, observations, surrogates.stack_provenance(config, stack.simulator)
+            )
     except (TypeError, ValueError) as error:
         raise ConfigError(f"invalid plugin configuration: {error}") from error
     truth = None
@@ -681,6 +702,7 @@ def build_run(config: HistoryMatchConfig, progress: ProgressReporter | None = No
             progress=progress,
             parameterizations=parameterizations,
             auxiliary_variables=auxiliary,
+            surrogate=forecasting,
         )
     except ValueError as error:  # a transform or metric that does not fit the case
         raise ConfigError(f"invalid configuration: {error}") from error
@@ -1885,7 +1907,7 @@ def start_built(
     """
     # Held until the run ends: no second process may start or resume it meanwhile.
     with exclusive(run.run_dir.path):
-        run.run_dir.initialise(config_text=run.config.model_dump_json(indent=2))
+        run.run_dir.initialise(config_text=snapshot_text(run.config))
         _stop_if_asked(run.run_dir, stopped)
         configure_logging(run.run_dir.path)
         write_run_provenance(run, resumed=False)
@@ -2133,6 +2155,17 @@ def write_run_provenance(run: "Run", *, resumed: bool) -> None:
     path.write_text(json.dumps(saved, indent=2, default=str) + "\n")
 
 
+def snapshot_text(config: HistoryMatchConfig) -> str:
+    """Return a run's configuration snapshot (``config.json``).
+
+    Sections added later that a run leaves unset (``[surrogate]``) are left out,
+    so that frozen copies of older code still read and resume a plain run's
+    snapshot (their configuration refuses keys it does not know).
+    """
+    exclude = {"surrogate"} if config.surrogate is None else set()
+    return config.model_dump_json(indent=2, exclude=exclude)
+
+
 def snapshot_config(run_dir: RunDirectory) -> HistoryMatchConfig:
     """Read the configuration a run was started with (``config.json``).
 
@@ -2275,7 +2308,40 @@ def _write_summary(run: Run, result: HistoryMatchResult) -> None:
             "stopped_by_cv": result.stopped_by_cv,
             "last_iteration": result.history[-1].iteration,
         }
+    report = run.workflow.surrogate_report()
+    if report is not None:
+        _surrogate_summary(summary, report)
     (run.run_dir.path / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+
+def _surrogate_summary(summary: dict[str, Any], report: dict[str, Any]) -> None:
+    """Add a surrogate run's report; its posterior's numbers are the simulator's.
+
+    ``final_data_mismatch_mean`` and ``final_metrics`` become the simulator's forecast of
+    the posterior; the surrogate's are kept beside them (``surrogate.posterior``), with
+    their difference.
+    """
+    summary["surrogate"] = report
+    # Where the prior's scored forecast came from: the reduction below is against it.
+    summary["prior_source"] = (report.get("sources") or {}).get("0", "simulator")
+    posterior = report.get("posterior") or {}
+    simulator = posterior.get("simulator") or {}
+    if "data_mismatch" not in simulator:
+        return  # not finished, or the simulator forecast the posterior already
+    surrogate_final = summary.get("final_data_mismatch_mean")
+    summary["final_data_mismatch_mean"] = simulator["data_mismatch"]
+    summary["final_metrics"] = posterior.get("simulator_metrics")
+    summary["final_source"] = "simulator"
+    summary["surrogate_final_data_mismatch_mean"] = surrogate_final
+    prior = summary.get("prior_data_mismatch_mean")
+    if isinstance(prior, int | float) and prior > 0:
+        summary["data_mismatch_reduction"] = 1.0 - simulator["data_mismatch"] / prior
+        summary["data_mismatch_reduction_basis"] = (
+            f"the simulator's posterior against the {summary['prior_source']}'s prior forecast"
+        )
+        if isinstance(surrogate_final, int | float):
+            # Like with like: the surrogate's posterior against the same prior forecast.
+            summary["surrogate_data_mismatch_reduction"] = 1.0 - surrogate_final / prior
 
 
 class _JsonLines(logging.Formatter):
@@ -2407,7 +2473,7 @@ def explore_data_split(
     observations = read_observation_section(config.observations)
     prior_keys = prior_predicted = None
     if prior_run is not None:
-        run = build_run(snapshot_config(RunDirectory(prior_run)))
+        run = build_run(snapshot_config(RunDirectory(prior_run)), surrogate=False)
         keys = {"history_matching": run.workflow.observations.keys}
         keys.update({r: o.keys for r, o in run.workflow.held_out_observations.items()})
         try:
@@ -2467,6 +2533,9 @@ def write_report_figures(
     results = load_results(run_path)
     output = output_dir or results.path / "report"
     figures: list[Path] = []
+    # a surrogate run's forecasts are marked by their source.
+    by_source = results.sources()
+    surrogate = set(by_source.values()) != {"simulator"}
     for metric, labels in results.metric_labels().items():
         for label in labels:
             iterations, values, accepted = results.metric(metric, label)
@@ -2491,6 +2560,7 @@ def write_report_figures(
                     ),
                     selected=results.selected_iteration,
                     font_size=font_size,
+                    sources=[by_source[i] for i in iterations] if surrogate else None,
                 )
             )
     table = output / "metrics" / "metrics_summary.csv"
@@ -2503,7 +2573,7 @@ def write_report_figures(
 
     # "final" is the posterior: with cross validation the minimum-CV iterate.
     prior, final = results.iterate(0), results.iterate(results.posterior_iteration)
-    run = build_run(snapshot_config(results.run_dir))
+    run = build_run(snapshot_config(results.run_dir), surrogate=False)
     figures += _health_figures(results, run, output / "health", font_size)
     workflow = run.workflow
     observations = workflow.analysis_observations

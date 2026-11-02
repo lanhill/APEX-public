@@ -669,8 +669,70 @@ def test_checks_completing_at_once_get_distinct_order_numbers(tmp_path: Path) ->
     last = surrogates.last_check(model)
     assert last is not None
     assert last.sequence == n
-    # A check completed again takes a new number.
+    # A check completed again takes a new number: the first one numbered (whichever thread
+    # was numbered last keeps n, being the latest already).
+    first = min(surrogates._complete_checks(model), key=lambda c: c.sequence)
     again = surrogates.record_check(
-        model, surrogates.checks_folder(model) / "c00", base.model_copy(update={"id": "c00"})
+        model, surrogates.checks_folder(model) / first.id, base.model_copy(update={"id": first.id})
     )
     assert again.sequence == n + 1
+
+
+def test_a_plugins_file_options_are_resolved_against_the_configuration(tmp_path: Path) -> None:
+    """Options named *_file, *_dir, *_path name paths relative to the build's file."""
+    folder = tmp_path / "builds"
+    folder.mkdir()
+    path = write_build(folder, options='{ case_file = "data/case.npz", ridge = 0.5, label = "x" }')
+    config = surrogates.load_surrogate_config(path)
+    assert config.surrogate.options["case_file"] == str((folder / "data/case.npz").resolve())
+    assert config.surrogate.options["ridge"] == 0.5
+    assert config.surrogate.options["label"] == "x"
+
+
+def test_a_file_an_option_names_counts_by_its_content(tmp_path: Path) -> None:
+    """An edited file behind an option refits the model; the same content does not."""
+    (tmp_path / "case.npz").write_bytes(b"first")
+    config = surrogates.load_surrogate_config(
+        write_build(tmp_path, options='{ case_file = "case.npz" }')
+    )
+    before = surrogates._fit_fingerprint(config)
+    assert surrogates._fit_fingerprint(config) == before
+    (tmp_path / "case.npz").write_bytes(b"second")
+    assert surrogates._fit_fingerprint(config) != before
+
+
+def test_file_options_are_written_relative_to_a_model_and_read_back(tmp_path: Path) -> None:
+    """Relative to the model's folder, links not followed; older absolute paths still read."""
+    model = tmp_path / "runs" / "lin" / "model"
+    target = tmp_path / "elsewhere" / "case.npz"
+    target.parent.mkdir()
+    target.write_bytes(b"x")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "case.npz").symlink_to(target)
+    options = {"case_file": str(tmp_path / "data" / "case.npz"), "ridge": 0.5, "label": "x"}
+    stored = surrogates.options_relative_to(options, model)
+    assert stored == {"case_file": "../../../data/case.npz", "ridge": 0.5, "label": "x"}
+    assert surrogates.options_resolved_in(stored, model) == options
+    old = {"case_file": str(target)}
+    assert surrogates.options_resolved_in(old, model) == old
+
+
+def test_a_complete_build_without_its_model_files_refits_them(tmp_path: Path) -> None:
+    """Deleted model files are fitted again on the runs made, to the same bytes (2026-11-02)."""
+    write_case(tmp_path)
+    first = surrogates.build(write_build(tmp_path))
+    journal = (first.path / JOURNAL).read_text()
+    model = {
+        n: (first.path / "model" / n).read_bytes() for n in ("surrogate.json", "surrogate.npz")
+    }
+    for name in model:
+        (first.path / "model" / name).unlink()
+    (first.path / "summary.json").unlink()
+
+    again = surrogates.build(write_build(tmp_path))
+
+    assert (again.path / JOURNAL).read_text() == journal  # no new run
+    assert again.summary.identity == first.summary.identity
+    assert (again.path / "summary.json").is_file()
+    for name, data in model.items():
+        assert (again.path / "model" / name).read_bytes() == data

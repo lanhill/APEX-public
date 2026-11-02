@@ -192,6 +192,9 @@ class ErtAdaptive(_ErtSmoother):
         Memory budget of one batch of state rows.
     """
 
+    #: Localized by the strategy itself (see ``LocalAnalysisUpdate.localizes``; #261).
+    localizes: ClassVar[bool] = True
+
     kind = "AdaptiveESMDA"
 
     def __init__(
@@ -275,6 +278,9 @@ class ErtLocalized(_ErtSmoother):
     max_batch_mb
         Memory budget of one batch of state rows.
     """
+
+    #: Localized by the strategy itself (see ``LocalAnalysisUpdate.localizes``; #261).
+    localizes: ClassVar[bool] = True
 
     kind = "LocalizedESMDA"
 

@@ -17,13 +17,21 @@ options or gate changed refits on the runs already made.
 **Checking** (§7, ``apex surrogate check``): an existing model gated on new full runs, from
 a case's prior or a run's posterior; the model file never changes, the verdict goes to
 ``checks/<id>/``.
+
+**History matching** (§5, phase 3): :func:`surrogate_forecasting` composes what a run with
+``[surrogate]`` holds (``workflows/surrogate_forecasts.py``) after the refusals
+(:func:`refusals`, :func:`refuse_model`): the model, its local executor, the checks'
+tolerances and what a refit needs. Workers load the model by reference
+(:func:`fitted_model`, once per process).
 """
 
 import datetime as dt
+import functools
 import hashlib
 import json
 import logging
 import math
+import os
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -39,7 +47,7 @@ from apex.algorithms.surrogates.designs import (
     repeated_columns,
     sampled_design,
 )
-from apex.algorithms.surrogates.domain import check_members
+from apex.algorithms.surrogates.domain import check_members, check_request, refuse_outside
 from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import (
     ApexError,
@@ -52,10 +60,11 @@ from apex.core.plugins import executors, priors, surrogate_models
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import Executor, Simulator
 from apex.core.surrogates import SurrogateModel
-from apex.domain.config import HistoryMatchConfig, PluginSection
-from apex.domain.observations import DataKey
+from apex.domain.config import HistoryMatchConfig, PluginSection, SurrogateRunSection
+from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.state import StateLayout, StateVariable
 from apex.domain.surrogate import (
+    BuildCost,
     DomainSummary,
     FitRecord,
     GateResult,
@@ -76,10 +85,11 @@ from apex.domain.surrogate import (
 from apex.services import composition
 from apex.services.identity import code_version, tree_hash
 from apex.services.plugins import check_options
+from apex.simulation.surrogate import SurrogateSimulator
 from apex.storage import provenance
 from apex.storage.inputs import read_observation_section
 from apex.storage.locks import exclusive, serialized
-from apex.storage.run_directory import RunDirectory
+from apex.storage.run_directory import SURROGATE, RunDirectory
 from apex.storage.run_results import RunResults
 from apex.storage.surrogate_directory import (
     BUILD_FINGERPRINT,
@@ -93,9 +103,16 @@ from apex.storage.surrogate_directory import (
     SurrogateDirectory,
     load_snapshots,
 )
-from apex.storage.surrogate_files import read_surrogate, write_surrogate
+from apex.storage.surrogate_files import (
+    cost_path,
+    read_cost,
+    read_surrogate,
+    write_cost,
+    write_surrogate,
+)
 from apex.workflows.parameterization import PropertyMap, parameterized
 from apex.workflows.surrogate import check_success, fit_and_gate, run_members
+from apex.workflows.surrogate_forecasts import ActiveModel, SurrogateForecasting
 
 logger = logging.getLogger(__name__)
 
@@ -220,9 +237,17 @@ def resolve_surrogate_config(config: SurrogateConfig, base: Path) -> SurrogateCo
             else value
             for key, value in execution.options.items()
         }})  # fmt: skip
+    # The plugin's options naming files are resolved as every plugin's are (the convention:
+    # options named *_file, *_dir or *_path, against the configuration's folder).
+    # Not through symbolic links: a model records them relative to itself, as written.
+    options = {
+        key: os.path.abspath(base / value) if _is_path_option(key, value) else value
+        for key, value in section.options.items()
+    }
     return config.model_copy(update={
         "surrogate": section.model_copy(update={
-            "output_dir": resolve(section.output_dir or Path("runs") / section.name)}),
+            "output_dir": resolve(section.output_dir or Path("runs") / section.name),
+            "options": options}),
         "case": config.case.model_copy(update={"config_file": resolve(config.case.config_file)}),
         "design": design.model_copy(update={
             "ensemble_file": design.ensemble_file and resolve(design.ensemble_file),
@@ -230,6 +255,38 @@ def resolve_surrogate_config(config: SurrogateConfig, base: Path) -> SurrogateCo
         }),
         "execution": execution,
     })  # fmt: skip
+
+
+def _is_path_option(key: str, value: object) -> bool:
+    return key.endswith(composition.PATH_OPTION_SUFFIXES) and isinstance(value, str)
+
+
+def options_relative_to(options: Mapping[str, object], folder: Path) -> dict[str, object]:
+    """Return a plugin's options with those naming files relative to ``folder``.
+
+    A model's manifest records them so (a model's folder, ``folder``), so that its identity
+    does not depend on where the build ran: a build and its case files moved together keep
+    the model's identity, and a refit finds them again (:func:`options_resolved_in`).
+    """
+    return {
+        key: os.path.relpath(os.path.abspath(str(value)), os.path.abspath(folder))
+        if _is_path_option(key, value)
+        else value
+        for key, value in options.items()
+    }
+
+
+def options_resolved_in(options: Mapping[str, object], folder: Path) -> dict[str, object]:
+    """Return a manifest's options with those naming files resolved against ``folder``.
+
+    The inverse of :func:`options_relative_to`; absolute paths (models written before
+    2026-11-02) are kept as they are. Both work on the paths as written, never following
+    symbolic links, so that a link moved with the model still points where it did.
+    """
+    return {
+        key: os.path.abspath(folder / str(value)) if _is_path_option(key, value) else value
+        for key, value in options.items()
+    }
 
 
 def _digest(document: object) -> str:
@@ -515,7 +572,7 @@ def _run_columns(
             f"{run_dir} ran another simulator stack than the case ({', '.join(mismatches)} "
             "differ): its forecasts are not the case's"
         )
-    workflow = composition.build_run(run_config).workflow
+    workflow = composition.build_run(run_config, surrogate=False).workflow
     analysis = workflow.analysis_observations
     index = {key: row for row, key in enumerate(analysis.keys)}
     missing = [k for k in case.keys if k not in index]
@@ -536,11 +593,17 @@ def _run_columns(
         except FileNotFoundError as error:
             raise ConfigError(f"{run_dir}: iteration {iteration}: {error}") from error
         predicted = composition.all_roles(iterate, workflow.role_rows(), analysis.n_data)[rows]
+        # Only the simulator's forecasts are snapshots: a surrogate run's own
+        # forecasts would train a surrogate on a surrogate.
+        simulated = np.array([s != SURROGATE for s in iterate.forecast_source], dtype=bool)
         for name in states:
-            states[name].append(np.asarray(iterate.state[name]))
-        outputs.append(predicted)
-    if not outputs:
-        raise ConfigError(f"{run_dir} has no saved iterate")
+            states[name].append(np.asarray(iterate.state[name])[:, simulated])
+        outputs.append(predicted[:, simulated])
+    if not outputs or not sum(o.shape[1] for o in outputs):
+        raise ConfigError(
+            f"{run_dir} has no saved iterate forecast by the simulator (a surrogate's "
+            "forecasts are not snapshots)"
+        )
     pooled = np.ascontiguousarray(np.concatenate(outputs, axis=1))
     return (
         {k: np.ascontiguousarray(np.concatenate(v, axis=1)) for k, v in states.items()},
@@ -683,8 +746,10 @@ def _fingerprint(parts: Mapping[str, str]) -> str:
 
 
 def _fit_fingerprint(config: SurrogateConfig) -> str:
+    # Files the options name count by their content (an edited case file refits); options
+    # naming no file are unchanged, so existing builds keep their fingerprints.
     return _digest({
-        "model": config.surrogate.model, "options": config.surrogate.options,
+        "model": config.surrogate.model, "options": _with_contents(config.surrogate.options),
         "extent": config.surrogate.extent, "gate": json.loads(config.gate.model_dump_json()),
     })  # fmt: skip
 
@@ -861,10 +926,18 @@ def _build(
     )  # fmt: skip
     state = directory.read_state()
     fit_key = _fit_fingerprint(config)
+    model_files = (directory.model, directory.model.with_suffix(".npz"))
     if state.get("complete") and state.get("fit_fingerprint") == fit_key:
         saved = directory.read_json(SUMMARY)
-        if saved is not None:
+        # A complete build whose model files are gone (deleted, say, to drop a model a
+        # changed format cannot read) is fitted again on the runs it made.
+        if saved is not None and all(f.is_file() for f in model_files):
             return BuildResult(directory.path, SurrogateBuildSummary.model_validate(saved))
+        if saved is not None:
+            logger.info(
+                "surrogate model files missing; refitting on the runs made",
+                extra={"event": "surrogate_refit_missing_model"},
+            )
     streams = build_streams(section.seed)
     design = directory.load_design()
     if design is None:
@@ -952,7 +1025,7 @@ def _build(
         model=fitted.model,
         domain=fitted.domain,
         provenance=plan_provenance,
-        options=section.options,
+        options=options_relative_to(section.options, directory.model.parent),
         gate=fitted.gate,
         snapshots=SnapshotReference(path=f"../{SNAPSHOTS}", digest=everything.digest()),
         fit=FitRecord(seed=section.seed, stream_state=fitted.stream_state),
@@ -963,6 +1036,21 @@ def _build(
     # once it is written (a refit that fails leaves the last model's configuration).
     directory.write_config(config.model_dump_json(indent=2))
     times = [s for s in seconds.values() if math.isfinite(s)]
+    if times:
+        # Beside the model, outside its identity: what a run with it saves (decision 14).
+        write_cost(stored.path, BuildCost(
+            identity=stored.identity, runs=len(times), mean_seconds=float(np.mean(times)),
+            median_seconds=float(np.median(times)), total_seconds=float(np.sum(times)),
+            fit_seconds=fitted.fit_seconds,
+        ))  # fmt: skip
+    else:
+        cost_path(stored.path).unlink(missing_ok=True)  # never an earlier build's
+        if seconds:
+            # Members run whole on other hosts come back untimed.
+            logger.warning(
+                "the build's full runs are not timed: runs with the model report no speed-up",
+                extra={"event": "surrogate_untimed", "runs": len(seconds)},
+            )
     summary = _summary(config, design, case, failed, 0, simulator_runs).model_copy(update={
         "status": "complete", "gate": fitted.gate, "identity": stored.identity,
         "model": str(MODEL),
@@ -1067,7 +1155,8 @@ def record_check(
 
     The number is one past every complete check of the model, assigned and written under a
     lock on the model's ``checks/`` folder, so checks completing at once (each holding only
-    its own folder's lock) never share one. A check completed again takes a new number.
+    its own folder's lock) never share one. A check completed again takes a new number,
+    unless it is the latest already (it keeps its number).
     """
     with serialized(checks_folder(model_path), ".sequence.lock"):
         others = [c for c in _complete_checks(model_path) if c.id != summary.id]
@@ -1335,3 +1424,349 @@ def _check_design(
         training={n: v[:, :0] for n, v in chosen.items()},
     )
     return design, trained_on
+
+
+# ================================================================ history matching (§5)
+
+
+@functools.lru_cache(maxsize=8)
+def fitted_model(path: str, identity: str) -> tuple[SurrogateModel, TrainingDomain]:
+    """Load a model of ``identity`` once per process (a surrogate simulator's worker loader).
+
+    Raises
+    ------
+    ConfigError
+        If the files are not those of ``identity``, or are refused.
+    """
+    loaded = load_surrogate(Path(path), identity=identity)
+    return loaded.model, loaded.domain
+
+
+def active_model(path: Path, identity: str | None = None) -> ActiveModel:
+    """Load a model as a run forecasts with it: a :class:`SurrogateSimulator` and its files.
+
+    Raises
+    ------
+    ConfigError
+        If the files are refused, or are not those of ``identity`` (when given).
+    """
+    loaded = load_surrogate(Path(path), identity=identity)
+    simulator = SurrogateSimulator(
+        loaded.model,
+        loaded.domain,
+        identity=loaded.identity,
+        loader=functools.partial(fitted_model, str(Path(path).resolve()), loaded.identity),
+        guard=refuse_outside,
+    )
+    return ActiveModel(Path(path), loaded.identity, loaded.manifest, simulator)
+
+
+def _field_data(config: HistoryMatchConfig) -> bool:
+    return bool(config.observations.fields) or config.geophysics is not None
+
+
+def refusals(config: HistoryMatchConfig) -> list[str]:
+    """Return why ``config``'s ``[surrogate]`` is refused, from the configuration alone.
+
+    "Refused": ``[model_error]``, fidelity levels, ``intersect_visage`` (and ERT's
+    batches), and ``[[data_transforms]]`` on field data (§3, until tested); also
+    ``variance_in_errors`` with data transforms (the variance is per raw datum). The
+    adjoint update and executors running members remotely are refused when the run is built
+    (:func:`refuse_parts`); the model's own refusals by :func:`refuse_model`.
+    """
+    section = config.surrogate
+    if section is None:
+        return []
+    found = []
+    if config.model_error is not None:
+        found.append(
+            "[surrogate] with [model_error]: the model-error model reads each run's case "
+            "files, which a surrogate has none of"
+        )
+    if config.method.name == "multilevel_esmda" or "levels" in config.method.options:
+        found.append(
+            "[surrogate] with fidelity levels (multilevel ES-MDA): a surrogate is not a level"
+        )
+    name = config.simulator.name
+    if name in REFUSED_SIMULATORS:
+        found.append(f"[surrogate] over {name!r}: {REFUSED_SIMULATORS[name]}")
+    if config.execution.name == "ert":
+        found.append("[surrogate] with the 'ert' executor: ERT runs a case's members in batches")
+    if config.data_transforms and _field_data(config):
+        found.append(
+            "[surrogate] with [[data_transforms]] on field data: the checks would gate them "
+            "in a space not yet tested"
+        )
+    if section.variance_in_errors and config.data_transforms:
+        found.append(
+            "[surrogate] variance_in_errors with [[data_transforms]]: the predictive variance "
+            "is per raw datum"
+        )
+    if section.on_check_failure == "refit" and config.data_transforms:
+        found.append(
+            '[surrogate] on_check_failure = "refit" with [[data_transforms]]: a refit is '
+            "gated in the raw space, the checks in the transformed one"
+        )
+    return found
+
+
+def refuse_parts(method: object, executor: object, section: SurrogateRunSection) -> None:
+    """Refuse what a method or executor cannot do with a surrogate.
+
+    The adjoint update; an executor running members whole on other hosts (the remote
+    mode: the surrogate's forecasts stay local, and the checks' runs would come back
+    transformed there); ``variance_in_errors`` with a method that does not use a forecast's
+    error variance (``uses_error_variance``: ES-MDA and ES; the iterative methods draw their
+    perturbations once and judge trials on ``C_d``, where the variance would only reweight
+    the step); a fallback (``refit``, ``simulator``) with an iterative method that cannot
+    judge its trials against its accepted iterate forecast again (``rescore_accepted``).
+
+    Raises
+    ------
+    ConfigError
+        Naming what is refused.
+    """
+    if section.variance_in_errors and not getattr(method, "uses_error_variance", False):
+        raise ConfigError(
+            f"[surrogate] variance_in_errors with {type(method).__name__}: only ES-MDA and ES "
+            "add a forecast's variance to the observation errors (an iterative method draws "
+            "its perturbations once and judges its trials on C_d)"
+        )
+    if (
+        section.on_check_failure != "stop"
+        and getattr(method, "iterative", False)
+        and not callable(getattr(method, "rescore_accepted", None))
+    ):
+        raise ConfigError(
+            f'[surrogate] on_check_failure = "{section.on_check_failure}" with '
+            f"{type(method).__name__}: it cannot judge its trials against its accepted "
+            'iterate forecast by the new source; use "stop"'
+        )
+    if getattr(method, "uses_sensitivities", False):
+        raise ConfigError(
+            "[surrogate] with the adjoint update (sensitivities): surrogate gradients are not "
+            "part yet"
+        )
+    if getattr(executor, "remote", False):
+        raise ConfigError(
+            "[surrogate] with an executor running members on other hosts (remote mode): "
+            "surrogate forecasts stay on local workers; use the executor's other mode "
+            '(e.g. mode = "files") for the simulator\'s runs'
+        )
+
+
+def refuse_model(
+    config: HistoryMatchConfig,
+    model: ActiveModel,
+    observations: ObservationSet,
+    stack: SnapshotProvenance,
+) -> None:
+    """Refuse a model a run cannot use ("Refused").
+
+    A model whose gate failed or whose last check failed; one built for another simulator
+    stack or case; one whose domain lacks an observed key (every role: history matching,
+    cv, test, field keys); a ``variance_in_errors`` model without ``predict_std``; a refit
+    policy without the snapshots to refit from.
+
+    Raises
+    ------
+    ConfigError
+        Naming what is refused and why.
+    """
+    section = config.surrogate
+    assert section is not None
+    manifest = model.manifest
+    name = model.path
+    if manifest.gate is None or not manifest.gate.passed:
+        failures = [] if manifest.gate is None else manifest.gate.failures()
+        raise ConfigError(
+            f"the surrogate {name} did not pass its gate ({'; '.join(failures) or 'none'}): "
+            "rebuild it"
+        )
+    check = last_check(name, model.identity)
+    if check is not None and not check.passed:
+        raise ConfigError(
+            f"the surrogate {name} failed its last check ({check.id}: "
+            f"{'; '.join(check.notes) or 'not passed'}): rebuild or refit it"
+        )
+    mismatches = manifest.provenance.stack_mismatches(stack)
+    if mismatches:
+        raise ConfigError(
+            f"the surrogate {name} was built for another simulator stack or case "
+            f"({', '.join(mismatches)} differ)"
+        )
+    outside = check_request(model.domain, observations.keys)
+    if not outside.inside:
+        raise ConfigError(f"the surrogate {name} cannot forecast this run: {outside.message()}")
+    if section.variance_in_errors and not callable(getattr(model.model, "predict_std", None)):
+        raise ConfigError(
+            f"[surrogate] variance_in_errors: the plugin {manifest.plugin!r} gives no "
+            "predictive variance (predict_std)"
+        )
+    if section.on_check_failure == "refit":
+        if manifest.snapshots is None or manifest.snapshots.path is None:
+            raise ConfigError(
+                f'[surrogate] on_check_failure = "refit": the surrogate {name} records no '
+                "snapshot set to refit from"
+            )
+        sigma = any(d.measure == "sigma_ratio" for d in manifest.gate.datatypes)
+        observed = set(observations.keys)
+        if sigma and any(k not in observed for k in model.model.keys):
+            raise ConfigError(
+                f'[surrogate] on_check_failure = "refit": the surrogate {name} was gated '
+                "against observation errors at keys this run does not observe"
+            )
+
+
+def surrogate_forecasting(
+    config: HistoryMatchConfig,
+    observations: ObservationSet,
+    stack: SnapshotProvenance,
+) -> SurrogateForecasting:
+    """Compose what a run with ``[surrogate]`` holds, after every refusal.
+
+    ``observations`` are the run's raw observations (every role), ``stack`` its simulator
+    stack's provenance (:func:`stack_provenance`).
+
+    Raises
+    ------
+    ConfigError
+        If the configuration or the model is refused.
+    """
+    section = config.surrogate
+    assert section is not None
+    found = refusals(config)
+    if found:
+        raise ConfigError("; ".join(found))
+    original = active_model(section.model_file)
+    refuse_model(config, original, observations, stack)
+    manifest = original.manifest
+    assert manifest.gate is not None  # refused otherwise
+    try:
+        tolerances = (
+            manifest.gate.tolerances
+            if section.sigma_ratio is None
+            else manifest.gate.tolerances.tightened(sigma_ratio=section.sigma_ratio)
+        )
+    except ValueError as error:
+        raise ConfigError(f"[surrogate] sigma_ratio: {error}") from error
+    kinds = {d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None}
+    variances = None
+    if any(d.measure == "sigma_ratio" for d in manifest.gate.datatypes):
+        index = {key: row for row, key in enumerate(observations.keys)}
+        rows = [index[k] for k in original.model.keys if k in index]
+        if len(rows) == len(original.model.keys):
+            variances = np.ascontiguousarray(np.asarray(observations.variances)[rows])
+    executor = (
+        executors.create("serial")
+        if section.workers is None
+        else executors.create("process", workers=section.workers)
+    )
+    snapshots = (
+        None
+        if manifest.snapshots is None or manifest.snapshots.path is None
+        else functools.partial(_model_snapshots, Path(section.model_file), manifest)
+    )
+    # The manifest's file options are relative to the model's folder; a refit reads them
+    # there and records them relative to its own.
+    resolved = options_resolved_in(manifest.options, Path(section.model_file).parent)
+    return SurrogateForecasting(
+        section,
+        original=original,
+        executor=executor,
+        tolerances=tolerances,
+        variances=variances,
+        kinds=kinds,
+        loader=active_model,
+        plugin=functools.partial(surrogate_models.create, manifest.plugin, **resolved),
+        snapshots=snapshots,
+        cost=model_cost(Path(section.model_file), original.identity),
+        stored_options=functools.partial(options_relative_to, resolved),
+    )
+
+
+def model_cost(model_file: Path, identity: str) -> BuildCost | None:
+    """Return what the build of the model ``identity`` cost (decision 14), ``None`` if unknown.
+
+    The file beside the manifest, if it is this model's; for a model built before it was
+    written, the journal of the build the model is still in (``<build>/model/surrogate.json``,
+    whose state names the model). The cost only informs: a file that cannot be read, or
+    is another model's, is logged and passed over, never stopping a run.
+    """
+    try:
+        cost = read_cost(model_file)
+    except ConfigError as error:
+        logger.warning("surrogate cost unreadable", extra={"event": "surrogate_cost_skipped",
+                                                           "reason": str(error)})  # fmt: skip
+        cost = None
+    if cost is not None and cost.identity == identity:
+        return cost
+    if cost is not None:
+        logger.warning(
+            "surrogate cost of another model",
+            extra={"event": "surrogate_cost_skipped", "path": str(cost_path(model_file)),
+                   "reason": f"its model is {cost.identity[:12]}..., not {identity[:12]}..."},
+        )  # fmt: skip
+    build = Path(model_file).resolve().parent.parent
+    if not SurrogateDirectory.holds_build(build):
+        return None
+    if SurrogateDirectory(build).read_state().get("identity") != identity:
+        return None
+    times = [
+        float(r.seconds)
+        for r in SurrogateDirectory(build).journal().values()
+        if r.ok and r.seconds is not None and math.isfinite(r.seconds)
+    ]
+    if not times:
+        return None
+    return BuildCost(
+        identity=identity, runs=len(times), mean_seconds=float(np.mean(times)),
+        median_seconds=float(np.median(times)), total_seconds=float(np.sum(times)),
+    )  # fmt: skip
+
+
+def planned_evaluations(
+    section: SurrogateRunSection,
+    ensemble: int | None,
+    single: int | None,
+    members: int | None,
+    *,
+    iterative: bool = False,
+) -> int | None:
+    """Return the surrogate evaluations a run may take: its forecasts' members, and refits'.
+
+    A refit repeats its iteration's forecast (``members``); an iterative method's accepted
+    iterate and its mean model are forecast again by the refit too (``members + 1``).
+    ``None`` when the method cannot bound its forecasts or the ensemble's size is unknown.
+    """
+    if ensemble is None or members is None:
+        return None
+    refits = section.max_refits if section.on_check_failure == "refit" else 0
+    per_refit = 2 * members + 1 if iterative else members
+    return ensemble * members + (single or 0) + refits * per_refit
+
+
+def planned_simulator_runs(
+    section: SurrogateRunSection, ensemble: int | None, members: int | None
+) -> tuple[int | None, list[str]]:
+    """Return the simulator runs a run with ``[surrogate]`` may take, and what to say of them.
+
+    The checks (at most one per check iteration among the ``ensemble`` forecasts), the
+    posterior's forecast and, where the simulator may take over (``outside`` or
+    ``on_check_failure`` = ``"simulator"``), every forecast as the worst case.
+    """
+    if ensemble is None or members is None:
+        return None, []
+    checked = members if section.check_members == "all" else min(section.check_members, members)
+    checks = 0 if section.check_every == 0 else (ensemble - 1) // section.check_every
+    runs = checks * checked + members
+    notes = []
+    if section.outside == "simulator" or section.on_check_failure == "simulator":
+        # Every forecast, and an iterative method's accepted iterate and mean model forecast
+        # again when the simulator takes over.
+        runs += ensemble * members + (members + 1 if section.on_check_failure == "simulator" else 0)
+        notes.append(
+            "the simulator may take over members outside the domain or the rest of the run: "
+            "counted as if it forecast everything"
+        )
+    return runs, notes

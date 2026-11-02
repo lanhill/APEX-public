@@ -368,6 +368,11 @@ def _check_exportable(config: object) -> None:
             "it has geophysical data ([geophysics]): ERT's forward model would run "
             "the simulator alone, without the geophysical forward model"
         )
+    if config.surrogate is not None:
+        problems.append(
+            "it forecasts with a surrogate ([surrogate]): ERT's forward model would "
+            "run the simulator, without the surrogate, its checks or its records"
+        )
     grids = {tuple(v.grid) for v in config.state.variables if v.grid is not None}
     if len(grids) > 1:
         problems.append("the grid fields have different grids")

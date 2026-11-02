@@ -1,6 +1,7 @@
 """Plain-text and JSON summaries of a history-matching run."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from apex.domain.results import IterationRecord
 
@@ -9,19 +10,23 @@ def history_table(history: Sequence[IterationRecord], control: str = "damping") 
     """Format the data mismatch history as an aligned text table.
 
     ``control`` heads the column of each trial's parameter (``IterationRecord.damping``):
-    the method's own name for it, e.g. GN-EnRML's ``step length``.
+    the method's own name for it, e.g. GN-EnRML's ``step length``. A run with a surrogate
+    has a column with each forecast's source.
     """
+    sourced = any(r.forecast_source is not None for r in history)
     header = (
         f"{'iter':>4}  {'data mismatch mean':>14}  {'data mismatch std*':>12}  "
         f"{'members':>7}  {'accepted':>8}  {control:>11}"
-    )
+    ) + (f"  {'forecast':>9}" if sourced else "")
     lines = [header, "-" * len(header)]
     for record in history:
         damping = "" if record.damping is None else f"{record.damping:.3g}"
+        source = f"  {record.forecast_source or 'simulator':>9}" if sourced else ""
         lines.append(
             f"{record.iteration:>4}  {record.data_mismatch_mean:>14.6g}  "
             f"{record.data_mismatch_std:>12.4g}  "
             f"{record.n_members:>7}  {'yes' if record.accepted else 'no':>8}  {damping:>11}"
+            + source
         )
     # The methods' own statistic (PET's, which LM damping gates on); `apex summary` and the
     # API's step statistics give the sample std (ddof = 1) of every metric.
@@ -30,6 +35,38 @@ def history_table(history: Sequence[IterationRecord], control: str = "damping") 
         "`apex summary` gives the sample std (ddof = 1)"
     )
     return "\n".join(lines)
+
+
+def surrogate_lines(summary: Mapping[str, Any]) -> list[str]:
+    """Describe a surrogate run's checks and posterior from ``summary.json``.
+
+    Empty for runs without one.
+    """
+    report = summary.get("surrogate")
+    if not isinstance(report, Mapping):
+        return []
+    checks = report.get("checks") or []
+    failed = [c["iteration"] for c in checks if not c.get("passed")]
+    lines = [
+        f"surrogate {report.get('plugin')} ({str(report.get('identity'))[:12]}): "
+        f"{report.get('evaluations')} evaluations, {report.get('simulator_runs')} simulator "
+        f"runs, {len(checks)} check(s)"
+        + (f", failed at {failed}" if failed else "")
+        + (f", {len(report.get('refits') or [])} refit(s)" if report.get("refits") else "")
+    ]
+    if report.get("switched_to_simulator_at") is not None:
+        lines.append(f"  the simulator took over at iteration {report['switched_to_simulator_at']}")
+    posterior = report.get("posterior") or {}
+    simulator, surrogate = posterior.get("simulator") or {}, posterior.get("surrogate") or {}
+    if "data_mismatch" in simulator and "data_mismatch" in surrogate:
+        flag = " (beyond the surrogate's gate)" if posterior.get("beyond_gate") else ""
+        lines.append(
+            f"  posterior (iteration {posterior.get('iteration')}) data mismatch: simulator "
+            f"{simulator['data_mismatch']:.6g}, surrogate {surrogate['data_mismatch']:.6g}{flag}"
+        )
+    elif posterior.get("forecast") == "simulator already":
+        lines.append("  the posterior was forecast by the simulator already")
+    return lines
 
 
 def metrics_table(

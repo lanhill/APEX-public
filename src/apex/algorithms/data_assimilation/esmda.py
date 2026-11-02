@@ -28,6 +28,7 @@ from apex.algorithms.data_assimilation.algorithm import (
     RunSetup,
     Status,
     Step,
+    gain_error,
     keep,
 )
 from apex.algorithms.data_assimilation.bounds import StateBounds
@@ -73,6 +74,11 @@ class ESMDA(EmitsDiagnostics):
     ValueError
         If the schedule is empty, has a non-positive factor, or violates the sum rule.
     """
+
+    #: A forecast's ``error_variance`` (a surrogate's predictive variance) joins
+    #: ``C_d`` before the step's inflation, in the perturbations and the gain: each step's
+    #: likelihood is ``N(g(m), C_d + diag(v))``, with ``v`` that step's forecast's.
+    uses_error_variance = True
 
     def __init__(
         self,
@@ -367,7 +373,9 @@ class ESMDA(EmitsDiagnostics):
             run.state,
             run.predicted,
             run.setup.observations.values,
-            run.setup.data_error,
+            # A surrogate's predictive variance, if the forecast carries one,
+            # joins C_d before the step's inflation: perturbations and gain alike.
+            gain_error(run.setup.data_error, forecast.error_variance),
             run.setup.streams["analysis"],
             localization_rng=run.setup.streams["localization"],
             sensitivity=forecast.sensitivity,

@@ -29,6 +29,10 @@ class IterationRecord:
         Member means of the performance metrics, ``{metric: {label: mean}}``,
         e.g. ``{"normalized_data_mismatch": {"all": 1.2}, "rmse": {"permx": 0.4, "all": 0.4}}``.
         ``None`` in runs saved before metrics were recorded.
+    forecast_source
+        With ``[surrogate]``: where the forecast came from, ``"surrogate"``,
+        ``"simulator"`` or ``"mixed"`` (members outside the surrogate's domain run by the
+        simulator); ``None`` (other runs): the simulator.
     """
 
     iteration: int
@@ -39,6 +43,7 @@ class IterationRecord:
     damping: float | None = None
     data_mismatch_by_type: dict[str, float] | None = None
     metrics: dict[str, dict[str, float]] | None = None
+    forecast_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

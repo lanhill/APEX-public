@@ -26,7 +26,7 @@ import os
 import re
 import threading
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -71,8 +71,9 @@ from apex.domain.optimization import OptimizationConfig
 from apex.domain.optimization_study import METRIC_KEYS
 from apex.domain.study import MethodEntry, StudySpec
 from apex.services.api import ApexService
+from apex.services.compatibility import default_damping, default_strategy, plugin_settings
 from apex.services.identities import identity_of
-from apex.services.plugins import REGISTRIES, option_model, wrapped
+from apex.services.plugins import REGISTRIES, option_model, strategy_localization, wrapped
 from apex.services.settings import ChatSection
 from apex.services.tools import ToolSession
 from apex.storage.chat_store import ChatBusy, ChatStore
@@ -557,6 +558,9 @@ SYSTEM = (
     "otherwise. ES and ES-MDA assimilate all data a fixed number of times (ES-MDA: once per "
     "inflation factor, the data errors inflated) with no convergence test; GIES and "
     "LM/GN-EnRML iterate until they converge, and only they take cross-validation stopping. "
+    "Why a run stopped or did not converge comes only from a tool's result (write_report "
+    "states it in its overview and warnings); never infer it from the settings or the "
+    "numbers, and when a result says the reason is not recorded, say so. "
     "Keep to any length or form the user asks for (e.g. 'in one sentence'). "
     "ERT: methods with engine = 'ert' run ERT's own smoothers (es_mda with weights, "
     "ensemble_smoother) with name and options only; ERT's engine has no strategy or "
@@ -577,16 +581,24 @@ SYSTEM = (
     "instead of planning. plan_study and revise_draft "
     "return held_fixed, differs and seeds from the study's cells: say which settings are "
     "shared and which differ from those, never from memory, and point out any difference "
-    "beyond the one the user asked for. A setting is shared only when every arm has it at "
+    "beyond the one the user asked for. A caveat you add about a plan concerns a setting "
+    "the plan shows (held_fixed, differs, defaults), such as a localization shown 'within "
+    "the strategy <name>' (that strategy localizes by itself, e.g. adaptive_rows), never "
+    "one from background knowledge. A setting is shared only when every arm has it at "
     "the same value: an option equal across different strategies (e.g. energy 0.99 in "
     "approx and rlmmac) does not make the strategy shared: name the option, not the "
     "strategy. A study's draft names only what it sets: settings "
     "its cells inherit from the case (ensemble size, prior, iterations) are not in its TOML "
     "but are in held_fixed and differs (read_draft returns them too), so never take one "
     "back for missing from the file. The value of an option an arm leaves out is in "
-    "defaults; 'not set: the method's own default' means the method chooses, so do not "
-    "name a value for it; 'not an option of <plugin>' means that plugin has no such "
-    "setting (say so; it is neither unset nor 'none'). When a tool's approval says "
+    "defaults. "
+    # #260: the method's own default is named, so that the user knows what is compared.
+    "'not set: the method's own default, <plugin> (...)' means the method chooses that "
+    "plugin with those values: name them when you say what an arm is compared with; its "
+    "entries read '... (see method.damping)' (or method.strategy), which points there; "
+    "bare 'not set: the method's own default' means it cannot be told, so name no value. "
+    "'not an option of <plugin>' means that plugin has no such setting (say so; it is "
+    "neither unset nor 'none'). When a tool's approval says "
     "needed, tell the user before proposing that launching needs the owner's approval. "
     "You cannot submit, stop or resume anything: to run a planned "
     "study, call propose_action, which shows the user a card to review, launch or discard "
@@ -2590,6 +2602,21 @@ def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:  # noqa: ANN401 (J
     return {prefix: value}
 
 
+def _strategy_localization(method: dict[str, Any]) -> None:
+    """Show the localization of a strategy that localizes by itself (#261).
+
+    A local analysis (``local_analysis``, ``local_rlmmac``, ``adaptive_rows``) or ERT's
+    ``ert_adaptive``/``ert_localized`` localizes its update whether or not
+    ``[method.localization]`` is set (the strategy's ``localizes``). Unset, the section
+    read "none" in both arms of an approx against adaptive_rows study, and a caveat about
+    localization was judged wrong, though adaptive_rows is ERT's per-row adaptive
+    localization. A section the arm sets is shown as it is.
+    """
+    shown = strategy_localization(method.get("strategy"), method.get("localization"))
+    if shown is not None:
+        method["localization"] = shown
+
+
 def _method_steps(method: dict[str, Any]) -> None:
     """Show a method's steps as it runs them (a reported issue).
 
@@ -2646,6 +2673,7 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
                 dumped.pop(own, None)
             if isinstance(dumped.get("method"), dict):
                 _method_steps(dumped["method"])
+                _strategy_localization(dumped["method"])
                 defaults[label] = _method_defaults(dumped["method"])
                 accepted[label] = _method_options(dumped["method"])
             elif isinstance(dumped.get("optimizer"), dict):
@@ -2672,7 +2700,8 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
             if k not in differing and k.startswith(SHARED_SETTINGS)
             and first.get(k) is not None}  # fmt: skip
     differs = (
-        {label: {k: _shown_value(flat, k, defaults.get(label, {}), accepted.get(label))
+        {label: {k: _shown_value(flat, k, defaults.get(label, {}), accepted.get(label),
+                                 differing[:MAX_DIFFERENCES])
                  for k in differing[:MAX_DIFFERENCES]}
          for label, flat in arms.items()}
         if len(arms) > 1 else {}
@@ -2687,13 +2716,20 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
         "localization), 'the plugin's default' an option left out: its value is in "
         "'defaults'; 'not an option of <plugin>' an option that arm's method or strategy "
         "does not have (another arm's), so it neither applies nor has a default there; "
-        "'not set: the method's own default' a section the method chooses itself",
+        "'not set: the method's own default, <plugin> (...)' a section the method chooses "
+        "itself: that plugin with the option values it runs with (name them; #260), its "
+        "entries pointing there ('(see method.damping)'), or the bare words when it cannot "
+        "be told; 'within the strategy <name>' a localization that strategy does itself",
     }
     # A reported issue: an arm leaving its method's options out showed "(not set)", and the
     # assistant stated their values unseen. The values it runs with are these.
     # One entry per distinct set, with the arms it holds for, so many arms stay small.
     grouped: dict[str, dict[str, Any]] = {}
-    for label, unset_options in defaults.items():
+    # A method's own strategy or damping that differs is in differs already, in full (#260).
+    in_differs = set(differing[:MAX_DIFFERENCES]) if differs else set()
+    for label, arm_defaults in defaults.items():
+        unset_options = {k: v for k, v in arm_defaults.items()
+                         if not (k in in_differs and isinstance(v, str))}  # fmt: skip
         if unset_options:
             key = json.dumps(unset_options, sort_keys=True)
             grouped.setdefault(key, {"arms": [], "defaults": unset_options})["arms"].append(label)
@@ -2767,7 +2803,8 @@ def _method_defaults(method: Mapping[str, Any]) -> dict[str, Any]:
     Keys as in ``differs`` (``method.options.<name>``, ``method.strategy.options.<name>``);
     values as JSON. A wrapper's (CHOP's) ``inner`` and the inner method's options are its
     ``method.options`` too, as the composition reads them (``services.plugins.wrapped``).
-    An unset strategy or damping section is the method's own choice, marked as such. A
+    An unset strategy or damping section is the method's own choice, marked as such and
+    naming that choice (:func:`_own_default`, #260). A
     plugin the registry does not know, or whose options cannot be described, gives none.
     """
     found: dict[str, Any] = {}
@@ -2784,6 +2821,7 @@ def _method_defaults(method: Mapping[str, Any]) -> dict[str, Any]:
             found[f"{prefix}.{option}"] = json.loads(json.dumps(value, default=str))
 
     name, options = method.get("name"), method.get("options") or {}
+    top, top_options = name, options
     while isinstance(name, str) and isinstance(options, Mapping):
         split = wrapped("methods", name, options)
         if split is None:
@@ -2804,8 +2842,37 @@ def _method_defaults(method: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(section, Mapping) and isinstance(section.get("name"), str):
             add(registry, section["name"], section.get("options") or {}, f"method.{key}.options")
         elif section is None and (key == "strategy" or (key == "damping" and damped)):
-            found[f"method.{key}"] = "not set: the method's own default"
+            found[f"method.{key}"] = _own_default(key, top, top_options, method.get("schedule"))
     return found
+
+
+#: How an unset strategy or damping section is shown; the default it names follows (#260).
+OWN_DEFAULT = "not set: the method's own default"
+
+
+def _own_default(key: str, method: object, options: object, schedule: object) -> str:
+    """Return how an unset ``strategy`` or ``damping`` section reads, naming the default.
+
+    A reported issue (#260): "not set: the method's own default" left the user unable to
+    tell what LM damping was compared with. The default is the one the composition builds
+    (``services.compatibility``), with every option it runs with, e.g. "not set: the
+    method's own default, rlmmac (initial = 1.0, factor = 2.0, ...)"; the bare words when
+    it cannot be told.
+    """
+    if not isinstance(method, str) or not isinstance(options, Mapping):
+        return OWN_DEFAULT
+    if key == "strategy":
+        section, registry = default_strategy(method, options), "update_strategies"
+    else:
+        given = schedule if isinstance(schedule, Mapping) else None
+        section, registry = default_damping(method, options, schedule=given), "damping_schemes"
+    if section is None:
+        return OWN_DEFAULT
+    settings = plugin_settings(registry, section["name"], section["options"])
+    shown = ", ".join(
+        f"{k} = {'none' if v is None else json.dumps(v)}" for k, v in settings.items()
+    )
+    return f"{OWN_DEFAULT}, {section['name']}" + (f" ({shown})" if shown else "")
 
 
 def _method_options(method: Mapping[str, Any]) -> dict[str, tuple[str, frozenset[str]]]:
@@ -2860,8 +2927,12 @@ def _shown_value(
     key: str,
     defaults: Mapping[str, Any] | None = None,
     accepted: Mapping[str, tuple[str, frozenset[str]]] | None = None,
+    listed: Collection[str] | None = None,
 ) -> Any:  # noqa: ANN401 (JSON)
     """Return an arm's setting for ``differs``.
+
+    ``listed``: the keys shown beside it; an entry of a method's own default points to its
+    section's key only when that key is among them (``None``: it is).
 
     Its value; "none" for a section not used (no localization); the method's own default
     for an unset section the method chooses (``defaults``, e.g. GIES's strategy); "not an
@@ -2875,7 +2946,17 @@ def _shown_value(
         if prefix in flat and flat[prefix] is None:
             # A strategy or damping the method picks is no unused section (#172: CHOP's).
             chosen = own.get(prefix)
-            return chosen if isinstance(chosen, str) else "none"
+            if not isinstance(chosen, str):
+                return "none"
+            # The default in full on the section's own key only (#260); its entries point
+            # there, so a plan does not repeat it once per option.
+            if n == len(parts) or (listed is not None and prefix not in listed):
+                return chosen  # the section's key, or its entry when the key was cut
+            return f"{OWN_DEFAULT} (see {prefix})"
+        if n < len(parts) and prefix in flat and isinstance(flat[prefix], str):
+            # A section shown as text ("within the strategy adaptive_rows ...", #261) reads
+            # the same for its entries.
+            return flat[prefix]
         if n == len(parts) and key in flat:
             return flat[key]
     if any(k.startswith(key + ".") for k in flat):

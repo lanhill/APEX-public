@@ -159,7 +159,7 @@ def test_a_version_4_snapshot_resumes_with_pets_rule(linear_case: CaseFactory) -
     case = linear_case(name="old", method=SUBSPACE, ensemble_size=20)
     run_dir = case.directory / "runs" / "old"
     composition.start(case.config, max_steps=0)  # the prior forecast only
-    assert SNAPSHOT_VERSION == 5
+    assert SNAPSHOT_VERSION >= 5  # version 5 introduced the rule; 6 is
     (run_dir / "snapshot_version").write_text("4\n")
 
     resumed = composition.resume(run_dir)

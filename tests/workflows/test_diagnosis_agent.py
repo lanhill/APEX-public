@@ -357,3 +357,28 @@ def test_the_command(tmp_path: Path, linear_case: CaseFactory) -> None:
     document = json.loads(result.stdout)
     assert document["decided_by"] == "rules"
     assert document["facts"]["observation"]["method"] == "esmda"
+
+
+def test_a_strategy_that_localizes_by_itself_is_no_unlocalized_run(
+    linear_case: CaseFactory,
+) -> None:
+    """The review of #261: an adaptive_rows run (ERT's per-row adaptive localization, ADR
+    0046) had no localization in its facts, so the rules would recommend adding one."""
+    case = linear_case(
+        ensemble_size=20,
+        method='name = "esmda"\noptions = { inflation = [2, 2] }\n'
+        'strategy = { name = "adaptive_rows", options = { energy = 1.0 } }',
+    )
+    composition.start(case.config)
+
+    facts = diagnose_facts(case.directory / "runs" / "case")
+
+    # A plugin name or None, never a sentence a model could echo into a patch.
+    assert facts.localization is None
+    assert facts.strategy_localizes
+    diverged = _observation(state="complete", method="esmda",
+                            data_mismatch_means=[5.877e8, 8.51e8], data_mismatch_iterations=[0, 1],
+                            normalized_data_mismatch=5.95e4)  # fmt: skip
+    advice = next(r for r in rules(_facts(observation=diverged, strategy_localizes=True))
+                  .recommendations if "mismatch_increased" in r.addresses)  # fmt: skip
+    assert advice.patch is None  # no "add localization" for such a run

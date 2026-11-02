@@ -2,8 +2,10 @@
 audience: public
 items:
   - cli:apex approve
+  - cli:apex optimize
   - cli:apex predict
   - cli:apex report
+  - cli:apex resume
   - cli:apex run
   - cli:apex stop
   - cli:apex study compare
@@ -11,10 +13,14 @@ items:
   - cli:apex study status
   - cli:apex submit
   - cli:apex validate
+  - config:history_match:method
+  - config:history_match:validation
   - config:optimization_study:study
   - config:service:approval
   - config:service:service
   - config:study:study
+  - plugin:simulators:eclipse
+  - plugin:simulators:opm_flow
 ---
 
 # The apex study commands
@@ -34,7 +40,7 @@ By the end of this lesson you will be able to write a small study specification,
 
 | Command | What it does |
 | --- | --- |
-| `apex validate` | Validates a run, prediction, optimization or study configuration and plans its cost. Nothing is simulated. |
+| `apex validate` | Validates a run, prediction, optimization, study or surrogate build configuration and plans its cost. Nothing is simulated. |
 | `apex study run` | Validates and submits a study. Its runs go on in the background. |
 | `apex study status` | Shows a study's state and the state of every run. |
 | `apex study compare` | Compares a study's variants at each run's posterior. |
@@ -50,7 +56,9 @@ Related commands that are not used to submit a study:
 
 ## Step 1: write a study specification
 
-A study specification is a TOML file with a `[study]` section. It runs every **case** (a history-matching configuration) with every **variant** (a change applied to every case), and optionally repeats each combination with several seeds.
+A study specification is a TOML file with a `[study]` section. It runs every **case** (a history-matching configuration) with every **variant** (a change applied to every case), and optionally repeats each combination with several seeds. Each case, variant and seed combination is one **run**.
+
+The number of runs is cases × variants × `replicates`. The example below has 1 case, 2 variants and 2 replicates, so it makes 1 × 2 × 2 = 4 runs.
 
 The options of `[study]`:
 
@@ -61,8 +69,8 @@ The options of `[study]`:
 | `variants` | Required. At least one `[[study.variants]]` entry, each with a `name` and an optional `patch`. |
 | `seed` | Default 0. The seeds of replicates 1, 2, ... derive from it. |
 | `replicates` | Default 1. Seeds per case and variant. |
-| `metrics` | `'metric:label'` entries to compare at each run's posterior. An unknown metric, or a label none of the cases has, is refused at validation. |
-| `simulator` | `opm_flow` or `eclipse`. Runs every case's deck on that simulator. Unset: each case keeps its own. |
+| `metrics` | `'metric:label'` entries to compare at each run's posterior. An unknown metric, or a label none of the cases has (a state variable or data type), is refused at validation. |
+| `simulator` | `opm_flow` or `eclipse`. Runs every case's deck on that simulator, replacing the case's simulator name and keeping the options both share. Unset: each case keeps its own. |
 | `methods` | Name to algorithm, each complete (`[study.methods.<name>]`). Unset: each case's own method. |
 | `predictions` | Prediction configurations without `run_dir`, run after each run. |
 | `annotations` | Table of string values. |
@@ -96,6 +104,32 @@ max_iterations = 3
 
 Save it as `my-study.toml`. The path `cases/base.toml` is a placeholder for your own history-matching configuration.
 
+### Choosing the algorithm with `methods`
+
+With `methods`, each entry is a complete algorithm. The fields you leave out (`options`, `strategy`, `schedule`, `max_iterations`, ...) take the defaults of a `[method]` section, not the values of the case. Without `methods`, every case keeps its own method.
+
+```toml
+[study]
+name = "method-study"
+
+[study.cases]
+base = "cases/base.toml"
+
+[study.methods.esmda]
+name = "esmda"
+
+[study.methods.gies]
+name = "gies"
+max_iterations = 5
+
+[[study.variants]]
+name = "baseline"
+```
+
+This study runs the case once with `esmda` and once with `gies`, each for the single variant.
+
+### Optimization studies
+
 An optimization study uses `kind = "optimization"` in `[study]`. Its cases are optimization configurations, and its variants patch those. Its `metrics` can be `objective:final`, `objective:best`, `evaluations:all` and `iterations:all`; with several objectives also `hypervolume:final` and `front_size:final`. It also accepts `reference_point` for the hypervolume. Its `methods` entries are complete `[optimizer]` sections.
 
 ```toml
@@ -113,7 +147,7 @@ name = "baseline"
 
 ## Step 2: check it with `apex validate`
 
-`apex validate` takes one required argument, `config`: a run, prediction, optimization or study TOML. It validates the file and plans its cost without simulating anything, so it is a safe first step.
+`apex validate` takes one required argument, `config`: a run, prediction, optimization, study or surrogate build TOML. It validates the file and plans its cost without simulating anything, so it is a safe first step. For a study, compare the planned cost with the `max_simulator_runs` of your budget.
 
 ```bash
 uv run apex validate my-study.toml
@@ -139,7 +173,7 @@ Options:
 - `--max-concurrent-jobs`: jobs at once. Default: the value in `service.toml`, else 2.
 - `--priority`: `high`, `normal` or `low`. Default `normal`.
 - `--approval-token`: a token approved with `apex approve`.
-- `--code`: `live`, `frozen` (the last commit, for every cell) or a commit. Default: `cli_code` in the `[jobs]` section of `service.toml`, else `frozen`.
+- `--code`: which code the runs use: `live`, `frozen` (the last commit, used for every run) or a specific commit. Default: `cli_code` in the `[jobs]` section of `service.toml`, else `frozen`.
 - `--root`: the services root.
 
 `service.toml` lives in the services root (`~/.apex/service`, or `$APEX_HOME` if set). Its `[service]` section has `max_concurrent_jobs` (default 2), `poll_s` (default 1.0), `max_retries` (default 2) and `routines` (default true).
@@ -154,7 +188,7 @@ max_runs = 20
 max_simulator_runs = 20000
 ```
 
-These are the defaults. A study beyond these limits is "large" and needs approval. There are two ways forward:
+These are the defaults. A study beyond these limits needs a person's approval before it goes on. There are two ways forward:
 
 1. Pass `--yes` to approve it as you submit:
 
@@ -169,7 +203,7 @@ uv run apex approve <token>
 uv run apex study run my-study.toml --approval-token <token>
 ```
 
-Replace `<token>` with your pending approval's token, and use the same `--root` for both commands.
+Replace `<token>` with your pending approval's token, and use the same `--root` for both commands. `apex approve` takes the token, not the study name.
 
 ## Step 4: check progress with `apex study status`
 
@@ -179,7 +213,7 @@ Replace `<token>` with your pending approval's token, and use the same `--root` 
 uv run apex study status my-study
 ```
 
-Add `--root` if your services root is not the default. The name need not match the file name.
+Add `--root` if your services root is not the default. The name need not match the file name. Run it again until it shows that every run has ended, then compare.
 
 ## Step 5: compare variants with `apex study compare`
 
@@ -195,7 +229,7 @@ For an optimization study such as `my-opt-study`, a metric is written like this:
 uv run apex study compare my-opt-study --metric objective:final --metric objective:best
 ```
 
-For a history-matching study, the `metrics` you list in `[study]` are written as `metric:label`, and the label is a state variable or data type of your cases. A metric a run does not record (for example rmse in a real case) is left out of that run's comparison.
+For a history-matching study, a metric is also written as `metric:label`. The label is a state variable or a data type of your cases, for example `rmse:<label>` with one of your own labels in place of `<label>`. `apex validate` refuses an unknown metric or a label that none of your cases has. A metric that a run does not record is left out of that run's comparison.
 
 ## Worked example
 
@@ -206,7 +240,7 @@ uv run apex validate my-study.toml
 uv run apex study run my-study.toml --priority high --max-concurrent-jobs 4 --wait
 ```
 
-Because of `--wait`, the command returns when the study has finished. If the study is large, add `--yes`, or approve a token and add `--approval-token <token>` as shown above.
+Because of `--wait`, the command returns when the study has finished. If the study needs approval, add `--yes`, or approve a token and add `--approval-token <token>` as shown above.
 
 Without `--wait`, the command returns right after submission, and you can check on it from another terminal:
 
@@ -214,18 +248,20 @@ Without `--wait`, the command returns right after submission, and you can check 
 uv run apex study status my-study
 ```
 
-Once the runs have finished, compare the variants:
+Once the runs have ended, compare the variants:
 
 ```bash
 uv run apex study compare my-study --json
 ```
+
+Use `--metric` as described in Step 5 to choose which metrics to compare.
 
 ## Pitfalls
 
 - **`--wait` is off by default.** Without it, `apex study run` returns as soon as the study is submitted. The runs are still going. Use `apex study status` to see where they are.
 - **`--no-wait` is not a separate option.** It is the off flag of the same switch as `--wait`.
 - **`apex study run` takes a file; the other two take a name.** `apex study status` and `apex study compare` need the `name` from `[study]`.
-- **Large studies need approval.** Pass `--yes`, or approve with `apex approve` and submit again with `--approval-token`.
+- **Studies beyond the approval limits need approval.** Pass `--yes`, or approve with `apex approve` and submit again with `--approval-token`.
 - **Use the same `--root` everywhere.** If you submitted with a non-default `--root`, pass the same value to `apex study status`, `apex study compare` and `apex approve`.
 - **Repeat `--metric` for each metric.** Each use takes one `metric:label` value.
 - **`--code` changes what the jobs run.** By default the jobs use the last commit (`frozen`), not your uncommitted edits. Use `--code live` for the live code.

@@ -109,7 +109,7 @@ def qaqc_report(
             f"{', '.join(map(str, kept)) or 'none yet'}"
         )
     iterate, prior = results.iterate(step), results.iterate(0)
-    observations = composition.build_run(config).workflow.observations
+    observations = composition.build_run(config, surrogate=False).workflow.observations
     keys, values, variances = observations.keys, observations.values, observations.variances
     predicted = iterate.predicted
     notes: list[str] = []

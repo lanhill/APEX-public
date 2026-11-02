@@ -88,13 +88,32 @@ def validate_history_match(
     except ApexError as error:
         return Validation(valid=False, errors=[str(error)])
     errors = _plugin_errors(resolved)
+    if resolved.surrogate is not None:  # "Refused": said first, whatever else is wrong
+        from apex.services import surrogates
+
+        errors = surrogates.refusals(resolved) + errors
     if errors:
         return Validation(valid=False, errors=errors)
     try:
         run = composition.build_run(resolved)
     except (ApexError, OSError, ValueError) as error:
         return Validation(valid=False, errors=[str(error)])
-    return Validation(valid=True, plan=plan(resolved, run, store))
+    planned = plan(resolved, run, store)
+    section = resolved.surrogate
+    if (
+        section is not None
+        and planned.surrogate_evaluations is not None
+        and planned.surrogate_evaluations > section.max_evaluations
+    ):
+        return Validation(
+            valid=False,
+            errors=[
+                f"[surrogate]: the run may take {planned.surrogate_evaluations:,} surrogate "
+                f"evaluations, more than max_evaluations = {section.max_evaluations:,}"
+            ],
+            plan=planned,
+        )
+    return Validation(valid=True, plan=planned)
 
 
 def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | None) -> RunPlan:
@@ -119,6 +138,21 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
     budget = getattr(run.method, "max_forecasts", None)
     ensemble, single = budget() if budget is not None else (None, None)
     runs = None if ensemble is None or members is None else ensemble * members + (single or 0)
+    evaluations, surrogate = None, None
+    if config.surrogate is not None:
+        # The forecasts are the surrogate's; only the simulator's runs count.
+        from apex.services import surrogates
+
+        evaluations = surrogates.planned_evaluations(
+            config.surrogate, ensemble, single, members,
+            iterative=bool(getattr(run.method, "iterative", False)),
+        )  # fmt: skip
+        runs, notes = surrogates.planned_simulator_runs(config.surrogate, ensemble, members)
+        warnings += notes
+        forecasting = run.workflow.surrogate
+        if forecasting is not None:
+            original = forecasting.original
+            surrogate = f"{original.manifest.plugin} {original.identity[:12]}"
     options = config.simulator.options
     licences = options.get("licenses") if config.simulator.name == "eclipse" else None
     if licences is not None and int(licences) > ECLIPSE_LICENCES:
@@ -144,6 +178,8 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
         estimated_hours=_estimate_hours(case_key(config), ensemble, store),
         checkpoint_mb=checkpoint_mb,
         forecast_memory_mb=forecast_mb,
+        surrogate_evaluations=evaluations,
+        surrogate=surrogate,
         warnings=warnings,
     )
 
