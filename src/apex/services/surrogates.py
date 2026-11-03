@@ -1022,7 +1022,9 @@ def draw_design(
 _RUN_SECTIONS = ("state", "prior", "parameterizations", "simulator", "geophysics", "model_error")
 
 
-def fingerprint_parts(config: SurrogateConfig, case: SurrogateCase) -> dict[str, str]:
+def fingerprint_parts(
+    config: SurrogateConfig, case: SurrogateCase, *, legacy: bool = False
+) -> dict[str, str]:
     """Return what fixes a build's runs, part by part (a digest or a value each).
 
     The case's sections that shape its runs (``case.<section>``, files by content), the
@@ -1030,6 +1032,13 @@ def fingerprint_parts(config: SurrogateConfig, case: SurrogateCase) -> dict[str,
     digests), the keys, the design and the seed. The plugin, its options, the gate and the
     domain's extent are left out: changing them refits on the runs already made (the runs are
     the cost). A resume refused names the parts that differ.
+
+    The design's files (``ensemble_file``, files its plan's options name) count by their
+    content, as the stack's, so a build moved or copied with its files is the same build
+    (2026-11-03; the variant smoke's cluster builds had to restamp it). A run directory
+    (plan ``run``) stays by its path, as does a folder a plan's option names: their content is
+    mostly outputs, which a folder's digest leaves out. ``legacy``: the design by its paths, as
+    builds made before were fingerprinted (:func:`_open_build` upgrades them).
     """
     document = json.loads(case.config.model_dump_json(include=set(_RUN_SECTIONS)))
     parts = {f"case.{name}": _digest(_with_contents(document.get(name))) for name in _RUN_SECTIONS}
@@ -1042,6 +1051,16 @@ def fingerprint_parts(config: SurrogateConfig, case: SurrogateCase) -> dict[str,
     if not design.get("options"):
         # Absent before the plans' options existed: builds keep their digest.
         design.pop("options", None)
+    if not legacy:
+        if design.get("ensemble_file") is not None:
+            design["ensemble_file"] = _file_contents(design["ensemble_file"])
+        if design.get("options"):
+            # Only options naming files (resolved against the configuration); a folder stays
+            # by its path, as a run directory: a folder's digest leaves its outputs out.
+            design["options"] = {
+                k: _file_contents(v) if _is_path_option(k, v) else v
+                for k, v in sorted(design["options"].items())
+            }
     parts["design"] = _digest(design)
     parts["seed"] = str(config.surrogate.seed)
     if case.fields:
@@ -1065,6 +1084,57 @@ def fingerprint_parts(config: SurrogateConfig, case: SurrogateCase) -> dict[str,
             "model": config.surrogate.model,
             "options": _with_contents(config.surrogate.options),
         })  # fmt: skip
+    return parts
+
+
+def _file_contents(value: object) -> object:
+    """Return a file's content digest for a path naming an existing file; else the value."""
+    if isinstance(value, str) and Path(value).is_file():
+        return {"file_sha256": provenance.file_hash(Path(value))}
+    return value
+
+
+def _open_build(
+    directory: SurrogateDirectory, config: SurrogateConfig, case: SurrogateCase
+) -> dict[str, str]:
+    """Open (or resume) a build's directory; return its fingerprint's parts.
+
+    A build fingerprinted by its design's paths (before 2026-11-03) resumes when it matches
+    them, and its state is upgraded to the content fingerprint, so it is found again from
+    any copy of its files. (A file changed in place at its old path cannot be told from the
+    one the runs used: the upgrade takes the file as it is now.)
+
+    A build resumed from moved design files records their new paths in its ``config.json``
+    (the design section only), so that a later ``--resume`` of the directory reads them there.
+
+    Raises
+    ------
+    ConfigError
+        If the directory holds another build, or anything else.
+    """
+    parts = fingerprint_parts(config, case)
+    fingerprint = _fingerprint(parts)
+    saved = directory.read_state().get(BUILD_FINGERPRINT)
+    if saved is not None and saved != fingerprint:
+        legacy = fingerprint_parts(config, case, legacy=True)
+        if saved == _fingerprint(legacy):
+            directory.write_state(**{BUILD_FINGERPRINT: fingerprint}, fingerprint_parts=parts)
+            logger.info(
+                "build fingerprint upgraded",
+                extra={"event": "surrogate_fingerprint_upgraded", "part": "design"},
+            )
+    resumed = directory.open(
+        kind=BUILD_FINGERPRINT,
+        config_text=config.model_dump_json(indent=2),
+        fingerprint=fingerprint,
+        parts=parts,
+    )
+    if resumed:
+        stored = json.loads((directory.path / "config.json").read_text())
+        design = json.loads(config.design.model_dump_json())
+        if stored.get("design") != design:
+            # The same build (its fingerprint matched), its design's files elsewhere now.
+            directory.write_config(json.dumps({**stored, "design": design}, indent=2))
     return parts
 
 
@@ -1413,13 +1483,7 @@ def _build(
     assert section.output_dir is not None
     case = _build_case(config)
     directory = SurrogateDirectory(section.output_dir)
-    parts = fingerprint_parts(config, case)
-    directory.open(
-        kind=BUILD_FINGERPRINT,
-        config_text=config.model_dump_json(indent=2),
-        fingerprint=_fingerprint(parts),
-        parts=parts,
-    )
+    _open_build(directory, config, case)
     composition.configure_logging(directory.path)
     directory.write_json(
         "provenance.json",

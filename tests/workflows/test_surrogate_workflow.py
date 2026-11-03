@@ -7,6 +7,7 @@ snapshots, fit, domain, gate, files, summary).
 """
 
 import json
+import shutil
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
@@ -1142,3 +1143,78 @@ def test_what_state_fields_refuse(tmp_path: Path) -> None:
     bad.write_text(path.read_text().replace('field_times = ["1", "2"]\n', ""))
     with pytest.raises(ConfigError, match="field_times"):
         surrogates.load_surrogate_config(bad)
+
+
+FILE_DESIGN = 'plan = "file"\ntraining = 30\nheld_out = 10\nensemble_file = "{}"'
+
+
+def test_a_design_file_counts_by_its_content_not_its_path(tmp_path: Path) -> None:
+    """2026-11-03: a build whose ensemble moves with the same content is the same build;
+    another content is refused, naming the design."""
+    _stored_prior_case(tmp_path)
+    path = write_build(tmp_path, name="moved", design=FILE_DESIGN.format("prior.npz"))
+    first = surrogates.build(path, max_runs=10)
+    assert not first.complete
+    (tmp_path / "elsewhere").mkdir()
+    shutil.copy(tmp_path / "prior.npz", tmp_path / "elsewhere" / "prior.npz")
+    path.write_text(path.read_text().replace('"prior.npz"', '"elsewhere/prior.npz"'))
+    # Resumed while incomplete (no fit yet rewrites config.json): the new path recorded.
+    assert not surrogates.build(path, max_runs=5).complete
+    stored = json.loads((first.path / "config.json").read_text())
+    assert stored["design"]["ensemble_file"].endswith("elsewhere/prior.npz")
+    assert surrogates.build(path).complete  # resumed: the same runs
+    with np.load(tmp_path / "prior.npz") as data:
+        changed = {k: data[k] + 0.5 for k in data.files}
+    np.savez(tmp_path / "elsewhere" / "prior.npz", **changed)
+    with pytest.raises(ConfigError, match="design differ"):
+        surrogates.build(path)
+
+
+def test_a_build_fingerprinted_by_its_design_path_resumes_and_is_upgraded(
+    tmp_path: Path,
+) -> None:
+    _stored_prior_case(tmp_path)
+    path = write_build(tmp_path, name="old", design=FILE_DESIGN.format("prior.npz"))
+    first = surrogates.build(path, max_runs=10)
+    config = surrogates.load_surrogate_config(path)
+    case = surrogates._build_case(config)
+    legacy = surrogates.fingerprint_parts(config, case, legacy=True)
+    assert legacy["design"] != surrogates.fingerprint_parts(config, case)["design"]
+    # As a build made before 2026-11-03 recorded itself.
+    directory = SurrogateDirectory(first.path)
+    directory.write_state(
+        surrogate_fingerprint=surrogates._fingerprint(legacy), fingerprint_parts=legacy
+    )
+    assert surrogates.build(path).complete
+    state = directory.read_state()
+    parts = surrogates.fingerprint_parts(config, case)
+    assert state["surrogate_fingerprint"] == surrogates._fingerprint(parts)
+    assert state["fingerprint_parts"] == parts
+
+
+def test_a_legacy_build_of_other_runs_is_refused_not_upgraded(tmp_path: Path) -> None:
+    _stored_prior_case(tmp_path)
+    path = write_build(tmp_path, name="other", design=FILE_DESIGN.format("prior.npz"))
+    first = surrogates.build(path, max_runs=5)
+    config = surrogates.load_surrogate_config(path)
+    legacy = surrogates.fingerprint_parts(config, surrogates._build_case(config), legacy=True)
+    stale = {**legacy, "seed": "8"}  # a legacy build of another seed
+    directory = SurrogateDirectory(first.path)
+    directory.write_state(
+        surrogate_fingerprint=surrogates._fingerprint(stale), fingerprint_parts=stale
+    )
+    with pytest.raises(ConfigError, match="seed differ"):
+        surrogates.build(path)
+    assert directory.read_state()["surrogate_fingerprint"] == surrogates._fingerprint(stale)
+
+
+def test_drawn_designs_keep_their_fingerprints(tmp_path: Path) -> None:
+    """prior and lhs plans name no file: their design part is the same as before."""
+    write_case(tmp_path)
+    for name, design in (("p", 'plan = "prior"\ntraining = 8\nheld_out = 2'),
+                         ("l", 'plan = "lhs"\ntraining = 8\nheld_out = 2')):  # fmt: skip
+        config = surrogates.load_surrogate_config(write_build(tmp_path, name=name, design=design))
+        case = surrogates._build_case(config)
+        assert surrogates.fingerprint_parts(config, case) == surrogates.fingerprint_parts(
+            config, case, legacy=True
+        )
