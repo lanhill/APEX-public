@@ -2236,6 +2236,32 @@ def test_a_report_in_a_chat_is_saved_unless_the_model_says_not(
     assert "saved" not in outside.handler(outside.arguments(run=run))  # no chat: no folder
 
 
+def test_a_follow_up_report_updates_the_chat_s_report_in_place(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #277 (2026-11-03): a section asked for went into report_x-2.md, not the report."""
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    composition.start(case.config)
+    chat = store.create("report")
+    report = {t.name: t for t in assistant.local_tools(None, chat.id)}["write_report"]
+    run = str(case.directory / "runs" / "alpha")
+
+    first = report.handler(report.arguments(run=run))
+    compared = report.handler(report.arguments(run=run, compare_with=run))
+
+    assert compared["saved"] == first["saved"]
+    assert compared["replaced"]
+    assert not first["replaced"]
+    assert "whole report" in compared["complete"]
+    assert (tmp_path / compared["saved"]).read_text() == compared["markdown"]
+    assert compared["markdown"] != first["markdown"]
+    assert not list((tmp_path / compared["saved"]).parent.glob("report_*-2.md"))
+    record = (tmp_path / compared["saved"]).parent / ".reports.json"
+    record.write_text("[]")  # a damaged record: the report counts as edited, kept
+    again = report.handler(report.arguments(run=run))
+    assert again["saved"].endswith("-2.md")
+
+
 def test_named_methods_reads_multiword_names_and_a_wrappers_inner_counts(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
@@ -2292,6 +2318,13 @@ def test_two_run_drafts_can_both_be_proposed_and_a_saved_report_is_kept(
     assert again.endswith("-2.md")
     assert path.read_text() == "my edits\n"
     assert report.handler(report.arguments(run=run))["saved"] == again  # same text, same file
+    # #277: a follow-up replaces the assistant's -2, never adds a -3, and names the kept file.
+    compared = report.handler(report.arguments(run=run, compare_with=run))
+    assert compared["saved"] == again
+    assert compared["replaced"]
+    assert path.name in compared["complete"]
+    assert (tmp_path / again).read_text() == compared["markdown"]
+    assert path.read_text() == "my edits\n"
 
 
 def test_a_comparisons_card_states_each_arms_runs_and_flags_a_fifth(
@@ -2364,3 +2397,66 @@ def test_arms_that_need_a_missing_extra_are_named_so_the_others_are_kept(
     assert "esmda_rows" not in message
     assert "keeping every other arm" in message
     assert set(call({"esmda_rows": rows})["methods"]) == {"esmda_rows"}  # the rest is planned
+
+
+def test_a_weak_comparison_is_warned_on_the_card_not_refused(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """#276 (2026-11-02): one seed and two GIES iterations compared LM damping with the case's
+    rlmmac, whose defaults also differ; the card says so, and the user decides."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    method = 'name = "gies"\nstrategy = { name = "rlmmac" }\nmax_iterations = 2'
+    linear_case(name="gies2", ensemble_size=20, method=method)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    planned = tools["plan_study"].handler(tools["plan_study"].arguments(
+        case="gies2/config.toml", goal="LM damping against the case's", budget=5000,
+        replicates=1, variants=[
+            {"name": "baseline", "rationale": "as configured"},
+            {"name": "lm", "rationale": "LM damping",
+             "patch": {"method": {"damping": {"name": "lm"}}}},
+        ]))  # fmt: skip
+    warnings = planned["design_warnings"]
+    assert warnings[0].startswith("1 replicate(s): a difference between the arms may be seed")
+    assert any("2 iteration(s) of gies" in w for w in warnings)
+    [damping] = [w for w in warnings if w.startswith("damping:")]
+    for option in ("initial", "factor", "minimum", "confirm_convergence"):
+        assert option in damping
+    assert "rlmmac (" in damping
+    assert "lm (" in damping
+
+    propose = tools["propose_action"]
+    propose.handler(propose.arguments(draft=planned["draft"], summary="Launch it."))
+    [card] = store.proposals(chat.id)
+    assert card.data["warnings"] == warnings  # shown on the card; nothing refused
+    # Three replicates and enough iterations: those warnings go, the defaults' stays.
+    three = tools["plan_study"].handler(tools["plan_study"].arguments(
+        case="gies2/config.toml", goal="LM damping against the case's", budget=5000,
+        replicates=3, name="three", variants=[
+            {"name": "baseline", "rationale": "as configured",
+             "patch": {"method": {"max_iterations": 3}}},
+            {"name": "lm", "rationale": "LM damping",
+             "patch": {"method": {"max_iterations": 3, "damping": {"name": "lm"}}}},
+        ]))  # fmt: skip
+    assert [w.split(":")[0] for w in three["design_warnings"]] == ["damping"]
+
+
+def test_design_warnings_spare_es_mda_iterations_and_alike_defaults() -> None:
+    """The review of #276: max_iterations below 3 on ES-MDA (not iterative) warned; a set
+    section and the same plugin left to the method compared as different."""
+    from types import SimpleNamespace
+
+    from apex.agents.chat import _design_warnings
+
+    cells = [SimpleNamespace(replicate=r) for r in range(3)]
+    arms = {"a": {"method.name": "esmda", "method.max_iterations": 2},
+            "b": {"method.name": "esmda", "method.max_iterations": 2}}  # fmt: skip
+    methods: dict[str, dict[str, Any]] = {
+        "a": {"name": "esmda", "max_iterations": 2, "strategy": {"name": "approx"}},
+        "b": {"name": "esmda", "max_iterations": 2},
+    }
+    assert _design_warnings(cells, arms, methods) == []
+    gies: dict[str, dict[str, Any]] = {"a": {"name": "gies", "damping": {"name": "rlmmac"}},
+                                       "b": {"name": "gies"}}  # fmt: skip
+    flat = {k: {"method.name": "gies"} for k in gies}
+    assert _design_warnings(cells, flat, gies) == []  # rlmmac set, and rlmmac by default

@@ -1032,3 +1032,113 @@ def test_a_build_stopped_in_its_coarse_runs_resumes_to_identical_files(tmp_path:
         assert (finished.path / "model" / name).read_bytes() == (
             whole.path / "model" / name
         ).read_bytes()
+
+
+# ------------------------------------------------------------- state fields
+
+
+class _AffineFields(_Affine):
+    """The affine test plugin that also maps the inputs to state fields (``predict_fields``)."""
+
+    field_weights: dict[str, NDArray[np.float64]]
+    field_times: tuple[str, ...]
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        super().fit(snapshots, rng)
+        design = np.vstack([self._stack(snapshots.inputs), np.ones((1, snapshots.n_runs))])
+        self.field_times = snapshots.field_times
+        self.field_weights = {}
+        for name, values in snapshots.fields.items():
+            flat = values.reshape(-1, snapshots.n_runs)  # (cells * times, n)
+            solved = np.linalg.lstsq(design.T, flat.T, rcond=None)[0].T
+            self.field_weights[name] = np.ascontiguousarray(solved)
+
+    def predict_fields(
+        self, inputs: SurrogateInputs, names: Sequence[str], times: Sequence[str]
+    ) -> dict[str, NDArray[np.float64]]:
+        stacked = self._stack(inputs)
+        found = {}
+        for name in names:
+            w = self.field_weights[name]
+            flat = w[:, :-1] @ stacked + w[:, -1:]
+            cube = flat.reshape(-1, len(self.field_times), stacked.shape[1])
+            found[name] = cube[:, [self.field_times.index(t) for t in times]]
+        return found
+
+    def to_arrays(self) -> SurrogateParts:
+        own, arrays = super().to_arrays()
+        own = {**own, "field_times": list(self.field_times), "fields": sorted(self.field_weights)}
+        return own, {**arrays, **{f"field_{n}": w for n, w in self.field_weights.items()}}
+
+    @classmethod
+    def from_arrays(
+        cls, manifest: Mapping[str, object], arrays: Mapping[str, NDArray[np.generic]]
+    ) -> Self:
+        model = super().from_arrays(manifest, arrays)
+        model.field_times = tuple(manifest["field_times"])  # type: ignore[arg-type]
+        model.field_weights = {
+            str(n): np.asarray(arrays[f"field_{n}"], np.float64)
+            for n in manifest["fields"]  # type: ignore[attr-defined]
+        }
+        return model
+
+
+def _field_case(folder: Path) -> None:
+    """The linear case whose simulator also answers PRESSURE over 5 cells at times 1 and 2."""
+    write_case(folder, simulator_extra='fields = [["1", "PRESSURE", 5], ["2", "PRESSURE", 5]]')
+    rng = np.random.default_rng(2)
+    scalar = np.load(folder / "forward.npz")["matrix"]
+    np.savez(folder / "forward.npz", matrix=np.vstack([scalar, rng.standard_normal((10, 3))]))
+
+
+FIELDS = 'fields = ["PRESSURE"]\nfield_times = ["1", "2"]\nfield_cells = 5'
+
+
+def test_a_build_saves_state_fields_and_gates_their_prediction(tmp_path: Path) -> None:
+    """[case] fields snapshot every run's fields; the gate judges them."""
+    surrogate_models.register("test_affine_fields")(_AffineFields)
+    try:
+        _field_case(tmp_path)
+        path = write_build(tmp_path, name="fields")
+        path.write_text(
+            path.read_text()
+            .replace('model = "test_affine_build"', 'model = "test_affine_fields"')
+            .replace('config_file = "case.toml"', f'config_file = "case.toml"\n{FIELDS}')
+        )
+        result = surrogates.build(path)
+        assert result.complete
+        snapshots = load_snapshots(result.path / "snapshots.npz")
+        assert snapshots.field_times == ("1", "2")
+        assert snapshots.fields["PRESSURE"].shape == (5, 2, 25)  # training and held out
+        gate = json.loads((result.path / "gate.json").read_text())
+        assert any(d["datatype"] == "PRESSURE" for d in gate["datatypes"])
+        assert gate["passed"]
+        manifest = read_surrogate(result.path / "model" / "surrogate.json").manifest
+        assert manifest.fields == ["PRESSURE"]
+        assert manifest.field_times == ["1", "2"]
+        config = surrogates.load_surrogate_config(path)
+        assert "fields" in surrogates.fingerprint_parts(config, surrogates._build_case(config))
+        check = surrogates.check_surrogate(
+            result.path / "model" / "surrogate.json", tmp_path / "case.toml", runs=4, seed=9
+        )
+        assert check.summary.passed, check.summary.notes
+        assert check.summary.gate is not None
+        assert any(d.datatype == "PRESSURE" for d in check.summary.gate.datatypes)
+    finally:
+        surrogate_models.remove("test_affine_fields")
+
+
+def test_what_state_fields_refuse(tmp_path: Path) -> None:
+    _field_case(tmp_path)
+    path = write_build(tmp_path, name="plain")
+    path.write_text(
+        path.read_text().replace(
+            'config_file = "case.toml"', f'config_file = "case.toml"\n{FIELDS}'
+        )
+    )
+    with pytest.raises(ConfigError, match="predicts no fields"):
+        surrogates.build(path)
+    bad = tmp_path / "untimed.toml"
+    bad.write_text(path.read_text().replace('field_times = ["1", "2"]\n', ""))
+    with pytest.raises(ConfigError, match="field_times"):
+        surrogates.load_surrogate_config(bad)

@@ -32,7 +32,7 @@ from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.progress import GuardedProgress, NullProgress, ProgressReporter
 from apex.core.simulation import Executor, MemberFailure, MemberInput, Simulator
-from apex.core.surrogates import CoarseCorrectedSurrogate, SurrogateModel
+from apex.core.surrogates import CoarseCorrectedSurrogate, FieldSurrogate, SurrogateModel
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
     DomainExtent,
@@ -288,7 +288,15 @@ def fit_and_gate(
         and held_out.coarse_outputs is not None
     ):
         coarse = (training.coarse_outputs, held_out.coarse_outputs)
-    domain = training_domain(model, training.inputs, held_out.inputs, coarse=coarse, extent=extent)
+    names = tuple(sorted(training.fields))
+    if names and not isinstance(model, FieldSurrogate):
+        raise WorkflowError(
+            "the snapshots hold state fields, but the surrogate predicts none (predict_fields)"
+        )
+    domain = training_domain(
+        model, training.inputs, held_out.inputs, coarse=coarse, extent=extent,
+        fields=names, field_times=training.field_times if names else (),
+    )  # fmt: skip
     began = clock()
     if isinstance(model, CoarseCorrectedSurrogate) and coarse is not None:
         predicted = np.ascontiguousarray(
@@ -296,6 +304,12 @@ def fit_and_gate(
         )
     else:
         predicted = np.ascontiguousarray(model.predict(held_out.inputs, training.keys))
+    fields = None
+    if names:
+        # The state fields gated by relative errors (pressure on its change).
+        assert isinstance(model, FieldSurrogate)
+        predicted_fields = model.predict_fields(held_out.inputs, names, training.field_times)
+        fields = {n: (np.asarray(predicted_fields[n]), held_out.fields[n]) for n in names}
     prediction_seconds = (clock() - began) / max(held_out.n_runs, 1)
     verdict = gate(
         predicted,
@@ -305,6 +319,7 @@ def fit_and_gate(
         tolerances=tolerances,
         variances=variances,
         kinds=kinds,
+        fields=fields,
         failed=failed,
     )
     logger.info(

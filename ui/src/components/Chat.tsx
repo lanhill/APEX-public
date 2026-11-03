@@ -14,7 +14,7 @@ import type { Route } from "../router";
 import { follow } from "../sse";
 import { href } from "../router";
 import { visibleAgents } from "../agents";
-import { armRunsOf, assumptionsOf, launchKind, unmatchedOf } from "../proposals";
+import { armRunsOf, assumptionsOf, launchKind, unmatchedOf, warningsOf } from "../proposals";
 import { ErrorBox, Time, useApi, useCan, usePaths } from "./common";
 import { withoutAdr } from "../text";
 
@@ -597,6 +597,7 @@ function ProposalCard({
   const cost = proposal.data.cost;
   const unmatched = unmatchedOf(proposal);
   const arms = armRunsOf(proposal);
+  const warnings = warningsOf(proposal);
   return (
     <div className="proposal" role="group" aria-label="proposal">
       <strong>Proposed: launch {what === "run" ? "a run" : what === "optimization" ? "an optimization" : "a study"}</strong>
@@ -610,6 +611,18 @@ function ProposalCard({
           Simulator runs per arm (one replicate):{" "}
           {arms.map(([label, runs]) => `${label}: ${runs.toLocaleString()}`).join(" · ")}
         </p>
+      )}
+      {warnings.length > 0 && (
+        <div className="assumptions">
+          <p id={`warnings-${chat}-${proposal.n}`}>
+            <strong>May not answer the question</strong> (your decision; launching is allowed):
+          </p>
+          <ul aria-labelledby={`warnings-${chat}-${proposal.n}`}>
+            {warnings.map((item, i) => (
+              <li key={i}>{withoutAdr(item)}</li>
+            ))}
+          </ul>
+        </div>
       )}
       {unmatched.length > 0 && (
         <div className="assumptions">

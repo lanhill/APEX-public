@@ -356,6 +356,12 @@ class SurrogateDirectory:
             arrays[f"input_{i}"] = snapshots.inputs[variable.name]
         if snapshots.coarse_outputs is not None:
             arrays["coarse_outputs"] = snapshots.coarse_outputs
+        if snapshots.fields:
+            # State fields, in the same file: one digest covers them.
+            arrays["field_names"] = np.array(json.dumps(sorted(snapshots.fields)))
+            arrays["field_times"] = np.array(json.dumps(list(snapshots.field_times)))
+            for i, name in enumerate(sorted(snapshots.fields)):
+                arrays[f"field_{i}"] = snapshots.fields[name]
         path = self.path / SNAPSHOTS
         _save_npz(path, arrays)
         return path
@@ -377,6 +383,7 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 for v in json.loads(str(data["layout"]))
             ])  # fmt: skip
             keys = tuple(DataKey(t, d, i) for t, d, i in json.loads(str(data["keys"])))
+            names = json.loads(str(data["field_names"])) if "field_names" in data.files else []
             snapshots = SnapshotSet(
                 layout=layout,
                 inputs={v.name: data[f"input_{i}"] for i, v in enumerate(layout.variables)},
@@ -386,6 +393,8 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 failed=tuple(int(i) for i in data["failed"]),
                 provenance=SnapshotProvenance.model_validate_json(str(data["provenance"])),
                 coarse_outputs=data["coarse_outputs"] if "coarse_outputs" in data.files else None,
+                fields={str(n): data[f"field_{i}"] for i, n in enumerate(names)},
+                field_times=tuple(json.loads(str(data["field_times"]))) if names else (),
             )
             recorded = str(data["digest"])
     except (OSError, KeyError, ValueError) as error:

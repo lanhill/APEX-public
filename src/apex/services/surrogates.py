@@ -60,11 +60,12 @@ from apex.core.errors import (
 )
 from apex.core.plugins import executors, priors, surrogate_designs, surrogate_models
 from apex.core.progress import ProgressReporter
-from apex.core.simulation import Executor, Simulator
+from apex.core.simulation import CaseFileSimulator, Executor, Simulator
 from apex.core.surrogates import (
     AdaptiveDesign,
     BuiltinDesign,
     CoarseCorrectedSurrogate,
+    FieldSurrogate,
     SurrogateModel,
 )
 from apex.domain.config import HistoryMatchConfig, PluginSection, SurrogateRunSection
@@ -93,6 +94,9 @@ from apex.domain.surrogate import (
 from apex.services import composition
 from apex.services.identity import code_version, tree_hash
 from apex.services.plugins import check_options
+from apex.simulation.deck import deck_layout, restart_schedule
+from apex.simulation.geophysics import GeophysicsSimulator
+from apex.simulation.state_fields import StateFieldModel, field_keys, split_fields
 from apex.simulation.surrogate import SurrogateSimulator
 from apex.storage import provenance
 from apex.storage.inputs import read_observation_section
@@ -405,6 +409,8 @@ class SurrogateCase:
         Where the full runs go.
     provenance
         The stack's provenance (without the design's plan and seed).
+    fields, field_times, field_cells
+        The state fields every run also saves, the dates and the cells.
     """
 
     config: HistoryMatchConfig
@@ -418,6 +424,16 @@ class SurrogateCase:
     provenance: SnapshotProvenance
     coarse_simulator: Simulator | None = None
     coarse_config: HistoryMatchConfig | None = None
+    fields: tuple[str, ...] = ()
+    field_times: tuple[str, ...] = ()
+    field_cells: int = 0
+
+    @property
+    def run_keys(self) -> tuple[DataKey, ...]:
+        """The keys each full run answers: the surrogate's, then the fields' (field-major)."""
+        if not self.fields:
+            return self.keys
+        return (*self.keys, *field_keys(self.fields, self.field_times, self.field_cells))
 
 
 def _refuse(case: HistoryMatchConfig) -> None:
@@ -505,6 +521,9 @@ def surrogate_case(
     execution: PluginSection | None,
     output_dir: Path,
     coarse: CoarseSection | None = None,
+    fields: Sequence[str] = (),
+    field_times: Sequence[str] = (),
+    field_cells: int | None = None,
 ) -> SurrogateCase:
     """Compose the stack a build (or a check) runs, from the case's configuration.
 
@@ -528,7 +547,10 @@ def surrogate_case(
         stack = composition.forecast_stack(case, layout)
         properties = PropertyMap(composition.build_parameterizations(case), layout)
         executor = executors.create(case.execution.name, **case.execution.options)
-        simulator = parameterized(stack.simulator, properties)
+        inner, cells = stack.simulator, 0
+        if fields:
+            inner, cells = _field_stack(case, stack.simulator, fields, field_times, field_cells)
+        simulator = parameterized(inner, properties)
         composition.check_executor(executor, simulator)
         composition.prepare_remote(executor, simulator, case)
     except (TypeError, ValueError, PluginError) as error:
@@ -551,7 +573,73 @@ def surrogate_case(
         provenance=provenance_,
         coarse_simulator=coarse_simulator,
         coarse_config=coarse_config,
+        fields=tuple(str(f).upper() for f in fields),
+        field_times=tuple(field_times),
+        field_cells=cells,
     )
+
+
+def _field_stack(
+    case: HistoryMatchConfig,
+    simulator: Simulator,
+    fields: Sequence[str],
+    times: Sequence[str],
+    cells: int | None,
+) -> tuple[Simulator, int]:
+    """Return the stack that also answers the state fields' keys, and the fields' cells.
+
+    A deck simulator is wrapped with :class:`~apex.simulation.state_fields.StateFieldModel`
+    (restart arrays on the deck's grid, ``DIMENS``/``SPECGRID``); any other simulator must
+    answer the field keys itself (``field_cells`` given), e.g. ``linear`` with ``fields``.
+
+    Raises
+    ------
+    ConfigError
+        If the case has ``[geophysics]`` (its field keys would clash), or the cells cannot be
+        known.
+    """
+    if case.geophysics is not None:
+        raise ConfigError(
+            "[case] fields with a [geophysics] case: build field surrogates on its flow stack "
+            "(a case without [geophysics])"
+        )
+    if isinstance(simulator, CaseFileSimulator):
+        template = case.simulator.options.get("deck_template_file")
+        grid: list[int] | None = None
+        case_dir = case.simulator.options.get("case_dir")
+        if template is not None:
+            found = deck_layout(
+                Path(str(template)), None if case_dir is None else Path(str(case_dir))
+            ).get("grid")
+            grid = None if not isinstance(found, list | tuple) else [int(v) for v in found]
+        if grid is None and cells is None:
+            raise ConfigError(
+                "[case] fields: the deck's grid (DIMENS or SPECGRID) cannot be read from its "
+                "template; give field_cells"
+            )
+        if template is not None:
+            # Before any run (as [geophysics]' vintages): a date the deck certainly writes no
+            # restart at would fail every member.
+            schedule = restart_schedule(
+                Path(str(template)), None if case_dir is None else Path(str(case_dir))
+            )
+            missing = schedule.missing([dt.date.fromisoformat(t) for t in times])
+            if missing and not schedule.unresolved:
+                raise ConfigError(
+                    "[case] fields: the deck writes no restart at "
+                    + ", ".join(d.isoformat() for d in missing)
+                    + " (give each field time a report time and a restart, e.g. RPTRST BASIC=2)"
+                )
+        total = int(np.prod(grid)) if grid is not None else int(cells or 0)
+        if cells is not None and cells != total:
+            raise ConfigError(f"[case] field_cells = {cells}, but the deck's grid has {total}")
+        return GeophysicsSimulator(simulator, StateFieldModel(fields, times, total)), total
+    if cells is None:
+        raise ConfigError(
+            f"[case] fields with the {case.simulator.name!r} simulator, which has no restart "
+            "files: give field_cells, and the simulator must answer the field keys itself"
+        )
+    return simulator, int(cells)
 
 
 @dataclass(frozen=True)
@@ -810,6 +898,17 @@ def design_plan(config: SurrogateConfig) -> BuiltinDesign | AdaptiveDesign:
             f"[coarse] doubles the runs, but the surrogate {config.surrogate.model!r} does not "
             "correct a coarse simulation: remove [coarse] or use a coarse-corrected plugin"
         )
+    if config.case.fields:
+        # The state fields are saved for a field surrogate, and gated.
+        if factory is not None and not callable(getattr(factory, "predict_fields", None)):
+            raise ConfigError(
+                f"[case] fields: the surrogate {config.surrogate.model!r} predicts no fields "
+                "(predict_fields); use a field surrogate (unet_fields) or remove fields"
+            )
+        if config.coarse is not None:
+            raise ConfigError("[case] fields with a [coarse] stack are not supported yet")
+        if name == "run":
+            raise ConfigError("plan 'run' reuses a run's forecasts, which hold no fields")
     try:
         plan = surrogate_designs.create(name, **config.design.options)
     except UnknownPluginError as error:
@@ -822,10 +921,10 @@ def design_plan(config: SurrogateConfig) -> BuiltinDesign | AdaptiveDesign:
         if config.coarse is not None and name == "run":
             raise ConfigError("plan 'run' has no coarse runs: [coarse] needs a drawn design")
         return plan
-    if config.coarse is not None:
+    if config.coarse is not None or config.case.fields:
         raise ConfigError(
-            f"the adaptive plan {name!r} with a [coarse] stack is not supported yet: its fits "
-            "between batches would need the coarse runs too"
+            f"the adaptive plan {name!r} with a [coarse] stack or [case] fields is not "
+            "supported yet: its fits between batches would need them too"
         )
     if not (isinstance(plan, AdaptiveDesign) and getattr(plan, "adaptive", False)):
         raise ConfigError(f"the design plan {name!r} is neither core's nor an adaptive plan")
@@ -945,6 +1044,10 @@ def fingerprint_parts(config: SurrogateConfig, case: SurrogateCase) -> dict[str,
         design.pop("options", None)
     parts["design"] = _digest(design)
     parts["seed"] = str(config.surrogate.seed)
+    if case.fields:
+        # The runs save the fields too: absent without them.
+        parts["fields"] = _digest({"fields": list(case.fields), "times": list(case.field_times),
+                                   "cells": case.field_cells})  # fmt: skip
     if config.coarse is not None and case.provenance.coarse is not None:
         # The coarse stack's runs are runs too: what shapes them (absent without one).
         coarse = case.provenance.coarse.model_dump(
@@ -1094,6 +1197,8 @@ def _build_case(config: SurrogateConfig) -> SurrogateCase:
     return surrogate_case(
         case_config, keys, variances, execution=config.execution,
         output_dir=config.surrogate.output_dir, coarse=config.coarse,
+        fields=config.case.fields, field_times=config.case.field_times,
+        field_cells=config.case.field_cells,
     )  # fmt: skip
 
 
@@ -1123,13 +1228,19 @@ def _snapshot_set(
     ]  # fmt: skip
     state = {k: np.ascontiguousarray(v[:, columns]) for k, v in blocks.items()}
     inputs = case.properties.ensemble(state)
+    n_keys = len(case.keys)
+    values = np.stack([outputs[int(ids[j])] for j in columns], axis=-1).reshape(
+        len(case.run_keys), len(columns)
+    )
     return SnapshotSet(
         layout=case.input_layout,
         inputs={k: np.ascontiguousarray(v) for k, v in inputs.items()},
         keys=case.keys,
-        outputs=np.stack([outputs[int(ids[j])] for j in columns], axis=-1).reshape(
-            len(case.keys), len(columns)
-        ),
+        outputs=np.ascontiguousarray(values[:n_keys]),
+        fields=split_fields(values[n_keys:], case.fields, case.field_times, case.field_cells)
+        if case.fields
+        else {},
+        field_times=case.field_times,
         run_ids=tuple(int(ids[j]) for j in columns),
         provenance=provenance_,
         failed=tuple(int(m) for m in failed),
@@ -1232,7 +1343,7 @@ def _run_adaptive(
         )
         before = len(directory.journal())
         outcome = run_members(
-            directory, case.simulator, case.executor, members, case.keys, label="design",
+            directory, case.simulator, case.executor, members, case.run_keys, label="design",
             keep_simulations=keep, max_runs=budget, progress=progress,
         )  # fmt: skip
         if budget is not None:
@@ -1381,7 +1492,7 @@ def _build(
                 design.training_ids, design.training
             )
             outcome = run_members(
-                directory, case.simulator, case.executor, members, case.keys, label="design",
+                directory, case.simulator, case.executor, members, case.run_keys, label="design",
                 keep_simulations=keep, max_runs=max_runs, progress=progress,
             )  # fmt: skip
         else:
@@ -1736,6 +1847,9 @@ def check_surrogate(
         case = surrogate_case(
             case_config, keys, variances, execution=None, output_dir=folder,
             coarse=coarse_section,
+            # The fields it was trained and gated on, on the same cells.
+            fields=manifest.fields, field_times=manifest.field_times,
+            field_cells=_field_cells(trained) if manifest.fields else None,
         )  # fmt: skip
         mismatches = manifest.provenance.stack_mismatches(case.provenance)
         if mismatches:
@@ -1763,7 +1877,7 @@ def check_surrogate(
         outcome = run_members(
             directory, case.simulator, case.executor,
             _members(design.held_out_ids, design.held_out),
-            case.keys, label="check", max_runs=max_runs, progress=progress,
+            case.run_keys, label="check", max_runs=max_runs, progress=progress,
         )  # fmt: skip
         # What is left of max_runs for the coarse stack: less the fine runs made now.
         left = (
@@ -1838,7 +1952,12 @@ def check_surrogate(
                 predicted = np.ascontiguousarray(loaded.model.predict(gated.inputs, case.keys))
             kinds = {d.datatype: d.kind for d in (manifest.gate.datatypes if manifest.gate else [])
                      if d.kind is not None}  # fmt: skip
-            verdict = gate(predicted, gated.outputs, case.keys, gated.run_ids,
+            fields = None
+            if case.fields and isinstance(loaded.model, FieldSurrogate):
+                names = tuple(sorted(gated.fields))
+                rebuilt = loaded.model.predict_fields(gated.inputs, names, gated.field_times)
+                fields = {n: (np.asarray(rebuilt[n]), gated.fields[n]) for n in names}
+            verdict = gate(predicted, gated.outputs, case.keys, gated.run_ids, fields=fields,
                            tolerances=tolerances, variances=case.variances, kinds=kinds,
                            failed=sorted(failed_ids))  # fmt: skip
         else:
@@ -1866,6 +1985,13 @@ def check_surrogate(
                    "passed": summary.passed, "outside": len(outside)},
         )  # fmt: skip
         return CheckResult(directory.path, summary)
+
+
+def _field_cells(trained: SnapshotSet) -> int | None:
+    """Return the cells of the fields a model's snapshots hold (``None``: none recorded)."""
+    if not trained.fields:
+        return None
+    return int(next(iter(trained.fields.values())).shape[0])
 
 
 def _check_design(

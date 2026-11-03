@@ -11,7 +11,7 @@ import pytest
 
 from apex.algorithms.surrogates.gate import gate, quantity_kind
 from apex.domain.observations import DataKey
-from apex.domain.surrogate import GateResult, GateTolerances
+from apex.domain.surrogate import DatatypeGate, GateResult, GateTolerances
 
 
 def _keys(datatype: str, n: int) -> list[DataKey]:
@@ -83,9 +83,8 @@ def test_a_constant_reference_is_judged_by_its_magnitude_and_zero_by_exact_agree
     assert not failed.passed
 
 
-def test_a_shut_well_and_a_noisy_cell_are_judged_against_their_neighbours_scale() -> None:
-    """SCALE_FLOOR: a shut well's zero rates against the other wells' WOPR, a cell whose
-    pressure changes by solver noise against the field's largest change."""
+def test_a_shut_well_is_judged_against_its_neighbours_scale() -> None:
+    """SCALE_FLOOR: a shut well's zero rates against the other wells' WOPR."""
     keys = _keys("WOPR:P1", 2) + _keys("WOPR:P2", 2)
     simulator = np.array([[100.0], [200.0], [0.0], [0.0]])
     surrogate = simulator + np.array([[0.0], [0.0], [1e-13], [-1e-13]])
@@ -98,14 +97,6 @@ def test_a_shut_well_and_a_noisy_cell_are_judged_against_their_neighbours_scale(
     # A real error on the shut well is still seen: 0.5 / 0.2 = 2.5.
     surrogate[3, 0] = 0.5
     assert gate(surrogate, simulator, keys, [0]).datatypes[1].error == pytest.approx(2.5)
-
-    reference = np.array([[[100.0], [100.0 + 1e-9]], [[200.0], [220.0]]])
-    noisy = reference.copy()
-    noisy[0, 1, 0] += 1e-6  # 1e-6 / max(1e-9, 1e-3 * 20)
-    entry = gate(np.zeros((0, 1)), np.zeros((0, 1)), [], [0],
-                 fields={"PRESSURE": (noisy, reference)}).datatypes[0]  # fmt: skip
-    assert entry.error == pytest.approx(5e-5)
-    assert entry.passed
 
 
 def test_a_pressure_is_judged_by_its_change_and_by_magnitude_only_if_none_changes() -> None:
@@ -199,19 +190,49 @@ def test_the_rank_correlation_of_objectives_is_spearmans_rho() -> None:
     assert not flat.passed
 
 
-def test_fields_are_gated_cell_by_cell_over_time() -> None:
+def _field(fields: dict[str, tuple[np.ndarray, np.ndarray]]) -> list[DatatypeGate]:
+    return gate(np.zeros((0, 1)), np.zeros((0, 1)), [], [0], fields=fields).datatypes
+
+
+def test_fields_are_gated_by_a_pooled_relative_rms() -> None:
+    """RMS error over cells, times and runs, against a
+    pressure's RMS change from the first time (by hand: sqrt(0.64 / 6) / sqrt(1000 / 6))."""
     # Two cells, three times, one run: pressure rising by 10 per step in each cell.
     reference = np.array([[[100.0], [110.0], [120.0]], [[200.0], [210.0], [220.0]]])
     surrogate = reference.copy()
-    surrogate[1, 2, 0] += 0.8  # 0.8 of the cell's change 20: 0.04
-
-    result = gate(np.zeros((0, 1)), np.zeros((0, 1)), [], [0],
-                  fields={"PRESSURE": (surrogate, reference)})  # fmt: skip
-
-    [entry] = result.datatypes
+    surrogate[1, 2, 0] += 0.8
+    [entry] = _field({"PRESSURE": (surrogate, reference)})
+    assert entry.measure == "field_rms"
     assert entry.kind == "pressure"
-    assert entry.error == pytest.approx(0.04)
-    assert result.passed
+    assert entry.scale == "change"
+    assert entry.error == pytest.approx(np.sqrt(0.64 / 1000.0))
+    assert entry.passed
+
+
+def test_a_cell_that_barely_changes_does_not_fail_a_field() -> None:
+    """Review case: a cell changing by 1e-9 with a 1e-6 error failed the cell-wise gate."""
+    reference = np.array([[[100.0], [100.0 + 1e-9]], [[200.0], [220.0]]])
+    noisy = reference.copy()
+    noisy[0, 1, 0] += 1e-6
+    [entry] = _field({"PRESSURE": (noisy, reference)})
+    # sqrt(1e-12 / 4) / sqrt((1e-18 + 400) / 4)
+    assert entry.error == pytest.approx(1e-6 / 20.0, rel=1e-6)
+    assert entry.passed
+
+
+def test_saturations_by_their_range_and_inactive_cells_left_out() -> None:
+    reference = np.array([[[0.2], [0.5]], [[0.2], [0.8]], [[0.0], [0.0]]])  # cell 2 inactive
+    surrogate = reference.copy()
+    surrogate[1, 1, 0] += 0.06
+    [entry] = _field({"SWAT": (surrogate, reference)})
+    assert entry.kind == "other"
+    assert entry.scale == "range"
+    assert entry.values == 4  # the inactive cell is left out
+    assert entry.error == pytest.approx(np.sqrt(0.06**2 / 4) / 0.6)
+    flat = np.full((2, 2, 1), 0.3)
+    [constant] = _field({"SWAT": (flat + 0.003, flat)})
+    assert constant.scale == "magnitude"
+    assert constant.error == pytest.approx(0.01)
 
 
 def test_nothing_gated_does_not_pass_and_failures_are_recorded() -> None:

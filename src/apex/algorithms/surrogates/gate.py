@@ -28,6 +28,14 @@ vector changes at all, and the result says so (``scale``, ``notes``). The "first
 series' first *gated* time: a pressure series that starts after the first time gated is
 noted, since its change may be up to twice smaller than from the initial value.
 
+**Fields** (state fields of field surrogates, the user, 2026-11-02): one
+pooled relative RMS per field over its cells, times and held-out runs (the measure of the
+R-U-Net literature), ``e = RMS(s - y) / scale`` against the kind's tolerance, where ``scale``
+is a pressure's RMS change from the first time, and other fields' range (max - min). Cells
+that are 0 in every run, time and both arrays (inactive) are left out. A cell-by-cell
+relative error, as for series, would let a cell that barely changes fail any learned field
+(a 10 % RMS error scored 22.9 against 0.05 in the review).
+
 With observation errors the criterion is the RMS; the largest single ``|s - y| / sigma`` of a
 datatype is recorded beside it (``max_sigma_ratio``), so that one key far off shows.
 
@@ -164,6 +172,47 @@ def _spearman(a: NDArray[np.float64], b: NDArray[np.float64]) -> float | None:
     if denominator == 0:
         return None
     return float(np.sum(ra * rb) / denominator)
+
+
+def _field_gate(
+    name: str,
+    kind: QuantityKind,
+    predicted: NDArray[np.float64],
+    reference: NDArray[np.float64],
+    limit: float,
+) -> DatatypeGate:
+    """Return one field's pooled relative RMS gate (module docstring).
+
+    ``predicted`` and ``reference`` are ``(n_cells, n_times, n_runs)``.
+    """
+    zero = np.all((reference == 0) & (predicted == 0), axis=(1, 2))
+    s, y = predicted[~zero], reference[~zero]
+    notes: list[str] = []
+    if y.size == 0:
+        return DatatypeGate(
+            datatype=name, measure="field_rms", kind=kind, error=None, tolerance=limit,
+            values=0, passed=False, notes=["no cell of the field is ever non-zero"],
+        )  # fmt: skip
+    error_rms = float(np.sqrt(np.mean((s - y) ** 2)))
+    scale_name: Literal["change", "magnitude", "range"]
+    if kind == "pressure":
+        scale_name = "change"
+        scale = float(np.sqrt(np.mean((y - y[:, :1, :]) ** 2)))
+        if scale == 0:
+            scale_name, scale = "magnitude", float(np.sqrt(np.mean(y**2)))
+            notes.append("no cell changes: judged on its magnitude")
+    else:
+        scale_name, scale = "range", float(np.max(y) - np.min(y))
+        if scale == 0:
+            scale_name, scale = "magnitude", float(np.max(np.abs(y)))
+            notes.append("the field is constant: judged on its magnitude")
+    error = error_rms / scale if scale > 0 else float("inf")
+    if not np.all(np.isfinite(s)):
+        error = float("nan")
+    return DatatypeGate(
+        datatype=name, measure="field_rms", kind=kind, error=_finite(error), scale=scale_name,
+        notes=notes, tolerance=limit, values=int(y.size), passed=bool(error <= limit),
+    )  # fmt: skip
 
 
 def gate(
@@ -308,29 +357,7 @@ def gate(
         if not np.all(np.isfinite(fy)):
             raise ValueError(f"the simulator's field {name!r} must be finite")
         kind = kinds.get(name) or quantity_kind(name)
-        # Each cell is a series over time: (n_times, n_cells * n_runs).
-        n_cells, n_times, _ = fs.shape
-        flat_s = np.ascontiguousarray(fs.transpose(1, 0, 2).reshape(n_times, n_cells * n_runs))
-        flat_y = np.ascontiguousarray(fy.transpose(1, 0, 2).reshape(n_times, n_cells * n_runs))
-        part = _part(flat_s, flat_y)
-        scale = _pool_scale(kind, [part])
-        error = _relative([part], [part], scale)
-        limit = tolerances.relative[kind]
-        entries.append(
-            DatatypeGate(
-                datatype=name,
-                measure="relative",
-                kind=kind,
-                error=_finite(error),
-                scale=scale,
-                notes=["no cell changes: judged on its magnitude"]
-                if kind == "pressure" and scale == "magnitude"
-                else [],
-                tolerance=limit,
-                values=int(fs.size),
-                passed=bool(error <= limit),
-            )
-        )
+        entries.append(_field_gate(name, kind, fs, fy, tolerances.relative[kind]))
     rank = None
     if objectives is not None:
         a = np.asarray(objectives[0], dtype=np.float64).reshape(-1)

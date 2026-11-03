@@ -77,6 +77,7 @@ nav:
       - guide/plugins/converter_skills.md
       - guide/plugins/variogram_estimators.md
       - guide/cli/surrogate.md
+      - guide/plugins/surrogate_designs.md
   - Reference:
       - reference/agents.md
       - reference/assistant-tools.md

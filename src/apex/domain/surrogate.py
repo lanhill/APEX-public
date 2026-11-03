@@ -53,7 +53,7 @@ QuantityKind = Literal["pressure", "rate", "plume", "mass", "other"]
 
 #: How a datatype was gated: against the observation error (``sigma_ratio``) or relative to
 #: the reference's scale (``relative``).
-GateMeasure = Literal["sigma_ratio", "relative"]
+GateMeasure = Literal["sigma_ratio", "relative", "field_rms"]
 
 #: The shape of a domain beyond its box: none, the convex hull of the validated coordinates,
 #: or their Mahalanobis ellipsoid.
@@ -642,18 +642,20 @@ class DatatypeGate(_Frozen):
         default=None, description="The kind of quantity, for a relative measure."
     )
     error: float | None = Field(
-        description="RMS error / sigma, or the largest relative error; None: not finite "
-        "(a prediction that is not finite, or an error against a reference of scale 0)."
+        description="RMS error / sigma, the largest relative error, or a field's pooled "
+        "relative RMS error; None: not finite (a prediction that is not finite, or an error "
+        "against a reference of scale 0)."
     )
     max_sigma_ratio: float | None = Field(
         default=None,
         description="The largest |surrogate - simulator| / sigma of one value (sigma_ratio "
         "only; the RMS is the criterion, this shows a single key far off).",
     )
-    scale: Literal["change", "magnitude"] | None = Field(
+    scale: Literal["change", "magnitude", "range"] | None = Field(
         default=None,
-        description="What relative errors were taken against: a pressure's change, or the "
-        "magnitude (every other kind, and pressures of a vector that never changes).",
+        description="What relative errors were taken against: a pressure's change, the "
+        "magnitude (every other kind of series, and pressures that never change), or a "
+        "field's range (fields other than pressures).",
     )
     notes: list[str] = Field(
         default_factory=list, description="Warnings about how the datatype was judged."
@@ -867,6 +869,31 @@ class SurrogateCaseSection(_Frozen):
         description="`observations`: the case's observed keys (every role), gated against "
         "their observation errors; or `{ vectors, times }`, gated by relative errors.",
     )
+    fields: list[str] = Field(
+        default_factory=list,
+        description="State fields every run also saves (restart arrays such as PRESSURE, "
+        "SWAT) for field surrogates, gated by relative errors.",
+    )
+    field_times: list[str] = Field(
+        default_factory=list,
+        description="The dates (ISO) the fields are saved at; required with `fields`.",
+    )
+    field_cells: int | None = Field(
+        default=None,
+        gt=0,
+        description="The fields' cells, for a simulator that answers field keys itself; a "
+        "deck's grid gives them otherwise.",
+    )
+
+    @model_validator(mode="after")
+    def _fields_have_times(self) -> "SurrogateCaseSection":
+        if self.fields and not self.field_times:
+            raise ValueError("[case] fields need field_times (the dates they are saved at)")
+        if self.field_times and not self.fields:
+            raise ValueError("[case] field_times without fields")
+        if len({f.upper() for f in self.fields}) != len(self.fields):
+            raise ValueError("[case] fields repeat a name (restart arrays ignore case)")
+        return self
 
 
 class DesignSection(_Frozen):

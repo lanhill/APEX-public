@@ -137,6 +137,28 @@ options = { dims = [50, 50, 1], factors = [2, 2, 1], means = { poro = "arithmeti
   - a coarse stack with an adaptive or `run` design;
   - reusing a forecast's coarse runs after a resume: they are made again, with the same results.
 
+## State fields
+
+A field surrogate, one that predicts state fields as well as data, is built on snapshots of those fields. The build's `[case]` names them:
+
+```toml
+[case]
+config_file = "case.toml"
+fields = ["PRESSURE", "SWAT"]               # restart arrays
+field_times = ["2025-01-01", "2026-01-01"]  # ISO dates
+```
+
+- **Deck simulators** (`opm_flow`, `eclipse`): every run reads the fields from its restart files at those dates, on the deck's whole grid (`DIMENS` or `SPECGRID`) in Eclipse order, with inactive cells 0. The deck must write a restart at each date with those arrays (`RPTRST`).
+- **Other simulators** must answer the field keys themselves; give `field_cells`.
+- **The snapshots** keep the fields beside the data (`snapshots.npz`), covered by its digest; the fields join the build's fingerprint.
+- **The gate** judges each predicted field by one pooled relative RMS error over its cells, dates and held-out runs: the RMS error over the RMS change from the first date for a pressure, over the field's range for other fields. Cells that are 0 throughout (inactive) are left out. The tolerance is `[gate] relative`'s for the field's kind (0.05 for pressures and saturations). `apex surrogate check` runs and gates the fields too.
+- **The deck's restarts** are checked before any run, as far as its text tells: a field date with no restart is refused.
+- **Refused:**
+  - a plugin that predicts no fields;
+  - fields with a `[coarse]` stack, an adaptive plan or plan `run`;
+  - a case with `[geophysics]`.
+- **History matching** still refuses field observations with a surrogate. Here the fields serve predictions and figures.
+
 ## The gate
 
 - With `outputs = "observations"`, per datatype the RMS over the held-out runs and keys of `(surrogate − simulator) / σ` must be at most `sigma_ratio` (0.5 by default), σ being the observation error's standard deviation. The surrogate's error must lie well inside the data noise the methods assume.

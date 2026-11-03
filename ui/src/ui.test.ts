@@ -41,7 +41,7 @@ import { href, parse } from "./router";
 import { SseParser } from "./sse";
 import { parse as parseMarkdown, inline } from "./markdown";
 import { makePaths } from "./paths";
-import { armRunsOf, assumptionsOf, launchesOptimization, launchKind, unmatchedOf } from "./proposals";
+import { armRunsOf, assumptionsOf, launchesOptimization, launchKind, unmatchedOf, warningsOf } from "./proposals";
 import { withoutAdr } from "./text";
 import {
   clearSession,
@@ -1494,6 +1494,13 @@ describe("the assistant's model chooser (ADR 0026 revision 5)", () => {
       { text: "hi", context: {}, model: "beam" },
       { text: "hi", context: {} },
     ]);
+  });
+});
+
+describe("warningsOf", () => {
+  it("lists the design warnings, strings only", () => {
+    expect(warningsOf({ data: { warnings: ["1 replicate(s): ...", 2, null] } })).toEqual(["1 replicate(s): ..."]);
+    expect(warningsOf({ data: { cost: 1 } })).toEqual([]);
   });
 });
 

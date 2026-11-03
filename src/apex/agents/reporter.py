@@ -757,6 +757,25 @@ def _scalar(value: object) -> str:
     return json.dumps(value)
 
 
+#: The differing settings a comparison lists one by one (the rest are counted).
+MAX_SETUP_DIFFERENCES = 30
+
+
+def _leaves(value: object, prefix: str = "") -> dict[str, object]:
+    """Return a setup's leaves by dotted key (``strategy.options.energy``); lists are leaves."""
+    if isinstance(value, dict):
+        found: dict[str, object] = {}
+        for key, item in value.items():
+            found.update(_leaves(item, f"{prefix}.{key}" if prefix else str(key)))
+        return found
+    return {prefix: value} if prefix else {}
+
+
+def _shown(value: object) -> str:
+    """Return a setting's value for a comparison line (a missing one: not set)."""
+    return "not set" if value is None else _scalar(value)
+
+
 def _comparison_text(facts: RunReportFacts) -> str:
     """Return how the run compares with the other run: setup differences and final metrics."""
     other = facts.compared_with
@@ -771,6 +790,16 @@ def _comparison_text(facts: RunReportFacts) -> str:
     lines.append(
         "Setup differences: " + ", ".join(differs) + "." if differs else "The setups agree."
     )
+    # Each differing setting with both runs' values (#274, 2026-11-02: "localization and
+    # strategy differ" named the settings, never the other run's values).
+    ours_flat, theirs_flat = _leaves(facts.setup), _leaves(other.setup)
+    changed = sorted(k for k in {*ours_flat, *theirs_flat}
+                     if k != "seed" and ours_flat.get(k) != theirs_flat.get(k))  # fmt: skip
+    for key in changed[:MAX_SETUP_DIFFERENCES]:
+        lines.append(f"- {key}: {_shown(ours_flat.get(key))} here, "
+                     f"{_shown(theirs_flat.get(key))} there.")  # fmt: skip
+    if len(changed) > MAX_SETUP_DIFFERENCES:
+        lines.append(f"- and {len(changed) - MAX_SETUP_DIFFERENCES} other setting(s).")
     # From the snapshots, so that no answer has to say it did not check (#237).
     ours, theirs = facts.setup.get("seed"), other.setup.get("seed")
     if ours is not None and theirs is not None and ours != theirs:

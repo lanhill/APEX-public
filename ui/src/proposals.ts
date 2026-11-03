@@ -53,3 +53,13 @@ export function armRunsOf(proposal: Pick<Proposal, "data">): [string, number][] 
     (entry): entry is [string, number] => typeof entry[1] === "number",
   );
 }
+
+/**
+ * What may keep a proposed comparison from answering its question (the proposal's
+ * `data.warnings`): too few replicates or iterations, plugins whose defaults differ besides
+ * the requested change. Shown on the card; the user decides (reported issues, 2026-11-02).
+ */
+export function warningsOf(proposal: Pick<Proposal, "data">): string[] {
+  const listed = proposal.data?.warnings;
+  return Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
+}

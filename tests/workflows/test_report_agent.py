@@ -122,6 +122,18 @@ def test_a_run_report_opens_with_a_summary_and_gives_the_setup(
     text = next(s.text for s in against.report.sections if s.heading == "Comparison")
     assert "Setup differences: simulator." in text
     assert f"The seeds differ ({seed} here, {seed + 1} there)." in text
+    original = config["simulator"]["name"]
+    assert f"- simulator: {original} here, another there." in text  # #274: both values
+
+    # #274 (2026-11-02): "localization and strategy differ" without the other run's values.
+    changed["method"]["localization"] = {"name": "adaptive_prior"}
+    changed["method"]["strategy"] = {"name": "approx", "options": {"energy": 0.9}}
+    (other / "config.json").write_text(json.dumps(changed))
+    against = Reporter(ApexService(tmp_path / "service"), None).run_report(run_dir, other)
+    text = next(s.text for s in against.report.sections if s.heading == "Comparison")
+    assert "- localization.name: not set here, adaptive_prior there." in text
+    assert "- strategy.options.energy: " in text
+    assert "0.9 there." in text
 
 
 def test_a_run_setup_shows_no_server_paths_and_names_prior_groups(tmp_path: Path) -> None:

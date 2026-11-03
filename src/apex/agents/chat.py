@@ -19,6 +19,7 @@ which is deleted with the chat (:class:`~apex.storage.chat_store.ChatStore`).
 
 import contextvars
 import difflib
+import hashlib
 import itertools
 import json
 import logging
@@ -73,7 +74,13 @@ from apex.domain.study import MethodEntry, StudySpec
 from apex.services.api import ApexService
 from apex.services.compatibility import default_damping, default_strategy, plugin_settings
 from apex.services.identities import identity_of
-from apex.services.plugins import REGISTRIES, option_model, strategy_localization, wrapped
+from apex.services.plugins import (
+    REGISTRIES,
+    iterated_method,
+    option_model,
+    strategy_localization,
+    wrapped,
+)
 from apex.services.settings import ChatSection
 from apex.services.tools import ToolSession
 from apex.storage.chat_store import ChatBusy, ChatStore
@@ -602,7 +609,9 @@ SYSTEM = (
     "You are APEX's assistant in its web UI. APEX runs ensemble history matching of "
     "reservoir models (ES-MDA, GIES, LM/GN-EnRML), predictions and studies. Answer the "
     "user's questions about their runs, jobs, studies and APEX itself, using the tools; "
-    "never guess a number a tool can give. The agents are tools: monitor_run checks a "
+    "never guess a number a tool can give. Answer a follow-up with only what it asks, and "
+    "point to your earlier answer (or the draft) for the rest: never repeat the earlier "
+    "answer or the whole draft. The agents are tools: monitor_run checks a "
     "run's health, diagnose_run explains its problems and what to change, write_report "
     "writes its narrative, plot_run draws its result figures (a request in words, or a "
     "preset such as brugge_classic; they appear on the run's page; say what its options "
@@ -1443,6 +1452,8 @@ class ChatAssistant:
             if comparison.get("unmatched"):
                 # The card shows them too, whatever the answer says (reported issues).
                 data["unmatched"] = comparison["unmatched"]
+            if comparison.get("design_warnings"):  # #276: on the card, the user decides
+                data["warnings"] = comparison["design_warnings"]
             # Each arm's simulator runs, on every comparison's card (the user's decision on
             # #264 and #267, 2026-11-02: state the budgets; each method keeps its settings).
             arms = {label: runs for label, c in (comparison.get("arm_costs") or {}).items()
@@ -1635,15 +1646,43 @@ class ChatAssistant:
                 shown, folder = self.drafts(chat_id)
                 stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(args.study or args.run or "x").name)
                 folder.mkdir(parents=True, exist_ok=True)
-                # Saved by default now (#262): a report the user may have edited is kept, the
-                # new one beside it (report_x-2.md, ...); the same text is not saved twice.
-                name, number = f"report_{stem}.md", 1
-                while (folder / name).exists() and (folder / name).read_text(
-                    encoding="utf-8", errors="replace"
-                ) != result.text:
+                # The chat's report is updated in place (#277, 2026-11-03: a section asked
+                # for went into a second file): a file still as the assistant wrote it is
+                # replaced; one the user edited is kept (#262), the report going beside it
+                # (report_x-2.md, ...). What was written is in a hidden record of digests.
+                record = folder / ".reports.json"
+                try:
+                    digests = json.loads(record.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    digests = {}
+                if not isinstance(digests, dict):
+                    digests = {}
+                # Reports saved before the record existed count as edited: kept, not lost.
+                name, number, kept = f"report_{stem}.md", 1, []
+                while (folder / name).exists():
+                    there = (folder / name).read_text(encoding="utf-8", errors="replace")
+                    if there == result.text or digests.get(name) == _digest(there):
+                        break
+                    kept.append(name)
                     number += 1
                     name = f"report_{stem}-{number}.md"
+                replaced = (folder / name).exists()
+                same = (
+                    replaced
+                    and (folder / name).read_text(encoding="utf-8", errors="replace") == result.text
+                )
                 (folder / name).write_text(result.text, encoding="utf-8")
+                record.write_text(
+                    json.dumps({**digests, name: _digest(result.text)}, indent=1), "utf-8"
+                )
+                written["replaced"] = replaced
+                written["complete"] = (
+                    "the saved file is the whole report (every section, and the comparison "
+                    "when compare_with is given)"
+                    + ("; unchanged from this chat's earlier one" if same else
+                       "; it replaces this chat's earlier one" if replaced else "")
+                    + (f"; kept as the user edited them: {', '.join(kept)}" if kept else "")
+                )  # fmt: skip
                 written["saved"] = f"{shown}/{name}"
             return written
 
@@ -1693,7 +1732,9 @@ class ChatAssistant:
                       "(Markdown; numbers checked against the facts): a summary, the run's "
                       "setup from its configuration, its results and health, and with "
                       "compare_with a comparison with another run; saved in this chat's "
-                      "drafts folder unless save = false (say where it is).",
+                      "drafts folder unless save = false (say where it is). Each call writes the "
+                      "whole report and updates this chat's earlier one (asked to add a "
+                      "section, call it again, e.g. with compare_with).",
                       ReportArgument, report),
             LocalTool("plot_run", "Draw a run's result figures (PNG and PDF) in the "
                       "background into its report/plots folder, shown on the run's page as "
@@ -2050,6 +2091,11 @@ def _unproposed_note(drafts: list[str]) -> str:
     if not drafts:
         return ""
     return "\n\n" + UNPROPOSED.format(drafts=", ".join(f"`{d.rsplit('/', 1)[-1]}`" for d in drafts))
+
+
+def _digest(text: str) -> str:
+    """Return a report's SHA-256, as the drafts folder's record of written reports keeps it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 #: The tools that may take long (a large deck or run): each runs in a worker process,
@@ -2756,6 +2802,110 @@ def _method_steps(method: dict[str, Any]) -> None:
         method["steps"] = 1
 
 
+#: A comparison with fewer replicates than this can hardly tell its arms' difference from
+#: seed noise (#276, 2026-11-02: one seed compared two damping schemes); warned, not refused.
+MIN_COMPARISON_REPLICATES = 3
+#: An iterative arm with fewer iterations than this can hardly show what its auxiliary
+#: technique changes (#276: two GIES iterations compared damping schemes); warned only.
+MIN_COMPARISON_ITERATIONS = 3
+
+
+def _section_values(method: Mapping[str, Any], key: str) -> tuple[str | None, dict[str, str]]:
+    """Return an arm's plugin of one method section and every option value it runs with.
+
+    Set: its plugin and options, the defaults filled in; unset: the method's own choice as
+    the composition builds it (``services.compatibility``), as :func:`_own_default` names it.
+    Values as JSON text, so that a set arm and a defaulted one compare alike.
+    """
+    registry = dict(_METHOD_PLUGINS)[key]
+    section = method.get(key)
+    name: str | None = None
+    options: Mapping[str, Any] = {}
+    if isinstance(section, Mapping) and isinstance(section.get("name"), str):
+        name, options = section["name"], section.get("options") or {}
+    elif key != "localization" and isinstance(method.get("name"), str):
+        given = method.get("options") or {}
+        if not isinstance(given, Mapping):
+            return None, {}
+        schedule = method.get("schedule")
+        steps = schedule if isinstance(schedule, Mapping) else None
+        chosen = (default_strategy(method["name"], given) if key == "strategy"
+                  else default_damping(method["name"], given, schedule=steps))  # fmt: skip
+        if chosen is None:
+            return None, {}
+        name, options = chosen["name"], chosen["options"]
+    if name is None:
+        return None, {}
+    try:
+        settings = plugin_settings(registry, name, options)
+    except (KeyError, ApexError, TypeError, ValueError):
+        return name, {}
+    return name, {k: "none" if v is None else json.dumps(v) for k, v in settings.items()}
+
+
+def _iterative(method: Mapping[str, Any]) -> bool:
+    """Whether a method's steps are iterations (GIES, LM-EnRML; CHOP by its inner method)."""
+    name, options = method.get("name"), method.get("options") or {}
+    if not isinstance(name, str) or not isinstance(options, Mapping):
+        return False
+    try:
+        steps, _ = iterated_method(name, options)
+        return bool(getattr(REGISTRIES["methods"].factory(steps), "iterative", False))
+    except (KeyError, ApexError):
+        return False
+
+
+def _design_warnings(
+    cells: Sequence[Any],
+    arms: Mapping[str, Mapping[str, Any]],
+    methods: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Return what may keep a comparison from answering its question (#276; none refused).
+
+    Too few replicates, iterative arms with too few iterations, and arms whose method
+    sections run different plugins whose defaults differ besides the plugin itself (LM
+    damping against rlmmac: initial, factor, minimum, confirm_convergence), each value
+    named, so that the user decides with the card in front of them.
+    """
+    if len(arms) < 2:
+        return []
+    found = []
+    replicates = len({c.replicate for c in cells})
+    if replicates < MIN_COMPARISON_REPLICATES:
+        found.append(
+            f"{replicates} replicate(s): a difference between the arms may be seed noise; "
+            f"{MIN_COMPARISON_REPLICATES} or more tell it apart better"
+        )
+    for label, flat in arms.items():
+        iterations = flat.get("method.max_iterations")
+        if (isinstance(iterations, int) and iterations < MIN_COMPARISON_ITERATIONS
+                and _iterative(methods.get(label, {}))):  # fmt: skip
+            found.append(
+                f"{label}: {iterations} iteration(s) of {flat.get('method.name')}: likely too "
+                f"few to show the difference ({MIN_COMPARISON_ITERATIONS} or more)"
+            )
+    if len(methods) < 2:  # an optimization study's arms: no method sections
+        return found
+    for key, _ in _METHOD_PLUGINS:
+        runs = {label: _section_values(method, key) for label, method in methods.items()}
+        names = {name for name, _ in runs.values() if name is not None}
+        if len(names) < 2:
+            continue
+        options = sorted({o for _, values in runs.values() for o in values})
+        differ = [
+            o for o in options if len({v.get(o, "not an option") for _, v in runs.values()}) > 1
+        ]
+        if differ:
+            each = "; ".join(
+                f"{label}: {name} (" + ", ".join(f"{o} = {v.get(o, 'not an option')}"
+                                                 for o in differ) + ")"
+                for label, (name, v) in runs.items()
+            )  # fmt: skip
+            found.append(f"{key}: the arms' plugins also differ in their defaults "
+                         f"({', '.join(differ)}): {each}")  # fmt: skip
+    return found
+
+
 def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> dict[str, Any]:
     """Return what a study's arms share and how they differ, from its expanded cells.
 
@@ -2772,6 +2922,7 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
     labels: dict[str, tuple[str, str]] = {}
     costs: dict[str, Mapping[str, int | str | None] | None] = {}
     populations: dict[str, int | None] = {}
+    methods: dict[str, dict[str, Any]] = {}  # each arm's method section, as configured
     for index, cell in enumerate(cells):
         config = cell.config
         identity = getattr(config, "run", None) or getattr(config, "optimization", None)
@@ -2782,6 +2933,7 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
             for own in ("run", "optimization"):  # the cell's name, seed and place
                 dumped.pop(own, None)
             if isinstance(dumped.get("method"), dict):
+                methods[label] = json.loads(json.dumps(dumped["method"]))  # before the rewrites
                 _method_steps(dumped["method"])
                 _strategy_localization(dumped["method"])
                 defaults[label] = _method_defaults(dumped["method"])
@@ -2831,6 +2983,12 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
         "entries pointing there ('(see method.damping)'), or the bare words when it cannot "
         "be told; 'within the strategy <name>' a localization that strategy does itself",
     }
+    if warnings := _design_warnings(cells, arms, methods):
+        result["design_warnings"] = warnings
+        result["design_warnings_note"] = (
+            "state each design warning in the answer (the card shows them too) and offer "
+            "the change; the user decides: propose the draft as it is unless they ask"
+        )
     # A reported issue: an arm leaving its method's options out showed "(not set)", and the
     # assistant stated their values unseen. The values it runs with are these.
     # One entry per distinct set, with the arms it holds for, so many arms stay small.
