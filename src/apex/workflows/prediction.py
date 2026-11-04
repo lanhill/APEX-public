@@ -17,11 +17,12 @@ forecasts over the history period, and writes per-time statistics and forecast s
   pass scalar data through unchanged, so the run's stored scalar forecasts are raw values.
 """
 
+import dataclasses
 import datetime as dt
 import hashlib
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Literal
@@ -30,6 +31,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.algorithms.metrics.forecast import nominal_coverage
+from apex.algorithms.surrogates.domain import check_members
+from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.forecast import ForecastScore
 from apex.core.progress import GuardedProgress, IterationProgress, NullProgress, ProgressReporter
@@ -41,10 +44,14 @@ from apex.core.simulation import (
     MemberSeries,
     SeriesRequest,
     Simulator,
+    refuse_unsupported_stop,
 )
+from apex.core.surrogates import EarlyStartSurrogate, SurrogateModel
 from apex.domain.observations import DataKey
 from apex.domain.prediction import PERCENTILE_LABELS, EnsembleForecast, PredictionResult
 from apex.domain.state import StateLayout
+from apex.domain.surrogate import GateTolerances, QuantityKind, TrainingDomain
+from apex.simulation.surrogate import SurrogateSimulator
 from apex.storage.prediction_directory import MEAN_MODEL_ID, TRUTH_ID, PredictionDirectory
 
 logger = logging.getLogger(__name__)
@@ -74,6 +81,59 @@ class StoredForecast:
     keys: tuple[DataKey, ...]
     values: NDArray[np.float64]
     member_ids: NDArray[np.int64]
+    #: ``(n_keys,)``: the observation errors' variances, for the gate of a surrogate's
+    #: members; ``None``: such members are not checked.
+    variances: NDArray[np.float64] | None = None
+
+
+#: A member block's surrogate inputs from its state blocks.
+InputsOf = Callable[[Mapping[str, NDArray[np.float64]]], dict[str, NDArray[np.float64]]]
+#: Wraps a simulator as the prediction's stack does (its parameterizations).
+Wrap = Callable[[Simulator], Simulator]
+
+#: The sources of a prediction's members (``state.json`` ``member_sources``).
+SIMULATOR, SURROGATE = "simulator", "surrogate"
+
+
+@dataclass(frozen=True)
+class PredictionSurrogate:
+    """A prediction's surrogate, composed by the services.
+
+    Attributes
+    ----------
+    simulator
+        The model as a simulator of a member's properties (``SurrogateSimulator``).
+    model, domain, identity
+        The fitted model, its validated domain and its files' identity.
+    executor
+        Where the surrogate runs (local: serial, or process workers).
+    inputs
+        A member block's surrogate inputs, ``{variable: (size, n)}`` from the run's state
+        blocks (its parameterizations applied).
+    simulator_of
+        Wraps a surrogate simulator as the prediction's stack wraps its simulator (the
+        run's parameterizations).
+    outside
+        ``"stop"`` or ``"simulator"``, for members outside the domain.
+    tolerances, kinds
+        The model's gate, for the history check of its members.
+    """
+
+    simulator: SurrogateSimulator
+    model: SurrogateModel
+    domain: TrainingDomain
+    identity: str
+    executor: Executor
+    inputs: InputsOf
+    simulator_of: Wrap
+    outside: Literal["stop", "simulator"]
+    tolerances: GateTolerances
+    kinds: Mapping[str, QuantityKind]
+
+    @property
+    def early_until(self) -> str | None:
+        """The report date members run to first, for an early-start model."""
+        return self.model.early_until if isinstance(self.model, EarlyStartSurrogate) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +366,13 @@ class PredictionWorkflow:
         Fail unless at least this fraction of each ensemble's members succeeds.
     progress
         Receives the prediction's progress.
+    surrogate
+        Forecast the ensembles (not the truth) with a fitted model; the
+        request must then be explicit (the services resolve it against the model's keys).
+    controls
+        A control scenario (decision 6): blocks ``{name: (n,)}`` every
+        member is given besides its state, the truth too, for the deck template or a
+        control-aware model; never part of the state.
     """
 
     def __init__(
@@ -323,7 +390,11 @@ class PredictionWorkflow:
         percentile_convention: Literal["percentile", "exceedance"] = "percentile",
         min_success_fraction: float = 0.9,
         progress: ProgressReporter | None = None,
+        surrogate: PredictionSurrogate | None = None,
+        controls: Mapping[str, NDArray[np.float64]] | None = None,
     ) -> None:
+        if surrogate is not None and not is_explicit(request):
+            raise ValueError("a prediction with [surrogate] needs its vectors and times listed")
         if not 0 < min_success_fraction <= 1:
             raise ValueError(f"min_success_fraction must be in (0, 1], got {min_success_fraction}")
         # A batch simulator (``ert``) runs members only through its executor and
@@ -354,6 +425,12 @@ class PredictionWorkflow:
         self.progress: ProgressReporter = GuardedProgress(
             NullProgress() if progress is None else progress
         )
+        self.surrogate = surrogate
+        clashing = sorted(set(controls or {}) & set(layout.names))
+        if clashing:
+            raise ValueError(f"controls named as state variables: {clashing}")
+        self.controls = {name: np.ascontiguousarray(v, dtype=np.float64)
+                         for name, v in (controls or {}).items()}  # fmt: skip
 
     def run(
         self, ensembles: Sequence[EnsembleInput], truth: NDArray[np.float64] | None = None
@@ -384,7 +461,13 @@ class PredictionWorkflow:
         request = self._axis(groups)
         failures: dict[str, dict[int, str]] = {}
         for index, (name, state, member_ids, required) in enumerate(groups):
-            failures[name] = self._forecast_group(name, state, member_ids, request, required)
+            # The truth is the scores' reference: always the simulator's.
+            if self.surrogate is not None and name != "truth":
+                failures[name] = self._forecast_surrogate_group(
+                    name, state, member_ids, request, required
+                )
+            else:
+                failures[name] = self._forecast_group(name, state, member_ids, request, required)
             following = groups[index + 1][0] if index + 1 < len(groups) else "done"
             self.progress.iteration_progress(
                 IterationProgress(
@@ -397,7 +480,10 @@ class PredictionWorkflow:
             for ensemble in ensembles:
                 if ensemble.stored is not None:
                     try:
-                        self._check_history(forecasts[ensemble.name], ensemble.stored)
+                        self._check_history(
+                            forecasts[ensemble.name], ensemble.stored,
+                            self._sources(ensemble.name),
+                        )  # fmt: skip
                     except WorkflowError:
                         # Its members came from a deck that does not reproduce the run: a
                         # corrected configuration may replace them (PredictionDirectory.open).
@@ -492,6 +578,7 @@ class PredictionWorkflow:
                 else:
                     # The pilot runs here, not in the executor: it holds the same
                     # machine-wide tokens through the executor's pools.
+                    refuse_unsupported_stop(self.simulator, member)  # never here, as the executors
                     with _held(self.executor, self.simulator):
                         series = self.simulator.run_series(member, self.request)  # type: ignore[attr-defined]
                 if not np.all(np.isfinite(np.asarray(series.values, dtype=np.float64))):
@@ -556,7 +643,8 @@ class PredictionWorkflow:
         member_id = int(member_ids[column])
         return MemberInput(
             member_id=member_id,
-            state={name: block[:, column].copy() for name, block in blocks.items()},
+            state={name: block[:, column].copy() for name, block in blocks.items()}
+            | {name: values.copy() for name, values in self.controls.items()},
             work_dir=self.directory.simulation_dir(ensemble, member_id)
             if getattr(self.simulator, "needs_work_dir", False)
             else None,
@@ -633,6 +721,212 @@ class PredictionWorkflow:
             raise WorkflowError(f"{name} forecast failed: {next(iter(failures.values()))}")
         return failures
 
+    def _sources(self, name: str) -> dict[int, str]:
+        """Return the members' sources of an ensemble (empty: all the simulator's)."""
+        saved = self.directory.read_state().get("member_sources", {}).get(name, {})
+        return {int(member): str(source) for member, source in saved.items()}
+
+    def _record_sources(self, name: str, sources: Mapping[int, str]) -> None:
+        state = self.directory.read_state().get("member_sources", {})
+        merged = {**state.get(name, {}), **{str(m): s for m, s in sources.items()}}
+        self.directory.write_state(member_sources={**state, name: merged})
+
+    def _forecast_surrogate_group(
+        self,
+        name: str,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        request: SeriesRequest,
+        required: bool,
+    ) -> dict[int, str]:
+        """Forecast the members without a saved result by the surrogate.
+
+        An early-start model's members first run on the simulator up to its early date
+        (through the prediction's executor, work folders ``<ensemble>:early``), asked only
+        for its early keys. Members outside the model's domain stop the prediction
+        (``outside = "stop"``) or are run whole by the simulator; a member whose early run
+        fails is a failed member. The surrogate failing a member stops the prediction (a
+        dropped member would bias the forecast silently). Returns the failures by member id.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        assert request.times is not None
+        pending = [
+            column
+            for column, member_id in enumerate(member_ids)
+            if self.directory.load_member(name, int(member_id)) is None
+        ]
+        if not pending:
+            return {}
+        failures: dict[int, str] = {}
+        sources: dict[int, str] = {}
+        early_failed: list[int] = []
+        early_until = surrogate.early_until
+        early: dict[int, NDArray[np.float64]] = {}
+        if early_until is not None:
+            assert isinstance(surrogate.model, EarlyStartSurrogate)
+            members = []
+            for column in pending:
+                member = self._member(name, state, member_ids, column)
+                work_dir = (
+                    self.directory.simulation_dir(f"{name}:early", member.member_id)
+                    if member.work_dir is not None
+                    else None
+                )
+                members.append(dataclasses.replace(member, stop_at=early_until, work_dir=work_dir))
+            self.progress.forecast_started(
+                iteration=None, label=f"{name} (early)", n_members=len(members)
+            )
+            began = time.monotonic()
+            outputs = self.executor.run_all(
+                self.simulator, members, list(surrogate.model.early_keys()),
+                on_result=lambda member_id, ok: self.progress.member_finished(
+                    member_id=member_id, ok=ok
+                ),
+            )  # fmt: skip
+            for member, out in zip(members, outputs, strict=True):
+                if isinstance(out, MemberFailure):
+                    failures[member.member_id] = out.message
+                else:
+                    early[member.member_id] = np.ascontiguousarray(out, dtype=np.float64)
+            self.progress.forecast_finished(
+                n_ok=len(early), n_failed=len(failures), seconds=time.monotonic() - began
+            )
+            logger.info(
+                "early runs done",
+                extra={"event": "forecast_done", "ensemble": f"{name} (early)",
+                       "n_ok": len(early), "n_failed": len(failures),
+                       "seconds": round(time.monotonic() - began, 3)},
+            )  # fmt: skip
+            pending = [c for c in pending if int(member_ids[c]) not in failures]
+        early_failed = sorted(failures)
+        if pending:
+            ids = [int(member_ids[c]) for c in pending]
+            blocks = self.layout.split(np.ascontiguousarray(state[:, pending]))
+            # The scenario's controls too, as each member is given them (_member).
+            blocks |= {name: np.ascontiguousarray(np.tile(v[:, None], (1, len(pending))))
+                       for name, v in self.controls.items()}  # fmt: skip
+            inputs = surrogate.inputs(blocks)
+            found = check_members(
+                surrogate.domain, surrogate.model, inputs, ids, axis_keys(request),
+                coarse=None if early_until is None
+                else np.ascontiguousarray(np.column_stack([early[m] for m in ids])),
+            )  # fmt: skip
+            if (
+                found.unknown_keys
+                or found.times_outside
+                or (found.members and surrogate.outside == "stop")
+            ):
+                logger.error(
+                    "members outside the surrogate's domain",
+                    extra={"event": "surrogate_outside", "ensemble": name,
+                           "members": [int(m) for m in found.members],
+                           "details": found.message()},
+                )  # fmt: skip
+                found.raise_if_outside()
+            outside = {int(m) for m in found.members}
+            inside = [c for c in pending if int(member_ids[c]) not in outside]
+            rest = [c for c in pending if int(member_ids[c]) in outside]
+            if inside:
+                self._surrogate_members(name, state, member_ids, inside, request, early)
+            if rest:
+                logger.warning(
+                    "members outside the surrogate's domain run by the simulator",
+                    extra={"event": "surrogate_outside", "ensemble": name,
+                           "members": sorted(outside)},
+                )  # fmt: skip
+                failures.update(self._forecast_columns(name, state, member_ids, rest, request))
+                sources.update({int(member_ids[c]): SIMULATOR for c in rest})
+        self._record_sources(name, sources)
+        for member_id in early_failed:
+            logger.warning(
+                "member failed",
+                extra={"event": "member_failed", "ensemble": name, "member_id": member_id,
+                       "reason": failures[member_id]},
+            )  # fmt: skip
+        if required and failures:
+            raise WorkflowError(f"{name} forecast failed: {next(iter(failures.values()))}")
+        return failures
+
+    def _surrogate_members(
+        self,
+        name: str,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        columns: Sequence[int],
+        request: SeriesRequest,
+        early: Mapping[int, NDArray[np.float64]],
+    ) -> None:
+        """Predict and save the members in ``columns`` by the surrogate, on its executor."""
+        surrogate = self.surrogate
+        assert surrogate is not None
+        assert request.times is not None
+        model = surrogate.simulator
+        if surrogate.early_until is not None:
+            model = model.with_early({int(member_ids[c]): early[int(member_ids[c])]
+                                      for c in columns})  # fmt: skip
+        members = [
+            dataclasses.replace(self._member(name, state, member_ids, c), work_dir=None)
+            for c in columns
+        ]
+        self.progress.forecast_started(
+            iteration=None, label=f"{name} (surrogate)", n_members=len(members)
+        )
+        began = time.monotonic()
+        outputs = surrogate.executor.run_all(
+            surrogate.simulator_of(model), members, axis_keys(request),
+            on_result=lambda member_id, ok: self.progress.member_finished(
+                member_id=member_id, ok=ok
+            ),
+        )  # fmt: skip
+        failed = [out for out in outputs if isinstance(out, MemberFailure)]
+        self.progress.forecast_finished(
+            n_ok=len(outputs) - len(failed), n_failed=len(failed),
+            seconds=time.monotonic() - began,
+        )  # fmt: skip
+        if failed:
+            # Loud: dropping members the surrogate cannot predict would bias the forecast.
+            raise WorkflowError(
+                f"{name}: the surrogate failed member {failed[0].member_id} "
+                f"({failed[0].message}); the prediction stops, its saved members kept"
+            )
+        arrays = [np.asarray(out, dtype=np.float64) for out in outputs]
+        unstable = [m.member_id for m, a in zip(members, arrays, strict=True)
+                    if not np.all(np.isfinite(a))]  # fmt: skip
+        if unstable:
+            # As the simulator's series with non-finite values fail; loud, never saved.
+            raise WorkflowError(
+                f"{name}: the surrogate gave non-finite values for member {unstable[0]} "
+                f"({len(unstable)} member(s)); the prediction stops, its saved members kept"
+            )
+        # The sources before any member is saved: a prediction killed while it saves resumes
+        # knowing every saved member's (a recorded member not yet saved is forecast again).
+        self._record_sources(name, {m.member_id: SURROGATE for m in members})
+        for member, values in zip(members, arrays, strict=True):
+            shaped = values.reshape(len(request.vectors), len(request.times))
+            self.directory.save_member(name, member.member_id, np.ascontiguousarray(shaped))
+        logger.info(
+            "surrogate forecast",
+            extra={"event": "forecast_done", "ensemble": f"{name} (surrogate)",
+                   "n_ok": len(outputs), "n_failed": 0, "identity": surrogate.identity,
+                   "seconds": round(time.monotonic() - began, 3)},
+        )  # fmt: skip
+
+    def _forecast_columns(
+        self,
+        name: str,
+        state: NDArray[np.float64],
+        member_ids: NDArray[np.int64],
+        columns: Sequence[int],
+        request: SeriesRequest,
+    ) -> dict[int, str]:
+        """Forecast some members whole by the simulator (:meth:`_forecast_group`'s path)."""
+        selected = list(columns)
+        return self._forecast_group(
+            name, np.ascontiguousarray(state[:, selected]), member_ids[selected], request,
+            required=False,
+        )  # fmt: skip
+
     def _load_required(self, name: str, member_id: int) -> NDArray[np.float64]:
         values = self.directory.load_member(name, member_id)
         if values is None:
@@ -676,13 +970,31 @@ class PredictionWorkflow:
 
     # ------------------------------------------------------------------ checks and results
 
-    def _check_history(self, forecast: EnsembleForecast, stored: StoredForecast) -> None:
-        """Fail unless the forecast reproduces the run's stored scalar forecasts."""
+    def _check_history(
+        self,
+        forecast: EnsembleForecast,
+        stored: StoredForecast,
+        sources: Mapping[int, str] | None = None,
+    ) -> None:
+        """Fail unless the forecast reproduces the run's stored scalar forecasts.
+
+        The simulator's members exactly. The surrogate's (``sources``) within
+        the model's gate, against the run's observation errors; an early-start model's early
+        keys, which the simulator gave, exactly.
+        """
+        sources = sources or {}
+        surrogate_ids = {m for m, source in sources.items() if source == SURROGATE}
         time_index = {time_label(t): i for i, t in enumerate(forecast.times)}
         vector_index = {v: i for i, v in enumerate(forecast.vectors)}
         column = {int(m): j for j, m in enumerate(forecast.member_ids)}
-        members = [(j, column[int(m)]) for j, m in enumerate(stored.member_ids) if int(m) in column]
+        members = [
+            (j, column[int(m)])
+            for j, m in enumerate(stored.member_ids)
+            if int(m) in column and int(m) not in surrogate_ids
+        ]
         compared, mismatches = 0, []
+        if surrogate_ids:
+            compared += self._check_history_gate(forecast, stored, surrogate_ids)
         for k, key in enumerate(stored.keys):
             when = time_label(key.time)
             if when not in time_index or key.datatype not in vector_index:
@@ -727,6 +1039,95 @@ class PredictionWorkflow:
                 "check also assumes the simulator reproduces its own results, e.g. the same "
                 "version and threads), or set check_history = false (e.g. for a restart deck)."
             )
+
+    def _check_history_gate(
+        self, forecast: EnsembleForecast, stored: StoredForecast, surrogate_ids: set[int]
+    ) -> int:
+        """Gate the surrogate's members' history against the run's stored forecasts.
+
+        Returns the number of values compared.
+
+        Keys the simulator gave (an early-start model's early keys) must match exactly;
+        the others pass the model's gate (``sigma_ratio`` of the run's observation errors),
+        else the prediction fails, as a deck that does not reproduce the run.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        time_index = {time_label(t): i for i, t in enumerate(forecast.times)}
+        vector_index = {v: i for i, v in enumerate(forecast.vectors)}
+        column = {int(m): j for j, m in enumerate(forecast.member_ids)}
+        pairs = [
+            (j, column[int(m)])
+            for j, m in enumerate(stored.member_ids)
+            if int(m) in surrogate_ids and int(m) in column
+        ]
+        if not pairs:
+            return 0
+        model = surrogate.model
+        exact = set(model.early_keys()) if isinstance(model, EarlyStartSurrogate) else set()
+        rows, keys, mismatches = [], [], []
+        compared = 0
+        for k, key in enumerate(stored.keys):
+            when = time_label(key.time)
+            if when not in time_index or key.datatype not in vector_index:
+                continue
+            values = [
+                forecast.values[vector_index[key.datatype], time_index[when], j_forecast]
+                for _, j_forecast in pairs
+            ]
+            expected = [stored.values[k, j_stored] for j_stored, _ in pairs]
+            if not np.isfinite(expected).all():
+                continue
+            compared += len(pairs)
+            if DataKey(key.time, key.datatype) in exact:
+                scale = max(float(np.max(np.abs(expected))), 1e-300)
+                mismatches += [
+                    f"{key}: {v:.6g} against {e:.6g}"
+                    for v, e in zip(values, expected, strict=True)
+                    if abs(v - e) > HISTORY_RTOL * max(abs(e), scale)
+                ]
+                continue
+            rows.append((values, expected, k))
+            keys.append(key)
+        if mismatches:
+            raise WorkflowError(
+                f"{forecast.name}: the simulator's early runs do not reproduce the history "
+                f"match ({len(mismatches)} values), e.g. " + "; ".join(mismatches[:5])
+            )
+        if not rows:
+            return compared
+        if stored.variances is None:
+            raise WorkflowError(
+                f"{forecast.name}: the surrogate's members cannot be checked within its gate "
+                "without the run's observation errors; set check_history = false"
+            )
+        try:
+            verdict = gate(
+                np.ascontiguousarray([r[0] for r in rows], dtype=np.float64),
+                np.ascontiguousarray([r[1] for r in rows], dtype=np.float64),
+                keys,
+                [int(stored.member_ids[j_stored]) for j_stored, _ in pairs],
+                tolerances=surrogate.tolerances,
+                variances=np.ascontiguousarray(stored.variances[[r[2] for r in rows]]),
+                kinds=surrogate.kinds,
+            )
+        except ValueError as error:
+            raise WorkflowError(
+                f"{forecast.name}: the surrogate's members cannot be gated: {error}"
+            ) from error
+        logger.info(
+            "history check within the surrogate's gate",
+            extra={"event": "history_check_surrogate", "ensemble": forecast.name,
+                   "members": len(pairs), "keys": len(keys), "passed": verdict.passed,
+                   "failures": verdict.failures()},
+        )  # fmt: skip
+        if not verdict.passed:
+            raise WorkflowError(
+                f"{forecast.name}: the surrogate's members do not reproduce the history match "
+                f"within its gate ({'; '.join(verdict.failures())}): the surrogate does not "
+                "hold for this run's posterior; rebuild it, or set check_history = false"
+            )
+        return compared
 
     def _statistics(self, forecasts: Mapping[str, EnsembleForecast]) -> list[dict[str, object]]:
         """Per ensemble, vector and time: members, mean, std and percentiles."""

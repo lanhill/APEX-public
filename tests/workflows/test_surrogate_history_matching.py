@@ -22,14 +22,15 @@ import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
 
 from apex.core.errors import ConfigError, SurrogateDomainError, WorkflowError
 from apex.core.options import InputFile
-from apex.core.plugins import surrogate_models
+from apex.core.plugins import simulators, surrogate_models
+from apex.domain.observations import DataKey
 from apex.domain.surrogate import SnapshotSet
 from apex.execution.local import SerialExecutor
 from apex.services import composition, surrogates
@@ -1286,3 +1287,283 @@ def test_coarse_failures_members_outside_and_retention_stay_aligned(tmp_path: Pa
     assert _named(run, "surrogate_coarse_failed")
     simulations = run / "simulations"
     assert not any(simulations.glob("coarse_*/member_*")) if simulations.is_dir() else True
+
+
+# -------------------------------------------------------------- early start
+
+EARLY_PLUGIN = "test_early_linear_hm"
+STOPPING = "test_linear_stops"
+
+
+@pytest.fixture
+def early_built(tmp_path: Path) -> Iterator[Path]:
+    """Build the exact early-start surrogate of the case, on a simulator that can stop at a
+    report date; return its manifest."""
+    surrogate_models.register(EARLY_PLUGIN)(cases.EarlyLinear)
+    simulators.register(STOPPING)(cases.StoppingLinear)
+    cases.StoppingLinear.stopped.clear()
+    try:
+        cases.write_case(tmp_path, name="base", simulator=STOPPING)
+        result = surrogates.build(cases.write_build(tmp_path, EARLY_PLUGIN, case="base.toml",
+                                                    name="early"))  # fmt: skip
+        assert result.summary.gate is not None
+        assert result.summary.gate.passed
+        assert not cases.StoppingLinear.stopped  # a build runs its design runs whole
+        yield tmp_path / "runs" / "early" / "model" / "surrogate.json"
+    finally:
+        surrogate_models.remove(EARLY_PLUGIN)
+        simulators.remove(STOPPING)
+
+
+def test_an_early_start_surrogate_continues_each_members_early_run(
+    tmp_path: Path, early_built: Path
+) -> None:
+    """Every surrogate forecast is preceded by the members' runs
+    up to the model's early date (stopped there, asked only for the early keys); an exact
+    continuation gives the plain run's posterior to round-off, and the early runs are
+    counted, planned and timed apart."""
+    config = cases.write_case(
+        tmp_path, name="hm", simulator=STOPPING, surrogate=_section(early_built, check_members=5)
+    )
+    plan = validate_history_match(config).plan
+    assert plan is not None
+    assert plan.max_simulator_runs == 1 * 5 + 100 + 5 * 100  # checks, posterior, early runs
+    result = composition.start(config)
+    plain = composition.start(cases.write_case(tmp_path, name="plain", simulator=STOPPING))
+    np.testing.assert_allclose(result.posterior, plain.posterior, rtol=0, atol=ROUND_OFF)
+    early_keys = {k for k in read_model_keys(early_built) if k.time <= cases.EARLY_UNTIL}
+    stopped = cases.StoppingLinear.stopped
+    assert len(stopped) == 5 * 100
+    assert {date for _, date, _ in stopped} == {cases.EARLY_UNTIL}
+    assert all(set(keys) == early_keys for _, _, keys in stopped)
+    run = _run(tmp_path, "hm")
+    report = json.loads((run / "summary.json").read_text())["surrogate"]
+    assert report["early_until"] == cases.EARLY_UNTIL
+    assert report["early_runs"] == report["evaluations"] == 5 * 100
+    assert len([e for e in _named(run, "forecast_done") if e["label"].endswith("(early)")]) == 5
+    timing = surrogates_timing(run)
+    assert timing["early"]["members"] == 5 * 100
+    assert timing["simulator"]["members"] == 1 * 5 + 100
+
+
+def read_model_keys(model: Path) -> tuple[DataKey, ...]:
+    stored = read_surrogate(model)
+    keys: tuple[DataKey, ...] = cases.EarlyLinear.from_arrays(
+        stored.manifest.model, stored.arrays
+    ).keys
+    return keys
+
+
+def test_an_early_start_check_gates_only_the_later_keys_and_a_refit_recovers(
+    tmp_path: Path, early_built: Path
+) -> None:
+    """A continuation shifted by 0.6 sigma after the early date fails its first check: the
+    gate (sigma_ratio 0.5) scores only the later keys. Counted with the early keys, exact
+    as the members' own runs, the error would be diluted to 0.6 sqrt(1/2) = 0.42 and pass.
+    The refit from the checked members' full runs (a fit sets no shift) passes every later
+    check."""
+    stored = read_surrogate(early_built)
+    fitted = cases.EarlyLinear.from_arrays(stored.manifest.model, stored.arrays)
+    fitted.shift = np.array(
+        [0.6 * np.sqrt(cases.VARIANCE) if k.time > cases.EARLY_UNTIL else 0.0
+         for k in fitted.keys]
+    )  # fmt: skip
+    biased = early_built.parent.parent / "model_biased" / "surrogate.json"
+    manifest = stored.manifest
+    write_surrogate(
+        biased, plugin=manifest.plugin, model=fitted, domain=manifest.training_domain(),
+        provenance=manifest.provenance, options=manifest.options, gate=manifest.gate,
+        snapshots=manifest.snapshots, fit=manifest.fit, apex_commit=manifest.apex_commit,
+    )  # fmt: skip
+    config = cases.write_case(
+        tmp_path, name="hm", simulator=STOPPING,
+        surrogate=_section(biased, check_every=1, check_members=6, on_check_failure="refit"),
+    )  # fmt: skip
+    composition.start(config)
+    run = _run(tmp_path, "hm")
+    report = json.loads((run / "summary.json").read_text())["surrogate"]
+    assert [c["passed"] for c in report["checks"]] == [False, True, True, True]
+    [refit] = _named(run, "surrogate_refit")
+    assert refit["passed"]
+    snapshots = load_snapshots(run / "surrogates" / "refit_1" / "snapshots.npz")
+    assert snapshots.n_runs == 40 + 6  # the checked members' full runs joined
+    # The repeated forecast reuses the iteration's early runs: one per evaluation, less 100.
+    assert report["early_runs"] == report["evaluations"] - 100
+
+
+def test_resume_is_bit_identical_with_early_runs(tmp_path: Path, early_built: Path) -> None:
+    section = _section(early_built, check_every=1, check_members=6)
+    kwargs: dict[str, Any] = {"name": "hm", "method": cases.GIES, "surrogate": section,
+                              "simulator": STOPPING}  # fmt: skip
+    composition.start(cases.write_case(tmp_path / "whole", **kwargs))
+    composition.start(cases.write_case(tmp_path / "parts", **kwargs), max_steps=1)
+    for _ in range(10):
+        if json.loads((_run(tmp_path / "parts", "hm") / "summary.json").read_text())["complete"]:
+            break
+        composition.resume(_run(tmp_path / "parts", "hm"), max_steps=1)
+    a, b = _run(tmp_path / "whole", "hm"), _run(tmp_path / "parts", "hm")
+    files = sorted(p.name for p in (a / "checkpoints").glob("*.npz"))
+    assert files == sorted(p.name for p in (b / "checkpoints").glob("*.npz"))
+    for name in files:
+        with np.load(a / "checkpoints" / name) as left, np.load(b / "checkpoints" / name) as right:
+            for key in left.files:
+                np.testing.assert_array_equal(left[key], right[key], err_msg=f"{name}:{key}")
+    state_a, state_b = RunDirectory(a).read_state(), RunDirectory(b).read_state()
+    assert state_a["surrogate"]["evaluations"] == state_b["surrogate"]["evaluations"]
+    assert state_a["surrogate"]["early_runs"] == state_b["surrogate"]["early_runs"] > 0
+
+
+def test_early_start_refusals(tmp_path: Path, early_built: Path) -> None:
+    """A run whose simulator cannot stop at a date, or whose every observation lies up to
+    the early date, is refused before any run."""
+    from types import SimpleNamespace
+
+    from apex.services.surrogates import active_model, refuse_model
+
+    model = active_model(early_built)
+    early = [k for k in model.model.keys if k.time <= cases.EARLY_UNTIL]
+    with pytest.raises(ConfigError, match="every observation of this run lies up to"):
+        refuse_model(
+            cast(Any, SimpleNamespace(surrogate=SimpleNamespace(on_check_failure="stop"))),
+            model, cast(Any, SimpleNamespace(keys=early)), cast(Any, None),
+        )  # fmt: skip
+    # The same case on the plain linear model, which cannot stop: the build's stack differs
+    # only by the simulator's name, so a model built on it is needed.
+    cases.write_case(tmp_path / "plain", name="base")
+    shutil.copy(tmp_path / "build_early.toml", tmp_path / "plain" / "build_early.toml")
+    built = surrogates.build(tmp_path / "plain" / "build_early.toml")
+    assert built.summary.gate is not None
+    assert built.summary.gate.passed
+    config = cases.write_case(
+        tmp_path / "plain", name="hm",
+        surrogate=_section(built.path / "model" / "surrogate.json"),
+    )  # fmt: skip
+    with pytest.raises(ConfigError, match="cannot stop at a report date"):
+        composition.start(config)
+
+
+def _stopping_case(
+    folder: Path, name: str, options: str, *, prior_std: float = cases.PRIOR_STD,
+    surrogate: str = "", extra: str = "",
+) -> Path:  # fmt: skip
+    """``cases.write_case`` on the stopping simulator, with more of its options."""
+    config: Path = cases.write_case(folder, name=name, simulator=STOPPING, prior_std=prior_std,
+                              surrogate=surrogate, extra=extra)  # fmt: skip
+    text = config.read_text().replace('variables = ["x"]', f'variables = ["x"]\n{options}', 1)
+    config.write_text(text)
+    return config
+
+
+def test_early_failures_members_outside_and_retention_stay_aligned(tmp_path: Path) -> None:
+    """A member whose early run fails is the simulator's failed member; members outside the
+    domain make their early run, then run whole (never stopped); the rest are the exact
+    linear forecast; ``keep_simulations = "none"`` prunes the early folders (review, 2b)."""
+    surrogate_models.register(EARLY_PLUGIN)(cases.EarlyLinear)
+    simulators.register(STOPPING)(cases.StoppingLinear)
+    cases.StoppingLinear.stopped.clear()
+    options = "fail_members = [95]\nwrite_files = true"
+    try:
+        _stopping_case(tmp_path, "base", options)
+        built = surrogates.build(cases.write_build(tmp_path, EARLY_PLUGIN, case="base.toml",
+                                                   name="early"))  # fmt: skip
+        assert built.summary.gate is not None
+        assert built.summary.gate.passed
+        model = built.path / "model" / "surrogate.json"
+        config = _stopping_case(
+            tmp_path, "hm", options, prior_std=3.0,
+            surrogate=_section(model, outside="simulator", check_every=0),
+            extra='[output]\nkeep_simulations = "none"',
+        )  # fmt: skip
+        composition.start(config)
+    finally:
+        surrogate_models.remove(EARLY_PLUGIN)
+        simulators.remove(STOPPING)
+    run = _run(tmp_path, "hm")
+    results = RunResults(run, composition.build_layout(composition.load_config(config)))
+    prior = results.iterate(0)
+    assert 95 not in [int(m) for m in prior.member_ids]  # its early run failed: dropped
+    assert "simulator" in prior.forecast_source
+    assert "surrogate" in prior.forecast_source
+    exact = cases.forward_matrix() @ prior.state["x"]
+    np.testing.assert_allclose(prior.predicted, exact, rtol=0, atol=ROUND_OFF)
+    assert _named(run, "surrogate_early_failed")
+    outside = {int(m) for m, s in zip(prior.member_ids, prior.forecast_source, strict=True)
+               if s == "simulator"}  # fmt: skip
+    stopped = {member for member, _, _ in cases.StoppingLinear.stopped}
+    assert outside <= stopped  # they made their early run first, then ran whole
+    simulations = run / "simulations"
+    assert not any(simulations.glob("early_*/member_*")) if simulations.is_dir() else True
+
+
+def test_an_early_start_model_whose_later_data_are_only_test_data_is_refused(
+    tmp_path: Path, early_built: Path
+) -> None:
+    """Its checks would gate nothing: test data are scored, never gated (review, 2b)."""
+    datatypes = ", ".join(f'"{d}"' for d in cases.DATATYPES)
+    validation = f'[validation]\ntest = {{ datatypes = [{datatypes}], times = ["3", "4"] }}'
+    config = cases.write_case(tmp_path, name="hm", simulator=STOPPING, validation=validation,
+                              surrogate=_section(early_built))  # fmt: skip
+    with pytest.raises(ConfigError, match="no assimilated or cv observation lies after"):
+        composition.start(config)
+
+
+def test_an_iterative_run_refits_an_early_start_model_and_rescores_its_accepted_iterate(
+    tmp_path: Path, early_built: Path
+) -> None:
+    """GIES with a continuation biased after the early date: the refit's change of source
+    forecasts the accepted iterate again, its members' early runs in ``accepted_<k>_early``
+    (review, 2b)."""
+    stored = read_surrogate(early_built)
+    fitted = cases.EarlyLinear.from_arrays(stored.manifest.model, stored.arrays)
+    fitted.shift = np.array(
+        [BIAS * np.sqrt(cases.VARIANCE) if k.time > cases.EARLY_UNTIL else 0.0
+         for k in fitted.keys]
+    )  # fmt: skip
+    biased = early_built.parent.parent / "model_biased" / "surrogate.json"
+    manifest = stored.manifest
+    write_surrogate(
+        biased, plugin=manifest.plugin, model=fitted, domain=manifest.training_domain(),
+        provenance=manifest.provenance, options=manifest.options, gate=manifest.gate,
+        snapshots=manifest.snapshots, fit=manifest.fit, apex_commit=manifest.apex_commit,
+    )  # fmt: skip
+    config = cases.write_case(
+        tmp_path, name="hm", simulator=STOPPING, method=cases.GIES,
+        surrogate=_section(biased, check_every=1, check_members=6, on_check_failure="refit"),
+    )  # fmt: skip
+    composition.start(config)
+    run = _run(tmp_path, "hm")
+    [refit] = _named(run, "surrogate_refit")
+    assert refit["passed"]
+    report = json.loads((run / "summary.json").read_text())["surrogate"]
+    assert report["rescores"], "the refit should rescore the accepted iterate"
+    labels = {e["label"] for e in _named(run, "forecast_done")}
+    assert any(label.endswith("(early)") for label in labels)
+    assert report["early_runs"] >= report["evaluations"] - 2 * 100 - 1
+
+
+def test_early_runs_need_an_executor_that_carries_the_stop_date_and_a_report_date(
+    tmp_path: Path,
+) -> None:
+    """The ssh executor's remote mode rebuilds members on its hosts, losing a stop date, and
+    an early date that is not one of the deck's report dates would fail every early run:
+    both refused before any run (coder's review); and a simulator that cannot stop."""
+    from types import SimpleNamespace
+
+    from apex.services.composition import refuse_early_runs
+
+    deck = tmp_path / "deck.mako"
+    deck.write_text("RUNSPEC\nSTART\n 1 'JAN' 2022 /\nSCHEDULE\nDATES\n 1 'FEB' 2022 /\n/\n")
+    model = Path("m.json")
+    simulator = cast(
+        Any, SimpleNamespace(template_path=deck, case_dir=None, stops_at_report_dates=True)
+    )
+    refuse_early_runs(model, "2022-02-01", SimpleNamespace(), simulator, "ssh")
+    with pytest.raises(ConfigError, match="does not carry a member's stop date"):
+        refuse_early_runs(
+            model, "2022-02-01", SimpleNamespace(carries_stop_at=False), simulator, "ssh"
+        )
+    with pytest.raises(ConfigError, match=r"not a report date of the deck deck\.mako"):
+        refuse_early_runs(model, "2022-01-15", SimpleNamespace(), simulator, "ssh")
+    with pytest.raises(ConfigError, match="cannot stop at a report date"):
+        refuse_early_runs(model, "2022-02-01", SimpleNamespace(), cast(Any, SimpleNamespace()),
+                          "ssh")  # fmt: skip

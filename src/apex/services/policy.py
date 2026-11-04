@@ -89,7 +89,9 @@ def _plugin_sections(config: BaseModel) -> list[tuple[str, BaseModel]]:
     if isinstance(config, HistoryMatchConfig):
         return list(plugin_sections(config))
     if isinstance(config, PredictionConfig):
-        return [("simulators", config.simulator)]
+        # The controls' parameterizations name files and programs too (decision 6).
+        controls = [] if config.controls is None else config.controls.parameterizations
+        return [("simulators", config.simulator), *(("parameterizations", p) for p in controls)]
     if isinstance(config, OptimizationConfig):
         from apex.services.plugins import objective_plugins
 

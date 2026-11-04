@@ -63,7 +63,13 @@ from apex.core.errors import (
 )
 from apex.core.plugins import executors, priors, simulators, surrogate_designs, surrogate_models
 from apex.core.progress import ProgressReporter
-from apex.core.simulation import CaseFileSimulator, Executor, Simulator
+from apex.core.simulation import (
+    CaseFileSimulator,
+    Executor,
+    SeriesRequest,
+    Simulator,
+    match_vectors,
+)
 from apex.core.surrogates import (
     AdaptiveDesign,
     BuiltinDesign,
@@ -75,6 +81,7 @@ from apex.core.surrogates import (
 from apex.domain.config import HistoryMatchConfig, PluginSection, SurrogateRunSection
 from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.optimization import OptimizationConfig
+from apex.domain.prediction import PredictionSurrogateSection
 from apex.domain.state import StateLayout, StateVariable
 from apex.domain.surrogate import (
     BuildCost,
@@ -129,6 +136,7 @@ from apex.storage.surrogate_files import (
     write_surrogate,
 )
 from apex.workflows.parameterization import PropertyMap, parameterized
+from apex.workflows.prediction import PredictionSurrogate
 from apex.workflows.simulated_objective import SimulatedObjective
 from apex.workflows.surrogate import (
     MembersOutcome,
@@ -2725,13 +2733,23 @@ def refuse_model(
     section = config.surrogate
     assert section is not None
     manifest = model.manifest
-    if isinstance(model.model, EarlyStartSurrogate):
-        # A run's early simulations of each member come with step 2b.
-        raise ConfigError(
-            f"the surrogate {model.path} continues each member's early simulation (an "
-            "early-start model): history matching with it is not built yet"
-        )
     name = model.path
+    if isinstance(model.model, EarlyStartSurrogate) and isinstance(
+        model.model, CoarseCorrectedSurrogate
+    ):
+        raise ConfigError(
+            f"the surrogate {name} both corrects a coarse simulation and continues each "
+            "member's early run: a run makes one kind of companion run, not both"
+        )
+    if isinstance(model.model, EarlyStartSurrogate):
+        # Each member runs to the early date, then the model continues it.
+        early = set(model.model.early_keys())
+        if not any(key not in early for key in observations.keys):
+            raise ConfigError(
+                f"the surrogate {name} continues each member's run from "
+                f"{model.model.early_until}, and every observation of this run lies up to "
+                "that date: the simulator's early runs would be the whole forecast"
+            )
     if section.on_check_failure == "refit" and getattr(model.model, "trains_on_coarse", False):
         # A run makes no coarse runs for such a model, and its refit set would need them.
         raise ConfigError(
@@ -2984,6 +3002,120 @@ def planned_simulator_runs(
             "counted as if it forecast everything"
         )
     return runs, notes
+
+
+# ===================================================================== prediction (§6)
+
+
+def prediction_surrogate(
+    section: PredictionSurrogateSection,
+    case: HistoryMatchConfig,
+    simulator: Simulator,
+    executor: object,
+    property_map: PropertyMap,
+    request: SeriesRequest,
+    execution: str,
+) -> tuple[PredictionSurrogate, SeriesRequest]:
+    """Compose a prediction's surrogate and resolve its axis against the model's keys.
+
+    ``case`` is the run's configuration as the prediction runs it (its simulator, nothing
+    that wraps it), ``simulator`` the prediction's stack before its parameterizations,
+    ``executor`` (named ``execution``) where its simulator runs (an early-start model's
+    early runs). The axis:
+    the requested vectors matched against the model's scalar datatypes, and its times (by
+    default the model's report times), every one a key of the model: none beyond its last
+    report date (its horizon).
+
+    Raises
+    ------
+    ConfigError
+        If the model is refused (its gate or last check failed, another simulator stack or
+        case, a coarse-corrected model), the axis lies outside its keys, or an early-start
+        model's early runs could not run.
+    """
+    path = Path(section.model_file)
+    loaded = active_model(path)
+    manifest = loaded.manifest
+    model = loaded.model
+    if isinstance(model, CoarseCorrectedSurrogate):
+        raise ConfigError(
+            f"the surrogate {path} corrects a coarse simulation: predictions with it are not "
+            "supported (its coarse stack would have to run to the horizon)"
+        )
+    if manifest.gate is None or not manifest.gate.passed:
+        failures = [] if manifest.gate is None else manifest.gate.failures()
+        raise ConfigError(
+            f"the surrogate {path} did not pass its gate ({'; '.join(failures) or 'none'}): "
+            "rebuild it"
+        )
+    check = last_check(path, loaded.identity)
+    if check is not None and not check.passed:
+        raise ConfigError(
+            f"the surrogate {path} failed its last check ({check.id}): rebuild or refit it"
+        )
+    # The prediction's deck must be the build's: a changed schedule (another deck, other
+    # controls) is another stack, which the model has not seen.
+    mismatches = manifest.provenance.stack_mismatches(stack_provenance(case, simulator))
+    if mismatches:
+        raise ConfigError(
+            f"the surrogate {path} was built for another simulator stack or case than this "
+            f"prediction's ({', '.join(mismatches)} differ): build it on the prediction's deck "
+            "and simulator options, from a case without [geophysics] or [model_error] (a "
+            "prediction forecasts the simulator's series alone)"
+        )
+    scalar = [key for key in model.keys if key.index is None]
+    datatypes = sorted({key.datatype for key in scalar})
+    # In time order: ISO dates by date, step labels by number ("10" after "9").
+    times = sorted({key.time for key in scalar}, key=time_position)
+    try:
+        vectors = match_vectors(request.vectors, datatypes)
+    except ValueError as error:
+        raise ConfigError(
+            f"[prediction.outputs] vectors: {error} among the surrogate's ({', '.join(datatypes)})"
+        ) from error
+    wanted = list(times) if request.times is None else list(request.times)
+    beyond = [t for t in wanted if t not in times]
+    if beyond:
+        raise ConfigError(
+            f"[prediction.outputs] times: {beyond[0]} is not a report time of the surrogate "
+            f"{path} (its keys run {times[0]} to {times[-1]}, its horizon)"
+        )
+    known = set(scalar)
+    missing = [DataKey(t, v) for v in vectors for t in wanted if DataKey(t, v) not in known]
+    if missing:
+        raise ConfigError(f"the surrogate {path} does not answer {missing[0]}")
+    # The run's own check, now: its domain's keys and times (the gated ones), before any
+    # early run spends simulator time (the coder's review).
+    outside = check_request(loaded.domain, [DataKey(t, v) for v in vectors for t in wanted])
+    if not outside.inside:
+        raise ConfigError(f"the surrogate {path} cannot forecast this prediction: "
+                          f"{outside.message()}")  # fmt: skip
+    if isinstance(model, EarlyStartSurrogate):
+        composition.refuse_early_runs(path, model.early_until, executor, simulator, execution)
+
+    def inputs(blocks: Mapping[str, NDArray[np.float64]]) -> dict[str, NDArray[np.float64]]:
+        properties = blocks if property_map.identity else property_map.ensemble(blocks)
+        return {
+            name: np.ascontiguousarray(np.asarray(value, dtype=np.float64))
+            for name, value in properties.items()
+        }
+
+    assert manifest.gate is not None
+    surrogate = PredictionSurrogate(
+        simulator=loaded.simulator,
+        model=model,
+        domain=loaded.domain,
+        identity=loaded.identity,
+        executor=executors.create("serial")
+        if section.workers is None
+        else executors.create("process", workers=section.workers),
+        inputs=inputs,
+        simulator_of=functools.partial(parameterized, properties=property_map),
+        outside=section.outside,
+        tolerances=manifest.gate.tolerances,
+        kinds={d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None},
+    )
+    return surrogate, SeriesRequest(vectors, tuple(wanted))
 
 
 # ===================================================================== optimization (§6)

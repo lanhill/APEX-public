@@ -34,6 +34,7 @@ from apex.simulation.deck import (
     FidelityLevels,
     case_dir_files,
     failure_error,
+    include_resolver,
     is_summary_file,
     prune,
     read_series,
@@ -204,9 +205,12 @@ class OPMFlowSimulator:
         text = render_deck(template, member, {**self.template_values, **level_values}, case_dir)
         if member.stop_at is None:
             return text
-        # The template's report dates, includes followed here (under a runner, case_dir is
-        # the host's folder: the local one is read).
-        return stopped_deck(text, member, template_report_dates(template, self.case_dir))
+        # The template's report dates, includes followed here, and its schedule includes
+        # inlined (under a runner, case_dir is the host's folder: the local one is read).
+        return stopped_deck(
+            text, member, template_report_dates(template, self.case_dir),
+            include_resolver(template, self.case_dir, case_dir),
+        )  # fmt: skip
 
     def _run_elsewhere(self, runner: CommandRunner, deck: Path, work_dir: Path) -> None:
         """Run Flow through ``runner``, with paths relative to ``work_dir``."""

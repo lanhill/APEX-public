@@ -335,7 +335,11 @@ class Executor(Protocol):
       identity is taken of it (the ssh executor's remote mode);
     - ``remote_code_provider``, a ``"module:name"`` string naming the callable that
       prepares the copies of APEX remote members run, for an executor with
-      ``attach_remote``.
+      ``attach_remote``;
+    - ``carries_stop_at``, a bool (``True`` when absent): whether a member's
+      ``MemberInput.stop_at`` reaches its simulator. An executor that rebuilds members
+      elsewhere from their state alone (the ssh executor's remote mode) sets it ``False``,
+      and composition refuses an early-start surrogate on it.
     """
 
     def run_all(

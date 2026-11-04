@@ -8,14 +8,16 @@ case (the ``linear`` simulator, ``y = G x``) it reproduces the simulator to roun
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Self
+from typing import ClassVar, Self
 
 import numpy as np
 from numpy.typing import NDArray
 
+from apex.core.simulation import MemberInput
 from apex.core.surrogates import SurrogateInputs, SurrogateParts
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import SnapshotSet
+from apex.simulation.analytic import LinearModel
 
 N_STATE = 3
 TIMES = ("1", "2", "3", "4")
@@ -174,6 +176,7 @@ def write_case(
     extra: str = "",
     variance: float = VARIANCE,
     variances: Sequence[float] | None = None,
+    simulator: str = "linear",
 ) -> Path:
     """Write a linear case (``y = G x``) and return its configuration ``hm.toml``.
 
@@ -216,7 +219,7 @@ file = "observations.csv"
 truth_file = "truth.npz"
 
 [simulator]
-name = "linear"
+name = "{simulator}"
 
 [simulator.options]
 forward_file = "forward.npz"
@@ -269,3 +272,72 @@ box = {{ x = [{box[0]}, {box[1]}] }}
 {extra}
 """)
     return path
+
+
+#: The early-start test surrogate's early date: members run to it, then it continues them.
+EARLY_UNTIL = "2"
+
+
+class EarlyLinear(Affine):
+    """An early-start test surrogate: every key linear in the early keys.
+
+    On the linear case the keys up to time ``"2"`` (eight, of rank three) determine the
+    state, so the map from them to every key is exact; the early keys come back unchanged.
+    """
+
+    early_until = EARLY_UNTIL
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        super().fit(snapshots, rng)
+        early = snapshots.outputs[[snapshots.keys.index(k) for k in self.early_keys()]]
+        self.map = np.ascontiguousarray(snapshots.outputs @ np.linalg.pinv(early))
+        # A per-key shift, zero after any fit: tests write a biased copy with one.
+        self.shift = np.zeros(len(self.keys))
+
+    def early_keys(self) -> tuple[DataKey, ...]:
+        return tuple(k for k in self.keys if k.time <= self.early_until)
+
+    def early_coordinates(
+        self, early: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        return np.ascontiguousarray(early), np.zeros(early.shape[1])
+
+    def predict(self, inputs: SurrogateInputs, keys: Sequence[DataKey]) -> NDArray[np.float64]:
+        raise ValueError("needs the members' early runs")
+
+    def predict_from_early(
+        self, inputs: SurrogateInputs, early: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        full = self.map @ early + self.shift[:, None]
+        for row, key in enumerate(self.early_keys()):
+            full[self.keys.index(key)] = early[row]
+        return np.ascontiguousarray(full[[self.keys.index(k) for k in keys]])
+
+    def to_arrays(self) -> SurrogateParts:
+        own, arrays = super().to_arrays()
+        return own, {**arrays, "map": self.map, "shift": self.shift}
+
+    @classmethod
+    def from_arrays(
+        cls, manifest: Mapping[str, object], arrays: Mapping[str, NDArray[np.generic]]
+    ) -> Self:
+        model = super().from_arrays(manifest, arrays)
+        model.map = np.asarray(arrays["map"], dtype=np.float64)
+        model.shift = np.asarray(arrays["shift"], dtype=np.float64)
+        return model
+
+
+class StoppingLinear(LinearModel):
+    """The linear model, declaring that it stops at a report date (a deck simulator's
+    capability): a member with ``stop_at`` may be asked only for keys up to that date, and
+    every stopped run is recorded (member id, date, keys)."""
+
+    stops_at_report_dates = True
+    stopped: ClassVar[list[tuple[int, str, tuple[DataKey, ...]]]] = []
+
+    def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
+        if member.stop_at is not None:
+            later = [k for k in keys if k.time > member.stop_at]
+            assert not later, f"asked for {later[0]} after the stop date {member.stop_at}"
+            StoppingLinear.stopped.append((member.member_id, member.stop_at, tuple(keys)))
+        return super().run(member, keys)

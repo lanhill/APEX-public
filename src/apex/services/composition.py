@@ -98,6 +98,7 @@ from apex.core.simulation import (
     RemoteSpec,
     Simulator,
 )
+from apex.core.surrogates import EarlyStartSurrogate
 from apex.core.validation import StoppingRule
 from apex.domain.config import (
     AVOOptions,
@@ -126,6 +127,7 @@ from apex.simulation.deck import (
     deck_layout,
     missing_summary_wells,
     restart_schedule,
+    template_report_dates,
 )
 from apex.simulation.geophysics import GeophysicsSimulator, Grid
 from apex.simulation.model_error import ModelErrorSimulator
@@ -143,6 +145,7 @@ from apex.workflows.geophysics import (
 )
 from apex.workflows.history_matching import DATA_MISMATCH, HistoryMatchingWorkflow, RandomStreams
 from apex.workflows.parameterization import PropertyMap, StackedProperties
+from apex.workflows.surrogate_forecasts import SurrogateForecasting
 
 logger = logging.getLogger(__name__)
 
@@ -676,6 +679,23 @@ def build_run(
                 config, observations, surrogates.stack_provenance(config, stack.simulator),
                 layout=layout, executor=executor,
             )  # fmt: skip
+            if forecasting.early_until is not None and not getattr(
+                simulator, "stops_at_report_dates", False
+            ):
+                # The executors would refuse every early run; say so now.
+                raise ConfigError(
+                    f"the surrogate {config.surrogate.model_file} continues each member's "
+                    f"run from {forecasting.early_until}, and this run's simulator stack "
+                    f"({config.simulator.name}, with its wrappers) cannot stop at a report "
+                    "date (stops_at_report_dates: opm_flow and eclipse can, without model "
+                    "error or geophysics)"
+                )
+            if forecasting.early_until is not None:
+                refuse_early_gate(forecasting, observations, split, bool(transforms))
+                refuse_early_runs(
+                    forecasting.original.path, forecasting.early_until, executor, simulator,
+                    config.execution.name,
+                )  # fmt: skip
     except (TypeError, ValueError) as error:
         raise ConfigError(f"invalid plugin configuration: {error}") from error
     truth = None
@@ -710,6 +730,92 @@ def build_run(
     except ValueError as error:  # a transform or metric that does not fit the case
         raise ConfigError(f"invalid configuration: {error}") from error
     return Run(config, workflow, method, run_dir, tuple(geophysics_warnings))
+
+
+def refuse_early_gate(
+    forecasting: SurrogateForecasting,
+    observations: ObservationSet,
+    split: DataSplit | None,
+    transformed: bool,
+) -> None:
+    """Refuse an early-start surrogate whose checks would gate nothing.
+
+    The checks gate the assimilated and cv data, less the model's early keys (the members'
+    own runs): some of those data must lie after its date. Data transforms make keys of
+    their own, which are gated whole, early part included: allowed, and logged.
+
+    Raises
+    ------
+    ConfigError
+        If no assimilated or cv key lies after the model's early date.
+    """
+    model = forecasting.original.model
+    assert isinstance(model, EarlyStartSurrogate)
+    early = set(model.early_keys())
+    gated = observations.keys if split is None else (*split.history_matching, *split.cv)
+    if not any(key not in early for key in gated):
+        raise ConfigError(
+            f"the surrogate {forecasting.original.path} continues each member's run from "
+            f"{model.early_until}, and no assimilated or cv observation lies after that date: "
+            "its checks would gate nothing (test data are not gated)"
+        )
+    if transformed:
+        logger.warning(
+            "early-start surrogate with data transforms",
+            extra={"event": "surrogate_early_transformed",
+                   "detail": "the checks gate the transformed data whole, early part "
+                             "included, which dilutes the continuation's error"},
+        )  # fmt: skip
+
+
+def refuse_early_runs(
+    model_path: Path, early: str, executor: object, simulator: Simulator, execution: str
+) -> None:
+    """Refuse early runs that could not run, before any does.
+
+    For a run or a prediction with an early-start surrogate (``model_path``, its date
+    ``early``) on ``simulator`` (the stack, unwrapped by parameterizations) and
+    ``executor`` (named ``execution``).
+
+    The executor must carry a member's stop date to its simulator (``carries_stop_at``),
+    and the date must be a report date of the deck, as the template reads with its
+    includes followed (a deck whose dates the text alone cannot give is left to the cut).
+
+    Raises
+    ------
+    ConfigError
+        If either is not so.
+    """
+    if not getattr(simulator, "stops_at_report_dates", False):
+        raise ConfigError(
+            f"the surrogate {model_path} continues each member's run from {early}, and the "
+            "simulator stack cannot stop at a report date (stops_at_report_dates: opm_flow "
+            "and eclipse can, without model error or geophysics)"
+        )
+    if not getattr(executor, "carries_stop_at", True):
+        raise ConfigError(
+            f"the surrogate {model_path} continues each member's run from "
+            f"{early}, and the {execution} executor, as configured, does not carry a "
+            "member's stop date to its simulator (it rebuilds members elsewhere from their "
+            "state): use a mode or executor that runs the simulator's members here"
+        )
+    template = getattr(simulator, "template_path", None)
+    if not isinstance(template, Path):
+        return
+    dates = template_report_dates(template, getattr(simulator, "case_dir", None))
+    if dates is None:
+        return
+    try:
+        stop = dt.date.fromisoformat(early)
+    except ValueError as error:
+        raise ConfigError(f"the surrogate's early_until {early!r} is not an ISO date") from error
+    if stop not in dates:
+        raise ConfigError(
+            f"the surrogate {model_path} continues each member's run from "
+            f"{early}, which is not a report date of the deck {template.name} (its report "
+            f"dates run {dates[0].isoformat()} to {dates[-1].isoformat()}): every early "
+            "run would fail"
+        )
 
 
 def build_validation(

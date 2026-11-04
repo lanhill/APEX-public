@@ -14,6 +14,7 @@ This needs the ``reservoir`` extra (``mako``, ``resdata``).
 import datetime as dt
 import fnmatch
 import itertools
+import os
 import re
 import shlex
 import shutil
@@ -1485,7 +1486,134 @@ def _depth_tables(records: Sequence[str], in_mako: bool) -> list[list[tuple[floa
 # ------------------------------------------------------------------- stopping at a report date
 
 
-def stop_deck_at(text: str, stop_at: dt.date, report_dates: Sequence[dt.date] | None = None) -> str:
+#: Nested includes inlined at most this deep (a guard against an include of itself).
+_MAX_INCLUDE_DEPTH = 10
+#: Keywords that place report dates, or change what the cut reads, at a line's start.
+_CUT_KEYWORDS = re.compile(
+    r"^\s*(DATES|TSTEP|INCLUDE|SKIP|SKIP100|SKIP300|ENDSKIP|RESTART|END)\s*$", re.M
+)
+
+
+def inline_schedule_includes(
+    text: str,
+    resolve: Callable[[str], Path | None],
+    until: dt.date | None = None,
+) -> str:
+    """Return ``text`` with each ``INCLUDE`` of its ``SCHEDULE`` section replaced by the file.
+
+    An include is text inclusion, so the deck that results runs as the original does; the
+    cut at a date (:func:`stop_deck_at`) then sees the included ``DATES`` and ``TSTEP``
+    records (decks whose schedule lives in includes). ``resolve`` maps an
+    ``INCLUDE`` record's path, as the rendered deck names it, to the local file, or ``None``
+    when it cannot (a relative path, a template expression, a ``PATHS`` alias, a missing
+    file): that include is left as it is. Nested includes are inlined too. Includes outside
+    the ``SCHEDULE`` section are left alone, and with ``until`` none after a ``DATES`` record
+    past that date (the cut drops them). Text after an ``INCLUDE`` record's ``/`` is a
+    comment to the simulators, and goes with the record.
+
+    Raises
+    ------
+    ValueError
+        If includes nest more than ten deep, or an included file that holds report
+        keywords is not UTF-8 text (one that holds none is left to the simulator).
+    """
+    out, _ = _inlined(text, resolve, until, in_schedule=False, depth=0)
+    return out
+
+
+def _inlined(
+    text: str,
+    resolve: Callable[[str], Path | None],
+    until: dt.date | None,
+    *,
+    in_schedule: bool,
+    depth: int,
+) -> tuple[str, bool]:
+    """Return :func:`inline_schedule_includes`'s text, and whether ``until`` was passed."""
+    if depth > _MAX_INCLUDE_DEPTH:
+        raise ValueError("INCLUDE files nest more than ten deep (an include of itself?)")
+    out: list[str] = []
+    section = "SCHEDULE" if in_schedule else ""
+    record: list[str] = []  # the INCLUDE keyword's lines while its record is read
+    parts: list[str] = []  # its record's text, comments removed, up to the "/"
+    body: list[str] = []  # another record's text, for a DATES record's date
+    keyword = ""
+    in_record = False
+    quote = ""
+    passed = False
+    for raw in text.splitlines(keepends=True):
+        line = raw.split("--", 1)[0].strip()
+        if record:
+            record.append(raw)
+            if not line:
+                continue
+            end, quote = _terminator(line, quote)
+            if end is None:
+                parts.append(line)
+                continue
+            match = _INCLUDE_PATH.search(" ".join([*parts, line[:end]]).strip())
+            target = None if match is None else resolve(match.group(1) or match.group(2))
+            if target is None:
+                out.extend(record)
+            else:
+                try:
+                    content: str | None = target.read_text(encoding="utf-8")
+                except UnicodeDecodeError as error:
+                    # Comments in another encoding (Latin-1, often): such an include is left
+                    # to the simulator unless it holds report dates, which the cut needs.
+                    text_of = target.read_bytes().decode("latin-1")
+                    if _CUT_KEYWORDS.search(text_of):
+                        raise ValueError(
+                            f"the schedule include {target.name} is not UTF-8 text "
+                            f"({error.reason} at byte {error.start}) and holds report "
+                            "keywords: save it as UTF-8 to cut the deck at a date"
+                        ) from error
+                    content = None
+                if content is None:
+                    out.extend(record)
+                else:
+                    included, passed = _inlined(
+                        content, resolve, until, in_schedule=True, depth=depth + 1
+                    )
+                    out.append(f"-- APEX: the INCLUDE of {target.name} inlined, to cut at a date\n")
+                    out.append(included if included.endswith("\n") else included + "\n")
+            record, parts, quote = [], [], ""
+            continue
+        out.append(raw)
+        if not line:
+            continue
+        if not in_record:
+            if keyword == "TITLE":
+                keyword = ""  # TITLE's one line of free text, with no "/"
+                continue
+            match = _KEYWORD.match(line) or _SECTION_RULER.match(line)
+            if match is not None:
+                keyword = match.group(1)
+                if keyword in _SECTIONS:
+                    section = keyword
+                if keyword == "INCLUDE" and section == "SCHEDULE" and not passed:
+                    out.pop()
+                    record = [raw]
+                continue
+        end, quote = _terminator(line, quote)
+        in_record = end is None
+        if keyword == "DATES" and section == "SCHEDULE" and until is not None:
+            body.append(line if end is None else line[:end])
+            if end is not None:
+                date = _date(_expand(" ".join(body)))
+                body = []
+                passed = passed or (date is not None and date > until)
+    if record:
+        out.extend(record)  # an unterminated INCLUDE: left for the simulator to refuse
+    return "".join(out), passed
+
+
+def stop_deck_at(
+    text: str,
+    stop_at: dt.date,
+    report_dates: Sequence[dt.date] | None = None,
+    resolve: Callable[[str], Path | None] | None = None,
+) -> str:
     """Return a rendered deck that ends at the report date ``stop_at``.
 
     The ``SCHEDULE`` section is cut after the ``DATES`` record of ``stop_at`` (its keyword
@@ -1502,6 +1630,11 @@ def stop_deck_at(text: str, stop_at: dt.date, report_dates: Sequence[dt.date] | 
     the template, includes followed) is given: then the main text's report dates up to the
     cut must be those, which they are only when the includes hold no ``DATES`` or ``TSTEP``.
 
+    With ``resolve``, the ``SCHEDULE`` section's includes are first inlined
+    (:func:`inline_schedule_includes`), so a deck whose report dates live in includes is
+    cut too; the text before the cut is then the deck's with those files in place of their
+    ``INCLUDE`` records, which the simulator reads alike.
+
     Refused besides: ``SKIP``, ``SKIP100``, ``SKIP300``, ``ENDSKIP`` or ``RESTART`` before the
     cut (the main text's schedule is then not the run's), and a ``DATES`` record with a time
     of day on or before the date (a date names one report only at midnight).
@@ -1511,6 +1644,8 @@ def stop_deck_at(text: str, stop_at: dt.date, report_dates: Sequence[dt.date] | 
     ValueError
         As said, or if ``stop_at`` is not a report date after ``START`` in the main text.
     """
+    if resolve is not None:
+        text = inline_schedule_includes(text, resolve, stop_at)
     lines = text.splitlines(keepends=True)
     start: dt.date | None = None
     section = ""
@@ -1635,12 +1770,16 @@ def stop_deck_at(text: str, stop_at: dt.date, report_dates: Sequence[dt.date] | 
 
 
 def stopped_deck(
-    text: str, member: MemberInput, report_dates: Sequence[dt.date] | None = None
+    text: str,
+    member: MemberInput,
+    report_dates: Sequence[dt.date] | None = None,
+    resolve: Callable[[str], Path | None] | None = None,
 ) -> str:
     """Return ``text`` cut at ``member.stop_at`` (:func:`stop_deck_at`); unchanged without it.
 
     ``report_dates``: the template's report dates (:func:`template_report_dates`), which let
-    a deck whose schedule includes come before a ``TSTEP`` be cut.
+    a deck whose schedule includes come before a ``TSTEP`` be cut. ``resolve``: the local
+    file of an ``INCLUDE`` path (:func:`include_resolver`), to inline schedule includes.
 
     Raises
     ------
@@ -1650,11 +1789,52 @@ def stopped_deck(
     if member.stop_at is None:
         return text
     try:
-        return stop_deck_at(text, dt.date.fromisoformat(member.stop_at), report_dates)
+        return stop_deck_at(text, dt.date.fromisoformat(member.stop_at), report_dates, resolve)
+    except OSError as error:
+        # Reading an include (a stale file handle, an I/O error) may not recur: retried.
+        raise TransientSimulationError(
+            f"member {member.member_id} cannot stop at {member.stop_at}: reading its "
+            f"schedule includes failed: {error}"
+        ) from error
     except ValueError as error:
         raise SimulationError(
             f"member {member.member_id} cannot stop at {member.stop_at}: {error}"
         ) from error
+
+
+def include_resolver(
+    template_path: Path, local_case_dir: Path | None, rendered_case_dir: Path | None = None
+) -> Callable[[str], Path | None]:
+    """Return a map from a rendered deck's absolute ``INCLUDE`` paths to local files.
+
+    ``${case_dir}`` was rendered as ``rendered_case_dir`` (under a runner, the host's
+    folder; default the local one), which is read here as ``local_case_dir`` (default the
+    template's folder, as :func:`render_deck`'s). ``None``, so that the include is left to
+    the simulator, for a relative path (the simulators take it from the deck's own folder,
+    the member's work directory, which holds no copy here), a name with ``$`` (a ``PATHS``
+    alias), a file that is not there, and under a runner an absolute path outside the
+    rendered ``case_dir`` (the host's file may differ from the one here).
+    """
+    local = (local_case_dir or template_path.resolve().parent).resolve()
+    # Here a path is resolved (symbolic links, ".."); a host's only normalised.
+    rendered = local if rendered_case_dir is None else Path(rendered_case_dir).resolve()
+    elsewhere = rendered != local
+    if elsewhere:
+        rendered = Path(os.path.normpath(str(rendered_case_dir)))
+
+    def resolve(name: str) -> Path | None:
+        if "$" in name:
+            return None
+        if not Path(name).is_absolute():
+            return None
+        path = Path(os.path.normpath(name)) if elsewhere else Path(name).resolve()
+        if elsewhere:
+            if not path.is_relative_to(rendered):
+                return None
+            path = local / path.relative_to(rendered)
+        return path if path.is_file() else None
+
+    return resolve
 
 
 def template_report_dates(

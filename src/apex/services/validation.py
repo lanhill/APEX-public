@@ -159,6 +159,17 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
                 "the surrogate corrects a coarse simulation: each of its evaluations is also "
                 "a run of the coarse stack, counted with the simulator runs"
             )
+        if forecasting is not None and forecasting.early_until is not None:
+            # Every surrogate evaluation first runs its member up to the
+            # model's early date.
+            if runs is not None and evaluations is not None:
+                runs += evaluations
+            warnings.append(
+                "the surrogate continues each member's run from "
+                f"{forecasting.early_until}: each of its evaluations is also a simulator run "
+                "up to that date, counted with the simulator runs (each a share of a full run; "
+                "members outside the domain or whose early run fails make one too, uncounted)"
+            )
         if forecasting is not None:
             original = forecasting.original
             surrogate = f"{original.manifest.plugin} {original.identity[:12]}"

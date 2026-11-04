@@ -18,6 +18,9 @@ history-matching run directory and never changes it. Example::
     [simulator.options]                           # overrides of the run's [simulator]
     deck_template_file = "../model/deck_prediction.mako"
 
+    [surrogate]                                   # optional: forecast with a fitted model
+    model_file = "../surrogates/to_2030/model/surrogate.json"
+
 Relative paths are resolved against the configuration file's directory.
 """
 
@@ -28,7 +31,7 @@ from typing import Any, Literal, Self
 
 import numpy as np
 from numpy.typing import NDArray
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from apex.domain.config import PluginSection, _Strict
 
@@ -114,6 +117,93 @@ class SimulatorOverride(_Strict):
     options: dict[str, Any] = Field(default_factory=dict)
 
 
+class PredictionSurrogateSection(_Strict):
+    """``[surrogate]`` of a prediction: members forecast by a model.
+
+    The model's keys must reach the requested vectors and times (its horizon): the
+    prediction's times default to the model's report times. The true model is always
+    forecast by the simulator, and the history check compares the surrogate's members
+    within the model's gate.
+    """
+
+    model_file: Path = Field(description="The surrogate's manifest (surrogate.json).")
+    outside: Literal["stop", "simulator"] = Field(
+        default="stop",
+        description="A member outside the model's domain stops the prediction, or is run "
+        "by the simulator.",
+    )
+    workers: int | None = Field(
+        default=None, ge=1, description="Process workers for the surrogate (None: serial)."
+    )
+
+
+class PredictionControlVariable(_Strict):
+    """``[[controls.variables]]`` of a prediction: one named block of fixed controls."""
+
+    name: str = Field(min_length=1)
+    values: float | list[float] = Field(description="The block's value(s), one per control.")
+    lower: float | None = Field(default=None, description="Lower bound of every value.")
+    upper: float | None = Field(default=None, description="Upper bound of every value.")
+
+    @property
+    def size(self) -> int:
+        """Return the number of controls in the block."""
+        return 1 if isinstance(self.values, float | int) else len(self.values)
+
+    def array(self) -> NDArray[np.float64]:
+        """Return the values, ``(size,)``."""
+        return np.atleast_1d(np.asarray(self.values, dtype=np.float64)).copy()
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        values = self.array()
+        if values.size == 0:
+            raise ValueError(f"controls {self.name!r} have no value")
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"controls {self.name!r} have non-finite values")
+        if self.lower is not None and self.upper is not None and self.lower >= self.upper:
+            raise ValueError(f"controls {self.name!r}: lower must be below upper")
+        outside = [
+            float(v)
+            for v in values
+            if (self.lower is not None and v < self.lower)
+            or (self.upper is not None and v > self.upper)
+        ]
+        if outside:
+            raise ValueError(f"controls {self.name!r}: values outside their bounds: {outside}")
+        return self
+
+
+class PredictionControlsSection(_Strict):
+    """``[controls]`` of a prediction (decision 6): a control scenario.
+
+    Fixed values every member and the truth are given, after the run's own
+    parameterizations: the deck template reads them (e.g. ``${prodbhp_steps[k]}``), and a
+    control-aware surrogate gets them as inputs. They are never part of the state.
+    ``parameterizations`` map them first, as an optimization's controls (e.g.
+    ``control_schedule``).
+    """
+
+    variables: list[PredictionControlVariable] = Field(min_length=1)
+    parameterizations: list[PluginSection] = Field(
+        default_factory=list,
+        description="Parameterizations of the controls only (e.g. control_schedule), in order.",
+    )
+
+    @model_validator(mode="after")
+    def _unique(self) -> Self:
+        names = [v.name for v in self.variables]
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            raise ValueError(f"controls repeat: {repeated}")
+        return self
+
+
+#: Optional sections left out of a prediction's dump when unset, so that a prediction
+#: without them keeps the configuration and fingerprint of one made before they existed.
+_DROPPED_WHEN_UNSET = ("surrogate", "controls")
+
+
 class PredictionConfig(_Strict):
     """A complete prediction."""
 
@@ -122,6 +212,26 @@ class PredictionConfig(_Strict):
     execution: PluginSection | None = Field(
         default=None, description="Where members run; default: the run's [execution]."
     )
+    surrogate: PredictionSurrogateSection | None = Field(
+        default=None, description="Forecast the members with a fitted surrogate."
+    )
+    controls: PredictionControlsSection | None = Field(
+        default=None, description="A control scenario every member is given."
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_unset_sections(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave ``surrogate`` and ``controls`` out of the dump when they are unset.
+
+        A plain prediction's ``config.json`` and its fingerprint then stay those of
+        predictions made before the sections existed, so their folders resume (the coder's
+        review). The return annotation keeps the serialization schema's shape.
+        """
+        data: dict[str, Any] = handler(self)
+        for name in _DROPPED_WHEN_UNSET:
+            if data.get(name) is None:
+                data.pop(name, None)
+        return data
 
 
 @dataclass(frozen=True, slots=True)

@@ -151,11 +151,17 @@ options = { dims = [50, 50, 1], factors = [2, 2, 1], means = { poro = "arithmeti
 
 Some surrogates continue a member's own run instead of replacing it: each member is simulated up to a report date, and the model predicts the later report dates from the member's data up to that date.
 
-- **Running to a date:** a member can carry a stop date (`MemberInput.stop_at`, an ISO report date). `opm_flow` and `eclipse` honour it by cutting the rendered deck after that report date (a `DATES` record, or a `TSTEP` step reaching it) and closing it with `END`; the text before the cut is the deck's own. The date must be a report date of the deck's schedule, in whole days. Decks that skip or restart before it, or whose `SCHEDULE` includes hold report dates of their own before it, are refused. Executors refuse a stop date for a simulator that cannot honour it, so no run silently goes to the end of its schedule.
+- **Running to a date:** a member can carry a stop date (`MemberInput.stop_at`, an ISO report date). `opm_flow` and `eclipse` honour it by cutting the rendered deck after that report date (a `DATES` record, or a `TSTEP` step reaching it) and closing it with `END`. The `SCHEDULE` section's includes are first written into the deck in place of their `INCLUDE` records (an include is text inclusion, so the run is the same), so a schedule kept in include files is cut too; the rest of the text before the cut is the deck's own. The date must be a report date of the deck's schedule, in whole days. Includes named by a relative path or a `PATHS` alias are left as they are, and when they hold report dates before the date the deck is refused, as is one that skips or restarts before it; a schedule include that is not UTF-8 text is left as it is, and refused by name if it holds report dates. Executors refuse a stop date for a simulator that cannot honour it, so no run silently goes to the end of its schedule.
 - **The protocol:** such a model is a `core.surrogates.EarlyStartSurrogate`. It names the keys it reads up to its date (`early_keys()`), places a member's early data in the validated domain (`early_coordinates`), and predicts from them (`predict_from_early`); it returns the early keys unchanged.
 - **The domain** bounds the early data rather than the inputs, so a member whose early behaviour lies outside the training runs' is refused.
 - **The gate** uses the held-out runs' own values up to the date as their early data, so it judges exactly what a member would get, with no extra run. It scores only the keys after the date: the early ones are the member's own values.
-- **Not yet supported:** history matching and predictions with an early-start surrogate (refused for now). Optimizations refuse them, since their controls change the whole schedule.
+- **In history matching,** each surrogate forecast first runs every member up to the model's date:
+  - the runs use the run's own simulator and executor, so pools, licences, retries and `keep_simulations` apply as for the simulator's runs; they go in `simulations/early_<iteration>/`, and are asked only for the model's early keys;
+  - then the domain check and the prediction follow; a member whose early run fails is a failed member, and one outside the domain runs whole;
+  - the checks, and the posterior's comparison in the summary, gate only the keys after the date; data transforms make keys of their own, which are gated whole, early part included (the run logs `surrogate_early_transformed`);
+  - `apex validate` counts one early run per surrogate evaluation among the simulator runs (members outside the domain, or whose early run fails, make one more each), the run's summary reports `early_runs`, and the timing reports them apart (`early`);
+  - the run's simulator must stop at report dates (`opm_flow`, `eclipse`; not with model error or geophysics), its executor must carry the stop date to it (executors that rebuild members on other hosts do not), the date must be a report date of the deck, and some assimilated or cv observation must lie after it; otherwise the run is refused.
+- **Predictions** take early-start surrogates too (below, *Predictions with a surrogate*). Optimizations refuse them, since their controls change the whole schedule.
 
 ## State fields
 
@@ -310,3 +316,47 @@ What happens during the run:
 - **Resume** is bit-identical to an uninterrupted run, checks included, for APEX's optimizers and for ropt's.
 - **Checking the model later:** `uv run apex surrogate check MODEL --against OPT.toml --runs N` draws `N` controls by a Latin hypercube within the box the build's design spanned, which the model's manifest records (so a copied model can be checked; older models read it from their build's `design.npz`). With `[surrogate] extent = "hull"` or `"mahalanobis"` the domain is narrower than that box, the more so the more controls: runs outside it are simulated but not gated, the check warns, and its summary says how many; too few inside (`--min-inside`) fail the check, which makes the model unusable until rebuilt. Prefer the box extent for optimizations with many controls.
 - **In a study's comparison**, `objective:final`, `front_size:final` and `hypervolume:final` are the simulator's (the front without the members the simulator's values dominate); `objective:best` comes from the history, which holds the surrogate's values.
+
+## Predictions with a surrogate
+
+A prediction (`apex predict`) can forecast its ensembles with a surrogate whose keys reach the prediction's horizon: one built on series that run past the history (`[case] outputs = { vectors = [...], times = [...] }` in the build, on the prediction's own deck), or an early-start surrogate that continues each member's own run.
+
+```toml
+[surrogate]
+model_file = "runs/to_2030/model/surrogate.json"
+outside = "stop"     # members outside the model's domain: "stop" | "simulator"
+# workers = 4        # process workers for the surrogate (default: serial)
+```
+
+- **The axis** is the model's: `[prediction.outputs] vectors` are matched against the model's datatypes, and `times = "report"` means the model's report times, in time order. A time that is not one of them (beyond its last, its horizon) or a vector it does not answer is refused.
+- **The deck** must be the build's: a prediction whose simulator stack differs from the one the model was built on (another deck, other controls, another forward model, other simulator options such as a timeout) is refused, naming what differs. Build the model on a case without `[geophysics]` or `[model_error]`: a prediction forecasts the simulator's series alone.
+- **Members:** each ensemble's members (and mean models) are predicted by the model on its own executor, and a member with non-finite values stops the prediction; an early-start model's members first run on the simulator up to its date (through the prediction's executor, in `simulations/<ensemble>_early/`). A member outside the domain stops the prediction, or with `outside = "simulator"` runs whole by the simulator; a member whose early run fails is a failed member (a prediction stopped during the early runs makes them again on resume: they are not saved). The surrogate failing a member stops the prediction.
+- **The true model** of a synthetic case is always forecast by the simulator: it is what the scores measure the ensemble against.
+- **The history check** compares the members the simulator ran exactly, as without a surrogate. The surrogate's members are checked within the model's gate (`sigma_ratio` of the run's observation errors), and an early-start model's early keys exactly; a failure fails the prediction.
+- **Records:** `state.json` holds each member's source (`member_sources`), `provenance.json` the model and its identity (a rebuilt model is another prediction: delete the folder or give the prediction another name), and `apex summary` says how many members each source forecast.
+- **Not supported:** coarse-corrected surrogates (their coarse stack would have to run to the horizon), and run directories of a model-error run (refused for every prediction).
+
+### A control scenario
+
+After a history match the wells are often operated differently: they leave history mode for BHP or rate control, and their targets change. A prediction can set those future controls as a **control scenario**: fixed values that every member, and the true model, is given besides its state, and that the deck template reads.
+
+```toml
+[simulator.options]
+deck_template_file = "../model/deck_forecast.mako"   # e.g.  PROD1 OPEN BHP 5* ${bhp[0]} /
+
+[[controls.variables]]
+name = "bhp"
+values = [130.0, 140.0, 120.0]   # one value per control; optional lower and upper bounds are checked
+
+[[controls.parameterizations]]   # optional: maps the controls only, as an optimization's
+name = "control_schedule"
+options = { variable = "bhp", output = "bhp_steps", knots = [0, 60], n_steps = 122 }
+```
+
+- **The controls are not part of the state.** The history match never sees them, and they are left out of the scores and metrics. They come after the run's own parameterizations. A control named as a state variable or property, or as a name the deck template is given otherwise (`member_id`, `case_dir`, `level`, `coarse`, the simulator's `template_values`), is refused.
+- **When it is checked:** `apex validate` checks the section's form. The names and parameterizations are checked when the prediction starts, before anything is simulated or written.
+- **Simulators:** a deck simulator reads the controls in its template. A batch simulator that writes only its declared parameters (ERT's) is refused.
+- **A scenario is part of the prediction:** another scenario is another prediction, so give it another name. A prediction without `[controls]` is unchanged.
+- **Where they belong in the deck:** only after the history, so that the history check still reproduces the run. Template expressions are rendered in the deck template itself, not in the files it includes, so write the forecast's schedule in the template.
+- **With a surrogate:** not yet. A prediction with both `[controls]` and `[surrogate]` is refused until a model built over controls can be checked against the scenario.
+

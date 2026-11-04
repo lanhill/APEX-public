@@ -264,6 +264,17 @@ class PredictionSummarizer:
                 rows.append(_single(score, "all", index, float(np.mean(values))))
         names = list(result.forecasts)
         section = config.prediction
+        sources = PredictionDirectory(path).read_state().get("member_sources", {})
+        if config.surrogate is not None:
+            # Which members the surrogate forecast, the rest the simulator's.
+            for name, by_member in sources.items():
+                counts = {s: list(by_member.values()).count(s) for s in set(by_member.values())}
+                notes.append(
+                    f"{name}: {counts.get('surrogate', 0)} member(s) by the surrogate "
+                    f"{config.surrogate.model_file}, "
+                    f"{counts.get('simulator', 0)} by the simulator"
+                    + ("; the truth by the simulator" if result.truth is not None else "")
+                )
         return RunSummary(
             workflow="prediction",
             name=section.name,

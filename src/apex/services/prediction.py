@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -16,14 +16,16 @@ import numpy as np
 from pydantic import ValidationError
 
 import apex.algorithms.metrics  # noqa: F401  (registers the forecast scores)
+from apex.algorithms import optimization as _optimization  # noqa: F401  (control_schedule)
 from apex.core.errors import ApexError, ConfigError, PluginError, validation_problems
 from apex.core.forecast import ForecastScore
-from apex.core.plugins import executors, forecast_scores, simulators
+from apex.core.plugins import executors, forecast_scores, parameterizations, simulators
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import SeriesRequest
 from apex.domain.config import HistoryMatchConfig, PluginSection
 from apex.domain.observations import ObservationSet
-from apex.domain.prediction import PredictionConfig, PredictionResult
+from apex.domain.prediction import PredictionConfig, PredictionControlsSection, PredictionResult
+from apex.domain.state import StateLayout, StateVariable
 from apex.services import composition
 from apex.storage import provenance
 from apex.storage.inputs import read_observation_section
@@ -95,6 +97,21 @@ def resolve_prediction_config(config: PredictionConfig, base: Path) -> Predictio
             else config.execution.model_copy(
                 update={"options": resolve_options(config.execution.options)}
             ),
+            "surrogate": None
+            if config.surrogate is None
+            else config.surrogate.model_copy(
+                update={"model_file": resolve(config.surrogate.model_file)}
+            ),
+            "controls": None
+            if config.controls is None
+            else config.controls.model_copy(
+                update={
+                    "parameterizations": [
+                        p.model_copy(update={"options": resolve_options(p.options)})
+                        for p in config.controls.parameterizations
+                    ]
+                }
+            ),
         }
     )
 
@@ -151,13 +168,19 @@ def as_predicted(config: PredictionConfig, run: HistoryMatchConfig) -> HistoryMa
     })  # fmt: skip
 
 
-def _fingerprint(config: PredictionConfig, run_dir: RunDirectory, simulator: PluginSection) -> str:
+def _fingerprint(
+    config: PredictionConfig, run_dir: RunDirectory, simulator: PluginSection, model: str = ""
+) -> str:
     # The configuration, the run it reads and the content of the simulator's files (e.g.
-    # the deck template): a changed deck must not resume from members of the old one.
+    # the deck template): a changed deck must not resume from members of the old one; nor
+    # a rebuilt surrogate (``model``: its identity) from the old model's.
     digest = hashlib.sha256()
     digest.update(config.model_dump_json().encode())
+    digest.update(model.encode())
     digest.update(run_dir.config_text().encode())
-    for name, path in sorted(_input_files(simulator).items()):
+    # The controls' parameterizations' files too: none without [controls], so a plain
+    # prediction's fingerprint is unchanged.
+    for name, path in sorted({**_input_files(simulator), **_control_files(config)}.items()):
         digest.update(name.encode())
         digest.update(provenance.file_hash(path).encode() if path.is_file() else b"missing")
     return digest.hexdigest()
@@ -167,6 +190,18 @@ def _input_files(simulator: PluginSection) -> dict[str, Path]:
     return {
         f"simulator.{key}": Path(value)
         for key, value in simulator.options.items()
+        if key.endswith(composition.PATH_OPTION_SUFFIXES) and isinstance(value, str)
+    }
+
+
+def _control_files(config: PredictionConfig) -> dict[str, Path]:
+    """Return the files ``[[controls.parameterizations]]`` name, as the simulator's."""
+    if config.controls is None:
+        return {}
+    return {
+        f"controls.parameterizations[{i}].{key}": Path(value)
+        for i, section in enumerate(config.controls.parameterizations)
+        for key, value in section.options.items()
         if key.endswith(composition.PATH_OPTION_SUFFIXES) and isinstance(value, str)
     }
 
@@ -193,6 +228,7 @@ def _stored(
         iterate = full
     predicted = composition.all_roles(iterate, role_rows, observations.n_data)
     scalar = [i for i, key in enumerate(observations.keys) if key.index is None]
+    variances = np.ascontiguousarray(np.asarray(observations.variances, dtype=np.float64))
     keep = np.array(
         [
             int(m) not in coarse and source != SURROGATE
@@ -210,6 +246,8 @@ def _stored(
         tuple(observations.keys[i] for i in scalar),
         predicted[scalar][:, keep],
         iterate.member_ids[keep],
+        # The observation errors, for a surrogate prediction's gate.
+        variances[scalar],
     )
 
 
@@ -285,6 +323,67 @@ def predict_config(
         return _predict(config, progress, stopped)
 
 
+#: Names a deck template is given besides the member's blocks (simulation/deck.py
+#: render_deck: ``member_id``, ``case_dir``; the deck simulators' fidelity ``level`` and
+#: ``coarse``), with which a control of that name would clash unseen.
+RESERVED_CONTROL_NAMES = frozenset({"member_id", "case_dir", "level", "coarse"})
+
+
+def control_blocks(
+    controls: PredictionControlsSection,
+    state: PropertyMap,
+    layout: StateLayout,
+    template_values: Collection[str] = (),
+) -> dict[str, np.ndarray]:
+    """Return a control scenario's blocks ``{name: (n,)}``, after its parameterizations.
+
+    decision 6: what every member is given besides its state. Each
+    parameterization maps the controls only, as an optimization's (``control_schedule``).
+
+    Raises
+    ------
+    ConfigError
+        If a parameterization is unknown or invalid, or a control (or what its
+        parameterizations make of it) is named as one of the run's state variables or
+        properties, which it would hide, or as a name the deck template is given otherwise
+        (``member_id``, ``case_dir``, the simulator's ``template_values``).
+    """
+    variables = [
+        StateVariable(
+            v.name, v.size,
+            -np.inf if v.lower is None else float(v.lower),
+            np.inf if v.upper is None else float(v.upper),
+        )
+        for v in controls.variables
+    ]  # fmt: skip
+    built = []
+    for section in controls.parameterizations:
+        try:
+            built.append(parameterizations.create(section.name, **section.options))
+        except (PluginError, TypeError, ValueError) as error:
+            raise ConfigError(f"[[controls.parameterizations]] {section.name}: {error}") from error
+    try:
+        mapped = PropertyMap(built, StateLayout(variables)).member(
+            {v.name: v.array() for v in controls.variables}
+        )
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"[controls]: {error}") from error
+    clashing = sorted(set(mapped) & (set(layout.names) | set(state.names)))
+    if clashing:
+        raise ConfigError(
+            f"[controls] names {clashing}, which the run's state or its parameterizations "
+            "already give each member: name the controls otherwise"
+        )
+    reserved = sorted(set(mapped) & (RESERVED_CONTROL_NAMES | set(template_values)))
+    if reserved:
+        raise ConfigError(
+            f"[controls] names {reserved}, which the deck template is given otherwise "
+            "(member_id, case_dir, level, coarse, the simulator's template_values): name the "
+            "controls otherwise"
+        )
+    return {name: np.ascontiguousarray(np.ravel(v), dtype=np.float64) for name, v in mapped.items()}
+
+
 def _predict(
     config: PredictionConfig,
     progress: ProgressReporter | None,
@@ -308,11 +407,10 @@ def _predict(
     simulator_config = simulator_section(config, run_config)
     execution = config.execution or run_config.execution
     try:
-        simulator = simulators.create(simulator_config.name, **simulator_config.options)
+        base = simulators.create(simulator_config.name, **simulator_config.options)
         # the run's parameterizations map each member's state, as in the run.
-        simulator = parameterized(
-            simulator, PropertyMap(composition.build_parameterizations(run_config), layout)
-        )
+        property_map = PropertyMap(composition.build_parameterizations(run_config), layout)
+        simulator = parameterized(base, property_map)
         executor = executors.create(execution.name, **execution.options)
         composition.check_executor(executor, simulator)
         # an executor running members whole on other hosts rebuilds the
@@ -330,10 +428,51 @@ def _predict(
         raise ConfigError(f"invalid prediction plugin configuration: {error}") from error
     ensembles, truth = _ensembles(config, run_config, results)
     assert section.output_dir is not None
+    times = section.outputs.times
+    request = SeriesRequest(
+        tuple(section.outputs.vectors), None if times == "report" else tuple(times)
+    )
+    controls = (
+        {}
+        if config.controls is None
+        else control_blocks(
+            config.controls, property_map, layout,
+            dict(simulator_config.options.get("template_values") or {}),
+        )
+    )  # fmt: skip
+    if controls and getattr(base, "ert_batches", False):
+        # ERT's batches write only the parameters they declare (simulation/ert.py
+        # write_parameters): the scenario would never reach the forward model (the review).
+        raise ConfigError(
+            f"a prediction with [controls] cannot run on the {simulator_config.name} simulator: "
+            "its batches write only their declared parameters, not the controls"
+        )
+    if controls and config.surrogate is not None:
+        # Until a model built over controls is checked against the scenario (decision 6, §3),
+        # a model built without them would predict as if the controls were the build's.
+        raise ConfigError(
+            "a prediction with [controls] cannot use [surrogate] yet: a control-aware model "
+            "must be checked against the scenario's controls"
+        )
+    surrogate = None
+    if config.surrogate is not None:
+        # The members (not the truth) by a fitted model, its keys the axis.
+        from apex.services import surrogates
+
+        try:
+            surrogate, request = surrogates.prediction_surrogate(
+                config.surrogate,
+                remote_config(run_config, simulator_config, section.output_dir),
+                base, executor, property_map, request, execution.name,
+            )  # fmt: skip
+        except (TypeError, ValueError, PluginError) as error:
+            raise ConfigError(f"invalid prediction [surrogate]: {error}") from error
     directory = PredictionDirectory(section.output_dir)
     directory.open(
         config_text=config.model_dump_json(indent=2),
-        fingerprint=_fingerprint(config, run_dir, simulator_config),
+        fingerprint=_fingerprint(
+            config, run_dir, simulator_config, "" if surrogate is None else surrogate.identity
+        ),
     )
     if stopped is not None and stopped():
         (directory.path / "stop_requested").write_text("stop at the next checkpoint\n")
@@ -347,11 +486,19 @@ def _predict(
                 "version": _simulator_version(simulator),
             },
         )
-        | _execution(executor, simulator),
-    )
-    times = section.outputs.times
-    request = SeriesRequest(
-        tuple(section.outputs.vectors), None if times == "report" else tuple(times)
+        | _execution(executor, simulator)
+        | (
+            {}
+            if surrogate is None or config.surrogate is None
+            else {
+                "surrogate": {
+                    "model": str(config.surrogate.model_file),
+                    "identity": surrogate.identity,
+                    "early_until": surrogate.early_until,
+                    "outside": surrogate.outside,
+                }
+            }
+        ),
     )
     observations = read_observation_section(run_config.observations)
     try:
@@ -368,6 +515,8 @@ def _predict(
             percentile_convention=section.percentile_convention,
             min_success_fraction=run_config.failures.min_success_fraction,
             progress=progress,
+            surrogate=surrogate,
+            controls=controls,
         )
     except ValueError as error:
         raise ConfigError(f"invalid prediction: {error}") from error

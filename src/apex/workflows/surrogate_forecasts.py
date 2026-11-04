@@ -34,7 +34,7 @@ from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError, WorkflowError
 from apex.core.simulation import Executor, Simulator
-from apex.core.surrogates import SurrogateModel
+from apex.core.surrogates import EarlyStartSurrogate, SurrogateModel
 from apex.domain.config import SurrogateRunSection
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
@@ -181,9 +181,18 @@ class SurrogateForecasting:
         self.simulator_runs = 0
         # A coarse-corrected model's coarse runs: simulator runs of their own.
         self.coarse_runs = 0
+        # An early-start model's early runs: each member simulated up to
+        # the model's early date before it is predicted; simulator runs of their own.
+        self.early_runs = 0
         self.switched_at: int | None = None
 
     # ------------------------------------------------------------------ decisions
+
+    @property
+    def early_until(self) -> str | None:
+        """The report date members are simulated up to for an early-start model, else ``None``."""
+        model = self.original.model
+        return model.early_until if isinstance(model, EarlyStartSurrogate) else None
 
     @property
     def extent(self) -> DomainExtent:
@@ -383,6 +392,7 @@ class SurrogateForecasting:
             "simulator_runs": self.simulator_runs,
             "switched_at": self.switched_at,
             **({"coarse_runs": self.coarse_runs} if self.coarse is not None else {}),
+            **({"early_runs": self.early_runs} if self.early_until is not None else {}),
         }
 
     def restore(self, saved: Mapping[str, Any] | None, run_path: Path) -> None:
@@ -412,6 +422,7 @@ class SurrogateForecasting:
         self.evaluations = int(saved.get("evaluations", 0))
         self.simulator_runs = int(saved.get("simulator_runs", 0))
         self.coarse_runs = int(saved.get("coarse_runs", 0))
+        self.early_runs = int(saved.get("early_runs", 0))
         switched = saved.get("switched_at")
         self.switched_at = None if switched is None else int(switched)
         if self.refits:
@@ -435,7 +446,9 @@ class SurrogateForecasting:
             "switched_to_simulator_at": self.switched_at,
             "tolerances": self.tolerances.model_dump(mode="json"),
             **({"coarse_runs": self.coarse_runs} if self.coarse is not None else {}),
-        }
+            **({"early_until": self.early_until, "early_runs": self.early_runs}
+               if self.early_until is not None else {}),
+        }  # fmt: skip
 
 
 #: The ``forecast_done`` label of the surrogate's forecasts; every other one is the simulator's.
@@ -443,6 +456,9 @@ SURROGATE_LABEL = "surrogate"
 
 #: The end of the ``forecast_done`` labels of a coarse-corrected model's coarse runs.
 COARSE_LABEL = "(coarse)"
+
+#: The end of the ``forecast_done`` labels of an early-start model's early runs.
+EARLY_LABEL = "(early)"
 
 
 def _side(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -475,8 +491,9 @@ def forecast_timing(events: Iterable[Mapping[str, Any]], cost: BuildCost | None)
     events
         The run's structured events (``events.jsonl``, every session of it): the
         ``forecast_done`` ones are used, ``label = "surrogate"`` for the surrogate's,
-        labels ending ``(coarse)`` for a coarse-corrected model's coarse runs, every
-        other label the simulator's (checks, members outside the domain, the
+        labels ending ``(coarse)`` for a coarse-corrected model's coarse runs and
+        ``(early)`` for an early-start model's early runs,
+        every other label the simulator's (checks, members outside the domain, the
         posterior's forecast, a switch to the simulator).
     cost
         The build's full runs (``None``: unknown, and no speed-up is given).
@@ -484,8 +501,8 @@ def forecast_timing(events: Iterable[Mapping[str, Any]], cost: BuildCost | None)
     Returns
     -------
     dict
-        ``surrogate``, ``simulator`` and ``coarse`` (the coarse runs, part of each corrected
-        prediction's cost): forecasts, members, wall ``seconds`` and per member,
+        ``surrogate``, ``simulator``, ``coarse`` and ``early`` (the coarse or early runs,
+        part of each prediction's cost): forecasts, members, wall ``seconds`` and per member,
         ``worker_seconds`` (wall times members at once) and per member; ``full_model``: the
         build's cost; ``speedup``: the full model's mean run time over the surrogate's
         worker-seconds per member (with its coarse run's, for a coarse-corrected model);
@@ -498,27 +515,36 @@ def forecast_timing(events: Iterable[Mapping[str, Any]], cost: BuildCost | None)
     done = [e for e in events if e.get("event") == "forecast_done"]
     surrogate = _side([e for e in done if e.get("label") == SURROGATE_LABEL])
     coarse = _side([e for e in done if str(e.get("label", "")).endswith(COARSE_LABEL)])
+    early = _side([e for e in done if str(e.get("label", "")).endswith(EARLY_LABEL)])
     simulator = _side([
         e for e in done
-        if e.get("label") != SURROGATE_LABEL and not str(e.get("label", "")).endswith(COARSE_LABEL)
+        if e.get("label") != SURROGATE_LABEL
+        and not str(e.get("label", "")).endswith((COARSE_LABEL, EARLY_LABEL))
     ])  # fmt: skip
     per_member = surrogate["worker_seconds_per_member"]
-    if per_member is not None and coarse["members"]:
-        # Each corrected prediction costs its coarse run too.
-        coarse_each = coarse["worker_seconds_per_member"]
-        per_member = None if coarse_each is None else per_member + coarse_each
+    for companion in (coarse, early):
+        if per_member is not None and companion["members"]:
+            # Each prediction costs its coarse or early run too.
+            each = companion["worker_seconds_per_member"]
+            per_member = None if each is None else per_member + each
     mean = None if cost is None else cost.mean_seconds
-    both = (surrogate["worker_seconds"], simulator["worker_seconds"], coarse["worker_seconds"])
+    both = (
+        surrogate["worker_seconds"], simulator["worker_seconds"], coarse["worker_seconds"],
+        early["worker_seconds"],
+    )  # fmt: skip
     return {
         "surrogate": surrogate,
         "simulator": simulator,
         "coarse": coarse,
+        "early": early,
         "full_model": None if cost is None else cost.model_dump(mode="json"),
         "speedup": mean / per_member if mean is not None and per_member else None,
         "simulator_equivalent_worker_seconds": (
             None if mean is None else surrogate["members"] * mean
         ),
-        "run_seconds": surrogate["seconds"] + simulator["seconds"] + coarse["seconds"],
+        "run_seconds": (
+            surrogate["seconds"] + simulator["seconds"] + coarse["seconds"] + early["seconds"]
+        ),
         "run_worker_seconds": None if None in both else float(sum(both)),
     }
 

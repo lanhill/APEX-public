@@ -9,7 +9,6 @@ early data are the runs' own values (no extra run).
 
 import pickle
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self, cast
 
@@ -188,14 +187,9 @@ def _load_persist() -> tuple[_Persist, TrainingDomain]:
     return model, outcome.domain
 
 
-def test_history_matching_and_optimizations_refuse_an_early_start_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = SimpleNamespace(surrogate=SimpleNamespace(on_check_failure="stop"))
-    model = SimpleNamespace(model=_Persist(), manifest=None, path=Path("model.json"))
-    with pytest.raises(ConfigError, match="history matching with it is not built yet"):
-        surrogates.refuse_model(cast(Any, config), cast(Any, model), cast(Any, None),
-                                cast(Any, None))  # fmt: skip
+def test_optimizations_refuse_an_early_start_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Their controls change the whole schedule (history matching takes it since step 2b:
+    tests/workflows/test_surrogate_history_matching.py)."""
     monkeypatch.setattr(
         surrogates, "load_surrogate", lambda path: SimpleNamespace(model=_Persist(), manifest=None)
     )

@@ -53,6 +53,7 @@ from apex.simulation.deck import (
     DECK_NAME,
     FidelityLevels,
     failure_error,
+    include_resolver,
     is_summary_file,
     prune,
     read_series,
@@ -207,7 +208,10 @@ class EclipseSimulator:
         values = {**self.template_values, **level_values}
         text = render_deck(template, member, values, self.case_dir)
         if member.stop_at is not None:
-            text = stopped_deck(text, member, template_report_dates(template, self.case_dir))
+            text = stopped_deck(
+                text, member, template_report_dates(template, self.case_dir),
+                include_resolver(template, self.case_dir),
+            )  # fmt: skip
         deck.write_text(text)
         self._run_eclipse(work_dir)
         try:
