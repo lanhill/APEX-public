@@ -230,3 +230,46 @@ class CoarseCorrectedSurrogate(Protocol):
         ``coarse`` ``(n_model_keys, n)``: the members' coarse forecasts at the model's keys.
         """
         ...
+
+
+@runtime_checkable
+class EarlyStartSurrogate(Protocol):
+    """A surrogate that continues a member's own early data.
+
+    Each member is simulated up to :attr:`early_until` (a report date: ``MemberInput.stop_at``,
+    on a simulator with ``stops_at_report_dates``), and the model predicts the rest of its
+    keys from that member's values at :meth:`early_keys` (its keys up to the date), returned
+    as they are. A build needs no extra runs: a full run's early data is its values at those
+    keys. Its :meth:`SurrogateModel.predict` refuses, naming the early data it lacks. Core
+    bounds its domain in the inputs' coordinates and :meth:`early_coordinates`, the latter's
+    residual as one more coordinate (as a coarse-corrected model's coarse forecast).
+    """
+
+    #: The report date (ISO) members are simulated up to.
+    early_until: str
+
+    def early_keys(self) -> tuple[DataKey, ...]:
+        """Return the model's keys up to :attr:`early_until`, in its keys' order."""
+        ...
+
+    def early_coordinates(
+        self, early: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return the early data's coordinates ``(d_e, n)`` and residual ``(n,)``.
+
+        ``early`` is ``(len(early_keys()), n)``.
+        """
+        ...
+
+    def predict_from_early(
+        self,
+        inputs: Mapping[str, NDArray[np.float64]],
+        early: NDArray[np.float64],
+        keys: Sequence[DataKey],
+    ) -> NDArray[np.float64]:
+        """Return the values at ``keys``, ``(len(keys), n)``; deterministic.
+
+        ``early`` ``(len(early_keys()), n)``: the members' simulated values up to the date,
+        which a key among the early keys gets back unchanged.
+        """
+        ...

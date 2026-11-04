@@ -68,6 +68,7 @@ from apex.core.surrogates import (
     AdaptiveDesign,
     BuiltinDesign,
     CoarseCorrectedSurrogate,
+    EarlyStartSurrogate,
     FieldSurrogate,
     SurrogateModel,
 )
@@ -133,7 +134,9 @@ from apex.workflows.surrogate import (
     MembersOutcome,
     check_success,
     column_objectives,
+    early_data,
     fit_and_gate,
+    gated_rows,
     run_members,
 )
 from apex.workflows.surrogate_forecasts import ActiveModel, SurrogateForecasting
@@ -2335,8 +2338,14 @@ def check_surrogate(
         snapshots = _snapshot_set(case, design.held_out_ids, design.held_out, outcome.values,
                                   case.provenance, sorted(failed_ids),
                                   coarse_values)  # fmt: skip
+        # An early-start model's early data: the check runs' own values up to its date.
+        companion = (
+            early_data(loaded.model, snapshots)
+            if isinstance(loaded.model, EarlyStartSurrogate)
+            else snapshots.coarse_outputs
+        )
         found = check_members(loaded.domain, loaded.model, snapshots.inputs, snapshots.run_ids,
-                              case.keys, coarse=snapshots.coarse_outputs)  # fmt: skip
+                              case.keys, coarse=companion)  # fmt: skip
         outside = set(found.members)
         inside = [j for j, m in enumerate(snapshots.run_ids) if m not in outside]
         tolerances = manifest.gate.tolerances if manifest.gate is not None else GateTolerances()
@@ -2346,6 +2355,10 @@ def check_surrogate(
                 assert gated.coarse_outputs is not None
                 predicted = np.ascontiguousarray(loaded.model.predict_corrected(
                     gated.inputs, gated.coarse_outputs, case.keys
+                ))  # fmt: skip
+            elif isinstance(loaded.model, EarlyStartSurrogate):
+                predicted = np.ascontiguousarray(loaded.model.predict_from_early(
+                    gated.inputs, early_data(loaded.model, gated), case.keys
                 ))  # fmt: skip
             else:
                 predicted = np.ascontiguousarray(loaded.model.predict(gated.inputs, case.keys))
@@ -2362,8 +2375,16 @@ def check_surrogate(
                 else (column_objectives(objective, predicted),
                       column_objectives(objective, gated.outputs))
             )  # fmt: skip
-            verdict = gate(predicted, gated.outputs, case.keys, gated.run_ids, fields=fields,
-                           tolerances=tolerances, variances=case.variances, kinds=kinds,
+            rows = gated_rows(loaded.model, case.keys)
+            scored = (
+                (predicted, gated.outputs, tuple(case.keys), case.variances) if rows is None
+                else (np.ascontiguousarray(predicted[rows]),
+                      np.ascontiguousarray(gated.outputs[rows]),
+                      tuple(case.keys[r] for r in rows),
+                      None if case.variances is None else case.variances[rows])
+            )  # fmt: skip
+            verdict = gate(scored[0], scored[1], scored[2], gated.run_ids, fields=fields,
+                           tolerances=tolerances, variances=scored[3], kinds=kinds,
                            failed=sorted(failed_ids), objectives=objectives)  # fmt: skip
         else:
             verdict = GateResult(held_out=[], failed=sorted(failed_ids), datatypes=[],
@@ -2704,6 +2725,12 @@ def refuse_model(
     section = config.surrogate
     assert section is not None
     manifest = model.manifest
+    if isinstance(model.model, EarlyStartSurrogate):
+        # A run's early simulations of each member come with step 2b.
+        raise ConfigError(
+            f"the surrogate {model.path} continues each member's early simulation (an "
+            "early-start model): history matching with it is not built yet"
+        )
     name = model.path
     if section.on_check_failure == "refit" and getattr(model.model, "trains_on_coarse", False):
         # A run makes no coarse runs for such a model, and its refit set would need them.
@@ -2984,6 +3011,12 @@ def optimization_surrogate(
     path = Path(section.model_file)
     loaded = load_surrogate(path)
     manifest = loaded.manifest
+    if isinstance(loaded.model, EarlyStartSurrogate):
+        # Each evaluation would need its own early simulation first.
+        raise ConfigError(
+            f"the surrogate {path} continues each member's early simulation (an early-start "
+            "model): optimizations cannot use it"
+        )
     if manifest.gate is None or not manifest.gate.passed:
         failures = [] if manifest.gate is None else manifest.gate.failures()
         raise ConfigError(

@@ -39,12 +39,20 @@ class MemberInput:
         elsewhere (``ssh``); ``None`` runs it here, as always. Only simulators with the
         capability ``accepts_runner`` honour it, and wrappers that rebuild a member keep it
         (``dataclasses.replace``).
+    stop_at
+        A report date (ISO) the run ends at (a member simulated to an early
+        time, then extrapolated); ``None`` runs the whole schedule, as always. Only
+        simulators with the capability ``stops_at_report_dates`` honour it; a caller asks
+        for no key after it. Executors refuse a member with a stop date for a simulator
+        without the capability (:func:`refuse_unsupported_stop`): it would run the whole
+        schedule silently.
     """
 
     member_id: int
     state: Mapping[str, NDArray[np.float64]]
     work_dir: Path | None = None
     runner: "CommandRunner | None" = None
+    stop_at: str | None = None
 
 
 class CommandRunner(Protocol):
@@ -606,3 +614,24 @@ class Parameterization(Protocol):
             If a consumed variable is missing or has the wrong size.
         """
         ...
+
+
+def refuse_unsupported_stop(simulator: object, member: MemberInput) -> None:
+    """Refuse a member with a stop date for a simulator that would ignore it.
+
+    Executors call it before running a member: a simulator without the
+    capability ``stops_at_report_dates`` (a wrapper that does not forward it, an analytic or
+    other-format simulator) would run the whole schedule, a wrong result rather than an
+    error.
+
+    Raises
+    ------
+    ValueError
+        If ``member.stop_at`` is set and the simulator lacks the capability.
+    """
+    if member.stop_at is not None and not getattr(simulator, "stops_at_report_dates", False):
+        raise ValueError(
+            f"member {member.member_id} is to stop at {member.stop_at}, and "
+            f"{type(simulator).__name__} cannot stop at a report date "
+            "(stops_at_report_dates): it would run the whole schedule"
+        )

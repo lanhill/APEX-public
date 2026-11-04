@@ -58,7 +58,9 @@ from apex.simulation.deck import (
     read_series,
     read_summary,
     render_deck,
+    stopped_deck,
     tail,
+    template_report_dates,
 )
 
 #: ``eclrun`` program of each Eclipse version.
@@ -116,6 +118,8 @@ class EclipseSimulator:
 
     #: The workflow gives each run its own work directory.
     needs_work_dir = True
+    #: A member's ``stop_at`` cuts its rendered deck at that report date.
+    stops_at_report_dates = True
 
     def __init__(
         self,
@@ -201,7 +205,10 @@ class EclipseSimulator:
         deck = work_dir / f"{DECK_NAME}.DATA"
         template, level_values = self.levels.for_member(member)
         values = {**self.template_values, **level_values}
-        deck.write_text(render_deck(template, member, values, self.case_dir))
+        text = render_deck(template, member, values, self.case_dir)
+        if member.stop_at is not None:
+            text = stopped_deck(text, member, template_report_dates(template, self.case_dir))
+        deck.write_text(text)
         self._run_eclipse(work_dir)
         try:
             check_run(work_dir / DECK_NAME)

@@ -35,7 +35,13 @@ from apex.core.errors import SimulationError
 from apex.core.options import Program
 from apex.core.plugins import executors
 from apex.core.resources import ResourcePools
-from apex.core.simulation import MemberCallback, MemberFailure, MemberInput, Simulator
+from apex.core.simulation import (
+    MemberCallback,
+    MemberFailure,
+    MemberInput,
+    Simulator,
+    refuse_unsupported_stop,
+)
 from apex.domain.observations import DataKey
 from apex.execution.resources import FilePools
 
@@ -128,6 +134,8 @@ class ErtExecutor:
         case = cast(ErtBatchCase, simulator)
         if not members:
             return []
+        for member in members:
+            refuse_unsupported_stop(simulator, member)  # ERT's runs end where its deck does
         work_dirs = [m.work_dir for m in members]
         if any(d is None for d in work_dirs):
             raise SimulationError("the 'ert' executor needs a work directory per member")

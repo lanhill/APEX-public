@@ -39,7 +39,9 @@ from apex.simulation.deck import (
     read_series,
     read_summary,
     render_deck,
+    stopped_deck,
     tail,
+    template_report_dates,
 )
 
 __all__ = ["DECK_NAME", "OPMFlowSimulator", "read_summary"]
@@ -88,6 +90,8 @@ class OPMFlowSimulator:
     needs_work_dir = True
     #: Runs Flow through a member's ``runner`` when it has one (another host).
     accepts_runner = True
+    #: A member's ``stop_at`` cuts its rendered deck at that report date.
+    stops_at_report_dates = True
 
     def __init__(
         self,
@@ -197,7 +201,12 @@ class OPMFlowSimulator:
             case_dir = member.runner.static_folder(
                 case_dir or template.resolve().parent, case_dir_files(template)
             )
-        return render_deck(template, member, {**self.template_values, **level_values}, case_dir)
+        text = render_deck(template, member, {**self.template_values, **level_values}, case_dir)
+        if member.stop_at is None:
+            return text
+        # The template's report dates, includes followed here (under a runner, case_dir is
+        # the host's folder: the local one is read).
+        return stopped_deck(text, member, template_report_dates(template, self.case_dir))
 
     def _run_elsewhere(self, runner: CommandRunner, deck: Path, work_dir: Path) -> None:
         """Run Flow through ``runner``, with paths relative to ``work_dir``."""

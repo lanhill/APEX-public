@@ -1480,3 +1480,195 @@ def _depth_tables(records: Sequence[str], in_mako: bool) -> list[list[tuple[floa
             return None
         tables.append(pairs)
     return tables or None
+
+
+# ------------------------------------------------------------------- stopping at a report date
+
+
+def stop_deck_at(text: str, stop_at: dt.date, report_dates: Sequence[dt.date] | None = None) -> str:
+    """Return a rendered deck that ends at the report date ``stop_at``.
+
+    The ``SCHEDULE`` section is cut after the ``DATES`` record of ``stop_at`` (its keyword
+    closed), or after the ``TSTEP`` step reaching it (the record shortened to the steps up
+    to it), and ``END`` follows: the run is the deck's own up to that date, the same report
+    steps, nothing after it. Everything before the cut is kept byte for byte.
+
+    The date must be one of the deck's report dates, read from the main text: ``START``,
+    then each ``DATES`` record and ``TSTEP`` step (whole days). Includes in the
+    ``SCHEDULE`` section are not opened here: a ``DATES`` record after one places itself
+    (its date is absolute), and a ``TSTEP`` after one counts from that ``DATES`` record. A
+    ``TSTEP`` after an include and before any later ``DATES`` is refused, unless
+    ``report_dates`` (the deck's report dates as :func:`restart_schedule` reads them from
+    the template, includes followed) is given: then the main text's report dates up to the
+    cut must be those, which they are only when the includes hold no ``DATES`` or ``TSTEP``.
+
+    Refused besides: ``SKIP``, ``SKIP100``, ``SKIP300``, ``ENDSKIP`` or ``RESTART`` before the
+    cut (the main text's schedule is then not the run's), and a ``DATES`` record with a time
+    of day on or before the date (a date names one report only at midnight).
+
+    Raises
+    ------
+    ValueError
+        As said, or if ``stop_at`` is not a report date after ``START`` in the main text.
+    """
+    lines = text.splitlines(keepends=True)
+    start: dt.date | None = None
+    section = ""
+    keyword = ""
+    record: list[str] = []
+    record_from = 0
+    quote = ""
+    now: dt.date | None = None
+    included = False
+    seen: list[dt.date] = []  # the main text's report dates, START first
+
+    def checked(cut: str) -> str:
+        # With the template's dates, the includes must have added none up to the cut.
+        if report_dates is not None and list(report_dates[: len(seen)]) != seen:
+            raise ValueError(
+                "the deck's includes hold report dates (DATES or TSTEP) before "
+                f"{stop_at.isoformat()}: its main text alone cannot place the cut"
+            )
+        return cut
+
+    for index, raw in enumerate(lines):
+        line = raw.split("--", 1)[0].strip()
+        if not line:
+            continue
+        match = _KEYWORD.match(line) if not record else None
+        if match is None and not record:
+            ruler = re.match(
+                r"^(RUNSPEC|GRID|EDIT|PROPS|REGIONS|SOLUTION|SUMMARY|SCHEDULE)\b", line
+            )
+            match = ruler
+        if keyword == "TITLE" and not record and match is None:
+            keyword = ""  # TITLE's one line of free text, with no "/"
+            continue
+        if match is None and not record and re.match(r"^(DATES|TSTEP)\s+\S", line):
+            # Records on the keyword's own line: the reader takes the keyword alone on its
+            # line, so this would be misread rather than cut.
+            raise ValueError(f"{line.split()[0]} with its records on its own line: {line!r}")
+        if match is not None:
+            keyword = match.group(1)
+            if keyword in _SECTIONS:
+                section = keyword
+                if keyword == "SCHEDULE":
+                    now = start
+            if keyword == "END":
+                break
+            if keyword in _UNFOLLOWED:
+                raise ValueError(
+                    f"{keyword} before {stop_at.isoformat()}: the deck's schedule text is not "
+                    "what it runs, so it cannot be cut at a date"
+                )
+            continue
+        if not record:
+            record_from = index
+        end, quote = _terminator(line, quote)
+        if end is None:
+            record.append(line)
+            continue
+        body = " ".join([*record, line[:end]]).strip()
+        record, quote = [], ""
+        if not body:
+            continue  # a lone "/" closes a keyword's records
+        fields = _expand(body)
+        if keyword == "START":
+            start = _date(fields)
+            if start is not None:
+                seen.append(start)
+            continue
+        if section != "SCHEDULE":
+            continue
+        if keyword == "INCLUDE":
+            included = True
+        elif keyword == "DATES":
+            date = _date(fields)
+            if date is None:
+                raise ValueError(f"a DATES record the deck reader cannot read: {body!r}")
+            if date <= stop_at and _clock(fields) != dt.time():
+                raise ValueError(
+                    f"a DATES record at a time of day ({body!r}): a date names a report only "
+                    "at midnight"
+                )
+            now = date
+            included = False  # the time is known again
+            seen.append(date)
+            if date == stop_at:
+                # The record kept up to its "/" (a later record on the same line dropped),
+                # its keyword closed, and the run ended there.
+                raw = lines[index].split("--", 1)[0]
+                upto = raw.index(line) + end + 1
+                kept = "".join(lines[:index]) + raw[:upto] + "\n"
+                return checked(kept + "/\n\nEND\n")
+            if date > stop_at:
+                break
+        elif keyword == "TSTEP":
+            if included and report_dates is None:
+                raise ValueError(
+                    "a TSTEP follows an INCLUDE in the SCHEDULE section: the time it starts "
+                    "from is not known from the main text"
+                )
+            if now is None:
+                raise ValueError("the deck has no START before its TSTEP")
+            days: list[str] = []
+            for value in fields:
+                step = float(value)
+                if step != int(step):
+                    raise ValueError(f"TSTEP {value} is not whole days")
+                now = now + dt.timedelta(days=int(step))
+                days.append(value)
+                seen.append(now)
+                if now == stop_at:
+                    shortened = " " + " ".join(days) + " /\n"
+                    return checked("".join(lines[:record_from]) + shortened + "\nEND\n")
+                if now > stop_at:
+                    break
+            if now > stop_at:
+                break
+    if start is None:
+        raise ValueError("the deck has no START: its report dates cannot be placed")
+    raise ValueError(
+        f"{stop_at.isoformat()} is not a report date of the deck's main text (its DATES and "
+        "TSTEP records after START)"
+    )
+
+
+def stopped_deck(
+    text: str, member: MemberInput, report_dates: Sequence[dt.date] | None = None
+) -> str:
+    """Return ``text`` cut at ``member.stop_at`` (:func:`stop_deck_at`); unchanged without it.
+
+    ``report_dates``: the template's report dates (:func:`template_report_dates`), which let
+    a deck whose schedule includes come before a ``TSTEP`` be cut.
+
+    Raises
+    ------
+    SimulationError
+        If ``stop_at`` is not an ISO date or not a report date of the deck.
+    """
+    if member.stop_at is None:
+        return text
+    try:
+        return stop_deck_at(text, dt.date.fromisoformat(member.stop_at), report_dates)
+    except ValueError as error:
+        raise SimulationError(
+            f"member {member.member_id} cannot stop at {member.stop_at}: {error}"
+        ) from error
+
+
+def template_report_dates(
+    template_path: Path, case_dir: Path | None = None
+) -> list[dt.date] | None:
+    """Return a deck template's report dates, includes followed (:func:`restart_schedule`).
+
+    ``None`` when the text alone may not give them (template expressions, Mako lines in the
+    schedule, files not read: its ``unresolved``), or when it cannot be read.
+    """
+    try:
+        schedule = restart_schedule(template_path, case_dir)
+    except (OSError, ValueError):
+        return None
+    if schedule.unresolved:
+        return None
+    return [t.date() for t in schedule.report_times]

@@ -20,7 +20,13 @@ from numpy.typing import NDArray
 from apex.core.errors import SimulationError, TransientSimulationError
 from apex.core.plugins import executors
 from apex.core.resources import ResourcePools
-from apex.core.simulation import MemberCallback, MemberFailure, MemberInput, Simulator
+from apex.core.simulation import (
+    MemberCallback,
+    MemberFailure,
+    MemberInput,
+    Simulator,
+    refuse_unsupported_stop,
+)
 from apex.domain.observations import DataKey
 from apex.execution.resources import FilePools
 
@@ -76,6 +82,7 @@ def run_one(
     Public for other executors: only simulation failures become
     :class:`MemberFailure`; anything else is a bug and propagates.
     """
+    refuse_unsupported_stop(simulator, member)
     if member.work_dir is not None:
         member.work_dir.mkdir(parents=True, exist_ok=True)
     needs = _needs(simulator)

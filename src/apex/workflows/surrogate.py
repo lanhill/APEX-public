@@ -32,7 +32,12 @@ from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.progress import GuardedProgress, NullProgress, ProgressReporter
 from apex.core.simulation import Executor, MemberFailure, MemberInput, Simulator
-from apex.core.surrogates import CoarseCorrectedSurrogate, FieldSurrogate, SurrogateModel
+from apex.core.surrogates import (
+    CoarseCorrectedSurrogate,
+    EarlyStartSurrogate,
+    FieldSurrogate,
+    SurrogateModel,
+)
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
     DomainExtent,
@@ -263,6 +268,50 @@ def column_objectives(
     return np.ascontiguousarray(np.stack(columns, axis=-1))
 
 
+def early_data(model: EarlyStartSurrogate, snapshots: SnapshotSet) -> NDArray[np.float64]:
+    """Return runs' early data: their values at the model's early keys, ``(n_early, n)``.
+
+    Raises
+    ------
+    WorkflowError
+        If an early key is not among the snapshots' keys.
+    """
+    index = {key: row for row, key in enumerate(snapshots.keys)}
+    missing = [k for k in model.early_keys() if k not in index]
+    if missing:
+        raise WorkflowError(
+            f"the early-start surrogate's early key {missing[0]} is not among the runs' keys"
+        )
+    rows = [index[k] for k in model.early_keys()]
+    return np.ascontiguousarray(snapshots.outputs[rows])
+
+
+def gated_rows(model: SurrogateModel, keys: Sequence[DataKey]) -> list[int] | None:
+    """Return the rows of ``keys`` the gate scores, or ``None`` for every row.
+
+    An early-start model returns a member's early data unchanged, so its error there is zero
+    by construction; scoring those keys would dilute the error it makes after its date, and
+    the tolerance would depend on ``early_until`` (found by the numerics review). Only the
+    later keys are gated.
+
+    Raises
+    ------
+    WorkflowError
+        If no key lies after the early date (the gate would pass on nothing).
+    """
+    if not isinstance(model, EarlyStartSurrogate):
+        return None
+    early = set(model.early_keys())
+    rows = [row for row, key in enumerate(keys) if key not in early]
+    if not rows:
+        # Every key is the members' own: a gate of no rows would pass vacuously.
+        raise WorkflowError(
+            f"the early-start surrogate answers no key after its early date "
+            f"{model.early_until}: there is nothing to gate it on"
+        )
+    return rows
+
+
 def fit_and_gate(
     model: SurrogateModel,
     training: SnapshotSet,
@@ -311,6 +360,9 @@ def fit_and_gate(
         and held_out.coarse_outputs is not None
     ):
         coarse = (training.coarse_outputs, held_out.coarse_outputs)
+    elif isinstance(model, EarlyStartSurrogate):
+        # A run's early data are its own values up to the early date.
+        coarse = (early_data(model, training), early_data(model, held_out))
     names = tuple(sorted(training.fields))
     if names and not isinstance(model, FieldSurrogate):
         raise WorkflowError(
@@ -324,6 +376,10 @@ def fit_and_gate(
     if isinstance(model, CoarseCorrectedSurrogate) and coarse is not None:
         predicted = np.ascontiguousarray(
             model.predict_corrected(held_out.inputs, coarse[1], training.keys)
+        )
+    elif isinstance(model, EarlyStartSurrogate) and coarse is not None:
+        predicted = np.ascontiguousarray(
+            model.predict_from_early(held_out.inputs, coarse[1], training.keys)
         )
     else:
         predicted = np.ascontiguousarray(model.predict(held_out.inputs, training.keys))
@@ -340,13 +396,14 @@ def fit_and_gate(
             column_objectives(objective, predicted),
             column_objectives(objective, held_out.outputs),
         )
+    rows = gated_rows(model, training.keys)
     verdict = gate(
-        predicted,
-        held_out.outputs,
-        training.keys,
+        predicted if rows is None else np.ascontiguousarray(predicted[rows]),
+        held_out.outputs if rows is None else np.ascontiguousarray(held_out.outputs[rows]),
+        training.keys if rows is None else tuple(training.keys[r] for r in rows),
         held_out.run_ids,
         tolerances=tolerances,
-        variances=variances,
+        variances=variances if variances is None or rows is None else variances[rows],
         kinds=kinds,
         fields=fields,
         failed=failed,

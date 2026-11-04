@@ -1467,3 +1467,78 @@ def test_drawn_designs_keep_their_fingerprints(tmp_path: Path) -> None:
         assert surrogates.fingerprint_parts(config, case) == surrogates.fingerprint_parts(
             config, case, legacy=True
         )
+
+
+class _EarlyLinear(_Affine):
+    """An early-start test plugin: every key a linear map of the keys up to time "2".
+
+    The case is linear (``y = G x``, three inputs) and four early keys determine ``x``, so
+    the map is exact. Its early keys are listed in the reverse of the case's order, so a
+    check that sliced the early data or the gated rows by position would fail.
+    """
+
+    early_until = "2"
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        super().fit(snapshots, rng)
+        early = snapshots.outputs[[snapshots.keys.index(k) for k in self.early_keys()]]
+        self.map = np.ascontiguousarray(snapshots.outputs @ np.linalg.pinv(early))
+
+    def early_keys(self) -> tuple[DataKey, ...]:
+        return tuple(k for k in reversed(self.keys) if k.time <= self.early_until)
+
+    def early_coordinates(
+        self, early: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        return np.ascontiguousarray(early), np.zeros(early.shape[1])
+
+    def predict(self, inputs: SurrogateInputs, keys: Sequence[DataKey]) -> NDArray[np.float64]:
+        raise ValueError("needs the members' early data")
+
+    def predict_from_early(
+        self, inputs: SurrogateInputs, early: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        full = self.map @ early
+        for row, key in enumerate(self.early_keys()):
+            full[self.keys.index(key)] = early[row]  # the members' own values, unchanged
+        return np.ascontiguousarray(full[[self.keys.index(k) for k in keys]])
+
+    def to_arrays(self) -> SurrogateParts:
+        own, arrays = super().to_arrays()
+        return own, {**arrays, "map": self.map}
+
+    @classmethod
+    def from_arrays(
+        cls, manifest: Mapping[str, object], arrays: Mapping[str, NDArray[np.generic]]
+    ) -> Self:
+        model = super().from_arrays(manifest, arrays)
+        model.map = np.asarray(arrays["map"], dtype=np.float64)
+        return model
+
+
+@pytest.fixture
+def _early_plugin() -> Iterator[None]:
+    surrogate_models.register("test_early_linear")(_EarlyLinear)
+    try:
+        yield
+    finally:
+        surrogate_models.remove("test_early_linear")
+
+
+@pytest.mark.usefixtures("_early_plugin")
+def test_a_check_gates_an_early_start_model_on_its_runs_own_early_data(tmp_path: Path) -> None:
+    """``apex surrogate check`` takes each run's early
+    data from its own keys (by key, whatever the model's order), bounds them in the domain,
+    predicts from them, and gates only the keys after the early date."""
+    write_case(tmp_path)
+    result = surrogates.build(_build_with(tmp_path, "test_early_linear", ""))
+    assert result.complete
+    assert max(_gate_errors(result.path)) < 1e-8
+    model = result.path / "model" / "surrogate.json"
+    check = surrogates.check_surrogate(model, tmp_path / "case.toml", runs=4, seed=3,
+                                       min_inside=0.0)  # fmt: skip
+    gate = check.summary.gate
+    assert gate is not None
+    assert gate.held_out, "every checked run fell outside the domain"
+    assert len(gate.held_out) + len(check.summary.outside) == 4
+    assert gate.passed, gate.failures()

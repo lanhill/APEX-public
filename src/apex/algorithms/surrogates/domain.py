@@ -42,7 +42,12 @@ from numpy.typing import NDArray
 from scipy.optimize import linprog
 
 from apex.core.errors import SurrogateDomainError
-from apex.core.surrogates import CoarseCorrectedSurrogate, SurrogateInputs, SurrogateModel
+from apex.core.surrogates import (
+    CoarseCorrectedSurrogate,
+    EarlyStartSurrogate,
+    SurrogateInputs,
+    SurrogateModel,
+)
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
     DomainExtent,
@@ -254,12 +259,15 @@ def model_coordinates(
 
     For a coarse-corrected model (``core.surrogates.CoarseCorrectedSurrogate``) with the
     members' coarse forecasts ``(n_keys, n)``: the inputs' coordinates, then the coarse
-    forecast's, then its residual as one more coordinate (so that the box bounds it).
+    forecast's, then its residual as one more coordinate (so that the box bounds it). For an
+    early-start model (``core.surrogates.EarlyStartSurrogate``), ``coarse``
+    carries the members' early data ``(n_early_keys, n)`` instead, bounded the same way.
 
     Raises
     ------
     ValueError
-        If a coarse-corrected model is given no coarse forecast.
+        If a coarse-corrected model is given no coarse forecast, or an early-start one no
+        early data.
     """
     found, residual = model.coordinates(inputs)
     matrix = _as_matrix(found, "the model's coordinates")
@@ -270,6 +278,14 @@ def model_coordinates(
         extra, extra_residual = model.coarse_coordinates(np.asarray(coarse, dtype=np.float64))
         matrix = np.concatenate([
             matrix, _as_matrix(extra, "the coarse forecast's coordinates"),
+            np.asarray(extra_residual, dtype=np.float64).reshape(1, -1),
+        ])  # fmt: skip
+    elif isinstance(model, EarlyStartSurrogate):
+        if coarse is None:
+            raise ValueError("an early-start surrogate needs the members' early data")
+        extra, extra_residual = model.early_coordinates(np.asarray(coarse, dtype=np.float64))
+        matrix = np.concatenate([
+            matrix, _as_matrix(extra, "the early data's coordinates"),
             np.asarray(extra_residual, dtype=np.float64).reshape(1, -1),
         ])  # fmt: skip
     return np.ascontiguousarray(matrix), residual

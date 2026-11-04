@@ -147,6 +147,16 @@ options = { dims = [50, 50, 1], factors = [2, 2, 1], means = { poro = "arithmeti
   - a coarse stack with an adaptive or `run` design;
   - reusing a forecast's coarse runs after a resume: they are made again, with the same results.
 
+## Early-start surrogates
+
+Some surrogates continue a member's own run instead of replacing it: each member is simulated up to a report date, and the model predicts the later report dates from the member's data up to that date.
+
+- **Running to a date:** a member can carry a stop date (`MemberInput.stop_at`, an ISO report date). `opm_flow` and `eclipse` honour it by cutting the rendered deck after that report date (a `DATES` record, or a `TSTEP` step reaching it) and closing it with `END`; the text before the cut is the deck's own. The date must be a report date of the deck's schedule, in whole days. Decks that skip or restart before it, or whose `SCHEDULE` includes hold report dates of their own before it, are refused. Executors refuse a stop date for a simulator that cannot honour it, so no run silently goes to the end of its schedule.
+- **The protocol:** such a model is a `core.surrogates.EarlyStartSurrogate`. It names the keys it reads up to its date (`early_keys()`), places a member's early data in the validated domain (`early_coordinates`), and predicts from them (`predict_from_early`); it returns the early keys unchanged.
+- **The domain** bounds the early data rather than the inputs, so a member whose early behaviour lies outside the training runs' is refused.
+- **The gate** uses the held-out runs' own values up to the date as their early data, so it judges exactly what a member would get, with no extra run. It scores only the keys after the date: the early ones are the member's own values.
+- **Not yet supported:** history matching and predictions with an early-start surrogate (refused for now). Optimizations refuse them, since their controls change the whole schedule.
+
 ## State fields
 
 A field surrogate, one that predicts state fields as well as data, is built on snapshots of those fields. The build's `[case]` names them:
