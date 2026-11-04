@@ -49,6 +49,7 @@ from typing import Literal, Self
 from pydantic import Field, model_validator
 
 from apex.domain.config import PluginSection, _Strict
+from apex.domain.surrogate import QuantityKind
 
 
 class OptimizationSection(_Strict):
@@ -133,6 +134,56 @@ class OptimizationOutput(_Strict):
     )
 
 
+class OptimizationSurrogateSection(_Strict):
+    """``[surrogate]``: evaluations by a fitted surrogate, checked by the simulator.
+
+    Every evaluation the optimizer asks for is made by the surrogate whose manifest
+    ``model_file`` names (built by ``apex surrogate build`` on this optimization), on local
+    workers; the ``[simulator]`` runs the checks (every ``check_every`` accepted steps, the
+    accepted controls at every realization) and the reported optimum, which is always the
+    simulator's.
+    """
+
+    model_file: Path = Field(
+        description="The surrogate's manifest (`.json`, its arrays beside it), e.g. "
+        "`runs/<build>/model/surrogate.json`."
+    )
+    check_every: int = Field(
+        default=3,
+        ge=0,
+        description="Accepted steps whose controls are also evaluated by the simulator and "
+        "gated (steps 3, 6, 9, ... by default); 0: no checks.",
+    )
+    on_check_failure: Literal["stop", "simulator"] = Field(
+        default="stop",
+        description="A check that fails: `stop` the optimization at its last checkpoint "
+        "(resumable); or start it again with the `simulator` for every evaluation (the "
+        "plain run with the same seed; the evaluations already simulated are reused).",
+    )
+    outside: Literal["stop", "simulator"] = Field(
+        default="stop",
+        description="Controls outside the surrogate's validated domain: `stop` the "
+        "optimization, or evaluate them by the `simulator` (recorded as such).",
+    )
+    relative: dict[QuantityKind, float] = Field(
+        default_factory=dict,
+        description="The checks' relative tolerances by kind of quantity (pressure, rate, "
+        "plume, mass, other): may only tighten the model's own gate.",
+    )
+    workers: int | None = Field(
+        default=None,
+        ge=1,
+        description="Local worker processes for the surrogate's evaluations; none: in this "
+        "process (serial).",
+    )
+    max_evaluations: int = Field(
+        default=50_000,
+        ge=1,
+        description="The run's bound on surrogate evaluations (one per control vector and "
+        "realization).",
+    )
+
+
 class ObjectiveEntry(PluginSection):
     """One entry of ``[[objectives]]``: a scalar objective among several."""
 
@@ -191,6 +242,10 @@ class OptimizationConfig(_Strict):
         "are passed as is.",
     )
     output: OptimizationOutput = Field(default_factory=OptimizationOutput)
+    surrogate: OptimizationSurrogateSection | None = Field(
+        default=None,
+        description="Evaluations by a fitted surrogate, checked by the simulator.",
+    )
 
     @model_validator(mode="after")
     def _one_objective_form(self) -> Self:
@@ -224,4 +279,6 @@ class OptimizationConfig(_Strict):
             raise ValueError("[model] realizations_file needs a [simulator]")
         if self.parameterizations and self.simulator is None:
             raise ValueError("[[parameterizations]] map controls for a [simulator]")
+        if self.surrogate is not None and self.simulator is None:
+            raise ValueError("[surrogate] stands in for a [simulator], which this has none of")
         return self

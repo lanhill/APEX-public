@@ -31,6 +31,7 @@ uv run apex service start
 |---|---|---|
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 | `--http` | | Also serve the REST API at HOST:PORT (the api extra, installed by default). Keep 127.0.0.1 unless a TLS proxy is in front. |
+| `--wait` | | Seconds to wait for the service to be up (default 60, 120 with --http, or $APEX_SERVICE_START_TIMEOUT); a loaded machine may need more. |
 
 ## `apex service status`
 

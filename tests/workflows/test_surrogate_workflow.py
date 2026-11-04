@@ -11,7 +11,7 @@ import shutil
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Self
+from typing import Any, ClassVar, Self, cast
 
 import numpy as np
 import pytest
@@ -406,7 +406,9 @@ def test_what_a_build_refuses(tmp_path: Path) -> None:
     optimization = write_build(tmp_path, name="optb").read_text().replace("case.toml", "opt.toml")
     (tmp_path / "opt_build.toml").write_text(optimization)
     (tmp_path / "opt.toml").write_text("[optimization]\nname='o'\n[optimizer]\nname='enopt'\n")
-    with pytest.raises(ConfigError, match="phase 4"):
+    # Read as an optimization since the phase 4 (tests/workflows/
+    # test_surrogate_optimization.py), and validated as one.
+    with pytest.raises(ConfigError, match="invalid optimization configuration"):
         surrogates.plan_build(surrogates.load_surrogate_config(tmp_path / "opt_build.toml"))
     labelled = write_case(tmp_path / "labels", times=("t0", "t1"))
     assert labelled.exists()
@@ -1033,6 +1035,253 @@ def test_a_build_stopped_in_its_coarse_runs_resumes_to_identical_files(tmp_path:
         assert (finished.path / "model" / name).read_bytes() == (
             whole.path / "model" / name
         ).read_bytes()
+
+
+# ------------------------------------------- coarse-only design members (decision 13)
+
+COARSE_ONLY = 'plan = "prior"\ntraining = 20\nheld_out = 5\ncoarse_only = 7'
+
+
+class _CoarseOnlyAffine(_CoarseAffine):
+    """The coarse-corrected test plugin, recording the coarse-only members its fit saw.
+
+    It declares ``trains_on_coarse``: coarse-only members are refused for a plugin whose fit
+    would not read them.
+    """
+
+    trains_on_coarse = True
+    seen: ClassVar[list[int]] = []
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        super().fit(snapshots, rng)
+        type(self).seen.append(snapshots.n_coarse_only)
+
+
+@pytest.fixture
+def _coarse_only_plugin() -> Iterator[None]:
+    _CoarseOnlyAffine.seen = []
+    surrogate_models.register("test_coarse_only")(_CoarseOnlyAffine)
+    try:
+        yield
+    finally:
+        surrogate_models.remove("test_coarse_only")
+
+
+@pytest.mark.usefixtures("_coarse_only_plugin")
+def test_coarse_only_members_run_on_the_coarse_stack_only_and_reach_the_fit(
+    tmp_path: Path,
+) -> None:
+    extra = _coarse_case(tmp_path)
+    path = _build_with(tmp_path, "test_coarse_only", extra, design=COARSE_ONLY)
+    plain = _build_with(tmp_path, "test_coarse_only", extra, name="plain")
+    plan = surrogates.plan_build(surrogates.load_surrogate_config(path))
+    assert plan.simulator_runs == 57  # 25 runs on each stack and 7 on the coarse one only
+    assert plan.coarse_only == 7
+    from apex.cli.surrogate_commands import surrogate_plan_lines
+
+    assert "simulator runs: 57, 7 of them coarse-only" in "\n".join(surrogate_plan_lines(plan))
+
+    result = surrogates.build(path)
+    assert result.complete
+    assert result.summary.simulator_runs == 57
+    assert result.summary.coarse_only_runs == 7
+    assert result.summary.training_runs == 20
+    assert len((result.path / JOURNAL).read_text().splitlines()) == 25
+    assert len((result.path / "coarse" / JOURNAL).read_text().splitlines()) == 32
+    assert _CoarseOnlyAffine.seen == [7]
+    snapshots = load_snapshots(result.path / "snapshots.npz")
+    assert snapshots.n_runs == 25
+    assert snapshots.coarse_only_inputs is not None
+    assert snapshots.coarse_only_outputs is not None
+    assert snapshots.coarse_only_inputs["x"].shape == (N_STATE, 7)
+    # The coarse stack's response (linear) at the coarse-only inputs, from the paired runs.
+    assert snapshots.coarse_outputs is not None
+    response = snapshots.coarse_outputs @ np.linalg.pinv(snapshots.inputs["x"])
+    np.testing.assert_allclose(
+        snapshots.coarse_only_outputs, response @ snapshots.coarse_only_inputs["x"], atol=1e-9
+    )
+    # The other members are a design's without coarse-only ones, ids after theirs.
+    design = SurrogateDirectory(result.path).load_design()
+    assert design is not None
+    assert design.coarse_only_ids == tuple(range(25, 32))
+    whole = surrogates.build(plain)
+    other = SurrogateDirectory(whole.path).load_design()
+    assert other is not None
+    assert other.coarse_only_ids == ()
+    assert (design.held_out_ids, design.training_ids) == (other.held_out_ids, other.training_ids)
+    np.testing.assert_array_equal(design.training["x"], other.training["x"])
+    np.testing.assert_array_equal(design.held_out["x"], other.held_out["x"])
+    # The gate is the fine runs': the same as without coarse-only members.
+    assert (result.path / "gate.json").read_bytes() == (whole.path / "gate.json").read_bytes()
+    assert '"coarse_only": 7' in (result.path / "config.json").read_text()
+
+
+class _CoarseTrained(_Affine):
+    """A plugin that trains on coarse runs and predicts without them (``trains_on_coarse``)."""
+
+    trains_on_coarse = True
+    seen: ClassVar[list[tuple[int, int]]] = []
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        assert snapshots.coarse_outputs is not None
+        type(self).seen.append((snapshots.n_runs, snapshots.n_coarse_only))
+        super().fit(snapshots, rng)
+
+
+@pytest.fixture
+def _coarse_trained_plugin() -> Iterator[None]:
+    _CoarseTrained.seen = []
+    surrogate_models.register("test_coarse_trained")(_CoarseTrained)
+    try:
+        yield
+    finally:
+        surrogate_models.remove("test_coarse_trained")
+
+
+@pytest.mark.usefixtures("_coarse_trained_plugin")
+def test_a_plugin_that_trains_on_coarse_runs_takes_a_coarse_stack(tmp_path: Path) -> None:
+    """``trains_on_coarse``: [coarse] and coarse-only members in training, a plain predict."""
+    extra = _coarse_case(tmp_path)
+    with pytest.raises(ConfigError, match="trains on coarse runs: it needs a"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_trained", "", name="bare"))
+    result = surrogates.build(
+        _build_with(tmp_path, "test_coarse_trained", extra, design=COARSE_ONLY)
+    )
+    assert result.complete
+    assert _CoarseTrained.seen == [(20, 7)]
+    assert result.summary.coarse_only_runs == 7
+
+
+def test_a_model_that_trains_on_coarse_runs_is_not_refitted_in_a_run() -> None:
+    """A run makes no coarse runs for it, and a refit set would need them (numerics review)."""
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(surrogate=SimpleNamespace(on_check_failure="refit"))
+    model = SimpleNamespace(model=_CoarseTrained(), manifest=None, path=Path("model.json"))
+    with pytest.raises(ConfigError, match="trains on coarse runs, which a run does not make"):
+        surrogates.refuse_model(cast(Any, config), cast(Any, model), cast(Any, None),
+                                cast(Any, None))  # fmt: skip
+
+
+@pytest.mark.usefixtures("_coarse_plugin")
+def test_coarse_only_members_are_refused_for_a_plugin_that_does_not_read_them(
+    tmp_path: Path,
+) -> None:
+    """A coarse-corrected plugin's fit reads no coarse-only members: their runs are refused."""
+    extra = _coarse_case(tmp_path)
+    with pytest.raises(ConfigError, match="does not train on coarse runs"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_affine", extra, design=COARSE_ONLY))
+
+
+@pytest.mark.usefixtures("_coarse_only_plugin")
+def test_a_failed_coarse_only_run_is_reported_apart_from_the_runs(tmp_path: Path) -> None:
+    """``failed`` keeps the runs the fit and gate lost; coarse-only failures have their own."""
+    extra = _coarse_case(tmp_path).replace(
+        'forward_file = "coarse.npz" }', 'forward_file = "coarse.npz", fail_members = [27] }'
+    )
+    design = COARSE_ONLY + "\nmin_success_fraction = 0.8"  # 6 of 7
+    result = surrogates.build(_build_with(tmp_path, "test_coarse_only", extra, design=design))
+    assert result.complete
+    assert result.summary.failed == []
+    assert result.summary.coarse_only_failed == [27]
+    assert result.summary.coarse_only_runs == 6
+    snapshots = load_snapshots(result.path / "snapshots.npz")
+    assert snapshots.failed == ()
+    gate = json.loads((result.path / "gate.json").read_text())
+    assert gate["failed"] == []
+    # Counted on their own against min_success_fraction: 1 of 7 fails the default 0.9.
+    with pytest.raises(WorkflowError, match="1 of the 7 coarse-only runs failed"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_only", extra, design=COARSE_ONLY,
+                                     name="strict"))  # fmt: skip
+
+
+@pytest.mark.usefixtures("_coarse_only_plugin")
+def test_coarse_only_zero_is_a_build_without_them(tmp_path: Path) -> None:
+    """``coarse_only = 0`` changes nothing: config, fingerprint, design, snapshots, model."""
+    extra = _coarse_case(tmp_path)
+    absent = _build_with(tmp_path, "test_coarse_only", extra, name="absent")
+    zero = _build_with(
+        tmp_path,
+        "test_coarse_only",
+        extra,
+        name="zero",
+        design='plan = "prior"\ntraining = 20\nheld_out = 5\ncoarse_only = 0',
+    )
+    configs = [surrogates.load_surrogate_config(p) for p in (absent, zero)]
+    parts = [surrogates.fingerprint_parts(c, surrogates._build_case(c)) for c in configs]
+    assert parts[0] == parts[1]
+    first, second = surrogates.build(absent), surrogates.build(zero)
+    assert '"coarse_only"' not in (second.path / "config.json").read_text()
+    for name in ("design.npz", "snapshots.npz", "model/surrogate.json", "model/surrogate.npz"):
+        assert (first.path / name).read_bytes() == (second.path / name).read_bytes(), name
+    assert load_snapshots(second.path / "snapshots.npz").coarse_only_outputs is None
+    assert _CoarseOnlyAffine.seen == [0, 0]
+    assert second.summary.coarse_only_runs == 0
+    # A build made without the key resumes with coarse_only = 0 written out.
+    absent.write_text(zero.read_text().replace('name = "zero"', 'name = "absent"'))
+    again = surrogates.build(absent)
+    assert again.summary.identity == first.summary.identity
+
+
+@pytest.mark.usefixtures("_coarse_only_plugin", "_adaptive")
+def test_what_coarse_only_members_refuse(tmp_path: Path) -> None:
+    extra = _coarse_case(tmp_path)
+    with pytest.raises(ConfigError, match=r"needs|add a \[coarse\] stack"):
+        surrogates.load_surrogate_config(
+            _build_with(tmp_path, "test_coarse_only", "", name="bare", design=COARSE_ONLY)
+        )
+    with pytest.raises(ConfigError, match="plan = 'run' reuses"):
+        surrogates.load_surrogate_config(_build_with(
+            tmp_path, "test_coarse_only", extra, name="run",
+            design=f'plan = "run"\nrun_dir = "{tmp_path}"\ntraining = 4\nheld_out = 2\n'
+            "coarse_only = 3",
+        ))  # fmt: skip
+    with pytest.raises(ConfigError, match="not supported yet"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_only", extra, name="adaptive",
+                                     design=ADAPTIVE + "\ncoarse_only = 3"))  # fmt: skip
+    with pytest.raises(ConfigError, match="greater than or equal to 0"):
+        surrogates.load_surrogate_config(_build_with(
+            tmp_path, "test_coarse_only", extra, name="negative",
+            design='plan = "prior"\ntraining = 20\nheld_out = 5\ncoarse_only = -1',
+        ))  # fmt: skip
+    # Plan file: the next columns, refused when the file has too few.
+    np.savez(tmp_path / "ensemble.npz", x=np.random.default_rng(0).standard_normal((N_STATE, 30)))
+    stored = 'plan = "file"\nensemble_file = "ensemble.npz"\ntraining = 20\nheld_out = 5\n'
+    with pytest.raises(ConfigError, match="20 training and 6 coarse-only runs"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_only", extra, name="few",
+                                     design=stored + "coarse_only = 6"))  # fmt: skip
+    built = surrogates.build(_build_with(tmp_path, "test_coarse_only", extra, name="file",
+                                         design=stored + "coarse_only = 5"))  # fmt: skip
+    design = SurrogateDirectory(built.path).load_design()
+    assert design is not None
+    used = {*design.held_out_ids, *design.training_ids}
+    assert set(design.coarse_only_ids) == set(range(30)) - used
+    # Another number of coarse-only members is another build.
+    path = _build_with(tmp_path, "test_coarse_only", extra, name="file",
+                       design=stored + "coarse_only = 4")  # fmt: skip
+    with pytest.raises(ConfigError, match="design differ"):
+        surrogates.build(path)
+
+
+@pytest.mark.usefixtures("_coarse_only_plugin")
+def test_a_build_stopped_in_its_coarse_only_runs_resumes_to_identical_files(
+    tmp_path: Path,
+) -> None:
+    extra = _coarse_case(tmp_path)
+    whole = surrogates.build(
+        _build_with(tmp_path, "test_coarse_only", extra, name="whole", design=COARSE_ONLY)
+    )
+    path = _build_with(tmp_path, "test_coarse_only", extra, name="parts", design=COARSE_ONLY)
+    first = surrogates.build(path, max_runs=53)  # 25 fine, 25 coarse and 3 coarse-only runs
+    assert not first.complete
+    assert first.summary.pending == 4
+    assert len((first.path / "coarse" / JOURNAL).read_text().splitlines()) == 28
+    finished = surrogates.build(path)
+    assert finished.complete
+    assert finished.summary.simulator_runs == 57
+    assert len((finished.path / "coarse" / JOURNAL).read_text().splitlines()) == 32
+    for name in ("snapshots.npz", "model/surrogate.json", "model/surrogate.npz"):
+        assert (finished.path / name).read_bytes() == (whole.path / name).read_bytes(), name
 
 
 # ------------------------------------------------------------- state fields

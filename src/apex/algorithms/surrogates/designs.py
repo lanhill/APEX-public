@@ -14,6 +14,10 @@ gates of designs of different sizes compare like with like.
 - ``file`` and ``run``: columns of a given ensemble (a stored ensemble, or the forecasts an
   existing run holds), the held-out columns chosen at random first.
 
+A design may also have **coarse-only** runs (``n_coarse_only``: members a build runs on its
+coarse stack only), drawn last, after the training runs, so that a design without them is
+drawn exactly as before.
+
 Arrays are ``{variable: (size, n_runs)}``, C-contiguous, the run axis last.
 """
 
@@ -58,6 +62,10 @@ class Design:
     training_columns, held_out_columns
         For a design taken from a given ensemble, the columns of it each set holds;
         ``None`` for drawn designs.
+    coarse_only
+        ``{variable: (size, n_coarse_only)}``, the coarse-only runs; ``None`` without them.
+    coarse_only_columns
+        For a design taken from a given ensemble, their columns; else ``None``.
     """
 
     plan: DesignPlan
@@ -65,6 +73,8 @@ class Design:
     held_out: Mapping[str, NDArray[np.float64]]
     training_columns: tuple[int, ...] | None = None
     held_out_columns: tuple[int, ...] | None = None
+    coarse_only: Mapping[str, NDArray[np.float64]] | None = None
+    coarse_only_columns: tuple[int, ...] | None = None
 
 
 def _counts(n_training: int, n_held_out: int) -> None:
@@ -124,11 +134,13 @@ def lhs_design(
     n_training: int,
     n_held_out: int,
     rng: np.random.Generator,
+    n_coarse_only: int = 0,
 ) -> Design:
     """Return a Latin-hypercube design over a box of inputs.
 
     ``box`` is ``{variable: (lower (size,), upper (size,))}``; every entry of every variable is
-    a coordinate. The held-out runs are one hypercube, drawn first; the training runs another.
+    a coordinate. The held-out runs are one hypercube, drawn first; the training runs another,
+    and the ``n_coarse_only`` coarse-only runs a third (none drawn when 0).
     """
     _counts(n_training, n_held_out)
     lows, highs, sizes = [], [], {}
@@ -145,7 +157,17 @@ def lhs_design(
     lower, upper = np.concatenate(lows), np.concatenate(highs)
     held_out = latin_hypercube(lower, upper, n_held_out, rng)
     training = latin_hypercube(lower, upper, n_training, rng)
-    return Design(plan="lhs", training=_split(training, sizes), held_out=_split(held_out, sizes))
+    coarse_only = (
+        _split(latin_hypercube(lower, upper, n_coarse_only, rng), sizes)
+        if n_coarse_only > 0
+        else None
+    )
+    return Design(
+        plan="lhs",
+        training=_split(training, sizes),
+        held_out=_split(held_out, sizes),
+        coarse_only=coarse_only,
+    )
 
 
 def _checked(
@@ -196,11 +218,16 @@ def _refuse_repeats(held_out: Mapping[str, NDArray[np.float64]],
 
 
 def sampled_design(
-    draw: Draw, n_training: int, n_held_out: int, rng: np.random.Generator
+    draw: Draw,
+    n_training: int,
+    n_held_out: int,
+    rng: np.random.Generator,
+    n_coarse_only: int = 0,
 ) -> Design:
     """Return a design drawn from a generator, e.g. the case's prior (plan ``prior``).
 
-    ``draw(n_held_out, rng)`` is called first, then ``draw(n_training, rng)``.
+    ``draw(n_held_out, rng)`` is called first, then ``draw(n_training, rng)``, then (if
+    ``n_coarse_only > 0``) ``draw(n_coarse_only, rng)``.
 
     Raises
     ------
@@ -213,7 +240,14 @@ def sampled_design(
     if set(held_out) != set(training):
         raise ValueError("the draws gave different variables")
     _refuse_repeats(held_out, training)
-    return Design(plan="prior", training=training, held_out=held_out)
+    coarse_only = None
+    if n_coarse_only > 0:
+        coarse_only = _checked(
+            draw(n_coarse_only, rng), n_coarse_only, "the drawn coarse-only input"
+        )
+        if set(coarse_only) != set(training):
+            raise ValueError("the draws gave different variables")
+    return Design(plan="prior", training=training, held_out=held_out, coarse_only=coarse_only)
 
 
 def ensemble_design(
@@ -222,11 +256,13 @@ def ensemble_design(
     n_held_out: int,
     rng: np.random.Generator,
     n_training: int | None = None,
+    n_coarse_only: int = 0,
 ) -> Design:
     """Return a design from the columns of a given ensemble ``{variable: (size, n_columns)}``.
 
     The columns are permuted once: the first ``n_held_out`` of the permutation are held out,
-    the next ``n_training`` (all the others if ``None``) train.
+    the next ``n_training`` (all the others if ``None``) train, and the next
+    ``n_coarse_only`` are the coarse-only runs.
 
     Raises
     ------
@@ -240,10 +276,14 @@ def ensemble_design(
     blocks = _checked(ensemble, n_columns, "the ensemble's")
     wanted = n_columns - n_held_out if n_training is None else n_training
     _counts(wanted, n_held_out)
-    if n_held_out + wanted > n_columns:
+    if n_held_out + wanted + n_coarse_only > n_columns:
+        asked = (
+            f"{n_held_out} held-out, {wanted} training and {n_coarse_only} coarse-only"
+            if n_coarse_only
+            else f"{n_held_out} held-out and {wanted} training"
+        )
         raise ValueError(
-            f"the ensemble has {n_columns} columns, fewer than the {n_held_out} held-out and "
-            f"{wanted} training runs asked for"
+            f"the ensemble has {n_columns} columns, fewer than the {asked} runs asked for"
         )
     order = rng.permutation(n_columns)
     held = order[:n_held_out]
@@ -251,10 +291,16 @@ def ensemble_design(
     training = {k: np.ascontiguousarray(v[:, train]) for k, v in blocks.items()}
     held_out = {k: np.ascontiguousarray(v[:, held]) for k, v in blocks.items()}
     _refuse_repeats(held_out, training)
+    start = n_held_out + wanted
+    only = order[start : start + n_coarse_only]
     return Design(
         plan=plan,
         training=training,
         held_out=held_out,
         training_columns=tuple(int(i) for i in train),
         held_out_columns=tuple(int(i) for i in held),
+        coarse_only={k: np.ascontiguousarray(v[:, only]) for k, v in blocks.items()}
+        if n_coarse_only > 0
+        else None,
+        coarse_only_columns=tuple(int(i) for i in only) if n_coarse_only > 0 else None,
     )

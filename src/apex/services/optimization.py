@@ -50,6 +50,8 @@ from apex.storage import optimization_directory as layout
 from apex.workflows.optimization import OptimizationRun, run_optimization
 from apex.workflows.parameterization import PropertyMap, parameterized
 from apex.workflows.simulated_objective import SimulatedObjective
+from apex.workflows.surrogate_optimization import STATE_FILE as SURROGATE_STATE
+from apex.workflows.surrogate_optimization import SurrogateObjective
 
 #: Options naming files, resolved against the configuration's directory (as for runs).
 PATH_OPTION_SUFFIXES = ("_file", "_dir", "_path")
@@ -124,6 +126,11 @@ def resolve_optimization_config(
             "model": config.model.model_copy(
                 update={"realizations_file": realizations and resolve(realizations)}
             ),
+            "surrogate": None
+            if config.surrogate is None
+            else config.surrogate.model_copy(
+                update={"model_file": resolve(config.surrogate.model_file)}
+            ),
         }
     )
 
@@ -171,7 +178,14 @@ def plan_optimization(config: OptimizationConfig) -> OptimizationPlan:
         n_realizations=problem.n_realizations,
         max_evaluations=evaluations,
         evaluations_basis=optimizer.max_evaluations_basis(problem.n_realizations),
-        max_simulator_runs=(evaluations if simulated else 0),
+        max_simulator_runs=(
+            _surrogate_simulator_runs(config, optimizer, problem, evaluations)
+            if config.surrogate is not None
+            else (evaluations if simulated else 0)
+        ),
+        surrogate_evaluations=None
+        if config.surrogate is None
+        else min(evaluations or config.surrogate.max_evaluations, config.surrogate.max_evaluations),
         simulator=None if config.simulator is None else config.simulator.name,
         parallel_runs=int(workers) if simulated and workers else (1 if simulated else None),
         output_dir=None
@@ -179,6 +193,42 @@ def plan_optimization(config: OptimizationConfig) -> OptimizationPlan:
         else str(config.optimization.output_dir),
         warnings=warnings,
     )
+
+
+def _surrogate_simulator_runs(
+    config: OptimizationConfig,
+    optimizer: OptimizerBase,
+    problem: Problem,
+    evaluations: int | None,
+) -> int | None:
+    """Return the simulator runs of an optimization with a surrogate.
+
+    Its checks (one per ``check_every`` accepted steps, at every realization) and the
+    optimum's evaluation (a multi-objective run's whole front: at most its population), and,
+    when the simulator may stand in for the surrogate (``outside`` or ``on_check_failure`` =
+    ``simulator``), every evaluation the optimizer may make besides; ``None`` when the
+    optimizer cannot bound its evaluations and the simulator may stand in.
+    """
+    section = config.surrogate
+    assert section is not None
+    n_r = problem.n_realizations
+    steps = int(getattr(optimizer, "epf_maxiter", 1)) * int(getattr(optimizer, "maxiter", 0))
+    batches = getattr(optimizer, "max_batches", None)
+    if batches is not None:
+        # ropt: its steps are improvements, at most one per batch.
+        steps = max(steps, int(batches))
+    checks = steps // section.check_every if section.check_every else 0
+    final = int(getattr(optimizer, "pop_size", 1)) if optimizer.multi_objective else 1
+    runs = n_r * (checks + final)
+    if "simulator" in (section.outside, section.on_check_failure):
+        if evaluations is None:
+            return None
+        if section.outside == section.on_check_failure == "simulator":
+            # Controls outside the domain simulated before a switch are not those the
+            # restarted run evaluates: both may be simulated in full.
+            return runs + 2 * evaluations
+        return runs + evaluations
+    return runs
 
 
 def holds_optimization(run_dir: Path) -> bool:
@@ -396,6 +446,12 @@ def build(
             simulation = _simulated_objective(config, progress)
             n_realizations = simulation.n_realizations
             objective: Objective = simulation
+            if config.surrogate is not None:
+                # Evaluations by the surrogate, checked by the simulator. Imported
+                # here: services.surrogates composes optimization cases with this module.
+                from apex.services.surrogates import optimization_surrogate
+
+                objective = optimization_surrogate(config, simulation)
         elif config.objective is not None:
             objective = objectives.create(config.objective.name, **config.objective.options)
         else:
@@ -497,28 +553,9 @@ def _simulated_objective(
     run_dir = config.optimization.output_dir
     if run_dir is None:
         raise ConfigError("the optimization's output directory is not resolved")
-    model: dict[str, np.ndarray] = {}
-    if config.model.realizations_file is not None:
-        try:
-            with np.load(config.model.realizations_file) as stored:
-                model = {name: np.asarray(stored[name], dtype=np.float64) for name in stored.files}
-        except (OSError, ValueError) as error:
-            raise ConfigError(f"cannot read [model] realizations_file: {error}") from error
-        flat = [name for name, array in model.items() if array.ndim != 2]
-        if flat:
-            raise ConfigError(
-                f"[model] arrays {flat} must be (n_values, n_realizations), one column each"
-            )
-    response: ResponseObjective
-    if config.objective is not None:
-        response = response_objectives.create(config.objective.name, **config.objective.options)
-    else:
-        response = StackedResponses(
-            [entry.shown for entry in config.objectives],
-            [response_objectives.create(e.name, **e.options) for e in config.objectives],
-            [e.statistic for e in config.objectives],
-        )
-    simulator = _parameterized(
+    model = model_arrays(config)
+    response = response_objective(config)
+    simulator = parameterized_simulator(
         simulators.create(config.simulator.name, **config.simulator.options), config, model
     )
     executor = executors.create(config.execution.name, **config.execution.options)
@@ -550,10 +587,59 @@ def _simulated_objective(
     return objective
 
 
-def _parameterized(
-    simulator: Simulator, config: OptimizationConfig, model: Mapping[str, np.ndarray]
-) -> Simulator:
-    """Wrap the simulator in ``[[parameterizations]]``, if any (the controls as the state).
+def model_arrays(config: OptimizationConfig) -> dict[str, np.ndarray]:
+    """Return the ``[model]`` arrays ``(n_values, n_realizations)`` by name (none: empty).
+
+    Raises
+    ------
+    ConfigError
+        If the file cannot be read, or an array is not one column per realization.
+    """
+    model: dict[str, np.ndarray] = {}
+    if config.model.realizations_file is not None:
+        try:
+            with np.load(config.model.realizations_file) as stored:
+                model = {name: np.asarray(stored[name], dtype=np.float64) for name in stored.files}
+        except (OSError, ValueError) as error:
+            raise ConfigError(f"cannot read [model] realizations_file: {error}") from error
+        flat = [name for name, array in model.items() if array.ndim != 2]
+        if flat:
+            raise ConfigError(
+                f"[model] arrays {flat} must be (n_values, n_realizations), one column each"
+            )
+    return model
+
+
+def response_objective(config: OptimizationConfig) -> ResponseObjective:
+    """Return the configuration's response objective (several stacked)."""
+    if config.objective is not None:
+        return response_objectives.create(config.objective.name, **config.objective.options)
+    return StackedResponses(
+        [entry.shown for entry in config.objectives],
+        [response_objectives.create(e.name, **e.options) for e in config.objectives],
+        [e.statistic for e in config.objectives],
+    )
+
+
+def control_layout(config: OptimizationConfig, model: Mapping[str, np.ndarray]) -> StateLayout:
+    """Return what a simulation is given: the controls (with their bounds), then the models.
+
+    The ``[model]`` arrays come one realization's column each.
+    """
+    variables = [
+        StateVariable(
+            v.name, v.size,
+            -np.inf if v.lower is None else float(v.lower),
+            np.inf if v.upper is None else float(v.upper),
+        )
+        for v in config.controls.variables
+    ]  # fmt: skip
+    variables += [StateVariable(name, a.shape[0]) for name, a in model.items()]
+    return StateLayout(variables)
+
+
+def control_properties(config: OptimizationConfig, model: Mapping[str, np.ndarray]) -> PropertyMap:
+    """Return ``[[parameterizations]]`` over :func:`control_layout` (the identity if none).
 
     Raises
     ------
@@ -561,29 +647,41 @@ def _parameterized(
         If a parameterization is unknown, its options are invalid, or it consumes a
         variable that neither the controls, the model arrays nor an earlier one provides.
     """
-    if not config.parameterizations:
-        return simulator
     built = []
     for section in config.parameterizations:
         try:
             built.append(parameterizations.create(section.name, **section.options))
         except (PluginError, TypeError, ValueError) as error:
             raise ConfigError(f"[[parameterizations]] {section.name}: {error}") from error
-    variables = [StateVariable(v.name, v.size) for v in config.controls.variables]
-    variables += [StateVariable(name, a.shape[0]) for name, a in model.items()]
     try:
-        properties = PropertyMap(built, StateLayout(variables))
-        # Sizes are checked only when a member is mapped: map the initial controls (with
-        # each model array's first realization) now, not in the first simulation.
-        state = {
-            v.name: np.broadcast_to(np.asarray(v.initial, dtype=np.float64), (v.size,)).copy()
-            for v in config.controls.variables
-        }
-        state.update({name: np.asarray(a[:, 0], dtype=np.float64) for name, a in model.items()})
-        properties.member(state)
+        properties = PropertyMap(built, control_layout(config, model))
+        if built:
+            # Sizes are checked only when a member is mapped: map the initial controls (with
+            # each model array's first realization) now, not in the first simulation.
+            state = {
+                v.name: np.broadcast_to(np.asarray(v.initial, dtype=np.float64), (v.size,)).copy()
+                for v in config.controls.variables
+            }
+            state.update({name: np.asarray(a[:, 0], dtype=np.float64) for name, a in model.items()})
+            properties.member(state)
     except ValueError as error:
         raise ConfigError(f"[[parameterizations]]: {error}") from error
-    return parameterized(simulator, properties)
+    return properties
+
+
+def parameterized_simulator(
+    simulator: Simulator, config: OptimizationConfig, model: Mapping[str, np.ndarray]
+) -> Simulator:
+    """Wrap the simulator in ``[[parameterizations]]``, if any (the controls as the state).
+
+    Raises
+    ------
+    ConfigError
+        As :func:`control_properties`.
+    """
+    if not config.parameterizations:
+        return simulator
+    return parameterized(simulator, control_properties(config, model))
 
 
 def evaluation_context(config: OptimizationConfig) -> str:
@@ -672,6 +770,14 @@ def resume(
         # issue): with a [model] file, a 1 there was the default, never the user's.
         controls.pop("realizations")
     config = OptimizationConfig.model_validate(raw)
+    if config.surrogate is None and (run_dir / SURROGATE_STATE).exists():
+        # Its checkpoint and history hold the surrogate's values.
+        raise ConfigError(
+            f"{run_dir} was optimized with a surrogate ({SURROGATE_STATE}); its config.json "
+            "no longer has [surrogate], and its checkpoint holds the surrogate's values: put "
+            'the section back (on_check_failure = "simulator" to go on with the simulator), '
+            "or start a new optimization"
+        )
     section = config.optimization.model_copy(update={"output_dir": run_dir.resolve()})
     return _run(
         config.model_copy(update={"optimization": section}),
@@ -699,6 +805,11 @@ def _run(
         # A default count written out would read as given on a resume, and with a [model]
         # file of several realizations be refused as a contradiction (a reported issue).
         serialised["controls"].pop("realizations", None)
+    if config.surrogate is None:
+        # Absent before the phase 4: a plain run's config.json keeps its bytes, and
+        # frozen copies of older code still resume it.
+        serialised.pop("surrogate", None)
+    hooks = problem.objective if isinstance(problem.objective, SurrogateObjective) else None
     try:
         return run_optimization(
             run_dir,
@@ -710,6 +821,8 @@ def _run(
             resume=resume,
             max_iterations=max_iterations,
             stopped=stopped,
+            hooks=hooks,
+            fresh_draws=lambda: _draws(config),
         )
     except ValueError as error:
         raise ConfigError(str(error)) from error

@@ -16,6 +16,12 @@ controls (the random stream is restored), and finds them in the journal. The sam
 repeated controls within a run, such as the iterate the loop evaluates again. A crash mid-batch
 loses only that batch's simulations. Member ids count the journal's evaluations, so they, and
 the simulations' folders, are the same in a resumed run as in an uninterrupted one.
+
+**Two sources, one journal**. An optimization with a surrogate evaluates by
+the surrogate and checks by the simulator: two objectives sharing one
+:class:`EvaluationJournal`, each with its own ``context`` (the surrogate's includes its
+identity, so its values are never reused by a run without it; the simulator's is the plain
+run's, so a later run without a surrogate reuses them) and a ``source`` recorded in each row.
 """
 
 import hashlib
@@ -57,6 +63,74 @@ def evaluation_key(controls: FloatArray, realization: int, context: str = "") ->
     return digest.hexdigest()
 
 
+class EvaluationJournal:
+    """The evaluations of a run directory's ``evaluations.jsonl``, shared by its objectives.
+
+    Read once, at the first evaluation (under the run's lock); ``next_member`` counts every
+    row, failed ones too, so that no member id is used twice whichever objective adds one.
+
+    Parameters
+    ----------
+    run_dir
+        The optimization's run directory.
+    vector
+        Whether values are tuples (several objectives).
+    """
+
+    def __init__(self, run_dir: Path, *, vector: bool = False) -> None:
+        self.run_dir = run_dir
+        self.vector = vector
+        self._values: dict[str, float | tuple[float, ...]] | None = None
+        #: Each successful row's responses by key (for checks against another source).
+        self.responses: dict[str, list[float]] = {}
+        #: Successful rows by source (rows without one: ``"simulator"``).
+        self.by_source: dict[str, int] = {}
+        self.next_member = 0
+
+    @property
+    def values(self) -> dict[str, float | tuple[float, ...]]:
+        """Each successful evaluation's value(s) by key."""
+        if self._values is None:
+            rows = layout.read_evaluations(self.run_dir, repair=True)
+            values: dict[str, float | tuple[float, ...]] = {}
+            for row in rows:
+                if self.vector and row.get("values") is not None:
+                    values[row["key"]] = tuple(float(v) for v in row["values"])
+                elif not self.vector and row.get("value") is not None:
+                    values[row["key"]] = float(row["value"])
+                else:
+                    continue
+                if row.get("responses") is not None:
+                    self.responses[row["key"]] = [float(v) for v in row["responses"]]
+                source = str(row.get("source", "simulator"))
+                self.by_source[source] = self.by_source.get(source, 0) + 1
+            self._values = values
+            # Failed evaluations are journaled too (without a value): no id is used twice.
+            self.next_member = 1 + max((int(row["member_id"]) for row in rows), default=-1)
+        return self._values
+
+    def record(self, rows: Sequence[Mapping[str, object]], n_members: int) -> None:
+        """Append ``rows`` (``n_members`` new ids) to the file and to the journal in memory."""
+        values = self.values
+        for row in rows:
+            key = str(row["key"])
+            value = row.get("values" if self.vector else "value")
+            if value is None:
+                continue
+            values[key] = (
+                tuple(float(v) for v in value)  # type: ignore[attr-defined]
+                if self.vector
+                else float(value)  # type: ignore[arg-type]
+            )
+            responses = row.get("responses")
+            if responses is not None:
+                self.responses[key] = [float(v) for v in responses]  # type: ignore[attr-defined]
+            source = str(row.get("source", "simulator"))
+            self.by_source[source] = self.by_source.get(source, 0) + 1
+        self.next_member += n_members
+        layout.append_evaluations(self.run_dir, list(rows))
+
+
 class SimulatedObjective:
     """An objective of simulated responses (see the module docstring).
 
@@ -79,6 +153,11 @@ class SimulatedObjective:
         Part of every journal key (see :func:`evaluation_key`).
     progress
         Receives each batch's progress.
+    journal
+        The run's journal, when another objective shares it; none: its own.
+    source
+        Recorded in each row this objective adds (``surrogate``, ``simulator``); none: no
+        source (a plain run's rows are unchanged).
     """
 
     def __init__(
@@ -93,6 +172,8 @@ class SimulatedObjective:
         keep_simulations: Literal["all", "failed", "none"] = "failed",
         progress: ProgressReporter | None = None,
         context: str = "",
+        journal: EvaluationJournal | None = None,
+        source: str | None = None,
     ) -> None:
         self.context = context
         self.objective = objective
@@ -122,8 +203,10 @@ class SimulatedObjective:
                 getattr(objective, "objective_statistics", ("mean",) * len(names))
             )
         # The journal is read at the first evaluation, under the run's lock.
-        self.journal: dict[str, float | tuple[float, ...]] | None = None
-        self.next_member = 0
+        if journal is not None and journal.vector != self.vector:
+            raise ValueError("a shared journal must hold the objective's kind of values")
+        self.journal = journal or EvaluationJournal(run_dir, vector=self.vector)
+        self.source = source
         #: Simulations run by this process (the journal's replays are not counted).
         self.simulated = 0
 
@@ -145,7 +228,7 @@ class SimulatedObjective:
             If a simulation fails (after the executor's retries) or gives a non-finite value;
             the evaluations that succeeded are in the journal, so a resume keeps them.
         """
-        journal = self._journal()
+        journal = self.journal.values
         controls = np.asarray(controls, dtype=np.float64)
         if controls.ndim != 2:
             raise ValueError(f"controls must be (n_x, n), got shape {controls.shape}")
@@ -166,25 +249,36 @@ class SimulatedObjective:
         values = np.array([journal[key] for key in keys], dtype=np.float64)
         return np.ascontiguousarray(values.T) if self.vector else values
 
-    def _journal(self) -> dict[str, float | tuple[float, ...]]:
-        if self.journal is None:
-            rows = layout.read_evaluations(self.run_dir, repair=True)
-            journal: dict[str, float | tuple[float, ...]] = {}
-            for row in rows:
-                if self.vector and row.get("values") is not None:
-                    journal[row["key"]] = tuple(float(v) for v in row["values"])
-                elif not self.vector and row.get("value") is not None:
-                    journal[row["key"]] = float(row["value"])
-            self.journal = journal
-            # Failed evaluations are journaled too (without a value): no id is used twice.
-            self.next_member = 1 + max((int(row["member_id"]) for row in rows), default=-1)
-        return self.journal
+    def keys_of(self, controls: FloatArray, realizations: IntArray) -> list[str]:
+        """Return the journal keys of the columns of ``controls`` ``(n_x, n)``."""
+        controls = np.asarray(controls, dtype=np.float64)
+        n = controls.shape[1]
+        reals = np.broadcast_to(np.asarray(realizations, dtype=np.int64), (n,))
+        return [evaluation_key(controls[:, j], int(reals[j]), self.context) for j in range(n)]
+
+    def responses(self, controls: FloatArray, realizations: IntArray) -> NDArray[np.float64]:
+        """Return the responses of each column ``(n_keys, n)``, evaluating those not known.
+
+        Raises
+        ------
+        WorkflowError
+            As :meth:`__call__`, or if a journal row holds no responses.
+        """
+        self(controls, realizations)
+        keys = self.keys_of(controls, realizations)
+        missing = [k for k in keys if k not in self.journal.responses]
+        if missing:
+            raise WorkflowError(f"{len(missing)} journaled evaluations hold no responses")
+        return np.ascontiguousarray(
+            np.array([self.journal.responses[k] for k in keys], dtype=np.float64).T
+        )
 
     def _simulate(self, controls: FloatArray, reals: IntArray, pending: dict[str, int]) -> None:
         members: list[MemberInput] = []
         needs_dir = bool(getattr(self.simulator, "needs_work_dir", False))
+        _ = self.journal.values  # read before the first id is given
         for offset, j in enumerate(pending.values()):
-            member_id = self.next_member + offset
+            member_id = self.journal.next_member + offset
             state = {name: np.array(controls[part, j]) for name, part in self.blocks}
             state.update({name: np.array(a[:, reals[j]]) for name, a in self.model.items()})
             members.append(
@@ -233,7 +327,6 @@ class SimulatedObjective:
                 rows.append({"key": key, "member_id": member.member_id, "value": None,
                              "error": f"objective {values}"})  # fmt: skip
                 continue
-            self._journal()[key] = tuple(values) if self.vector else values[0]
             rows.append(
                 {
                     "key": key,
@@ -242,15 +335,23 @@ class SimulatedObjective:
                     # One objective: "value" (as before); several: "values".
                     **({"values": values} if self.vector else {"value": values[0]}),
                     "responses": [float(v) for v in result],
+                    # which source made it (absent in a plain run's rows).
+                    **({} if self.source is None else {"source": self.source}),
                 }
             )
-        self.next_member += len(members)
-        layout.append_evaluations(self.run_dir, rows)
+        if self.source is not None:
+            for row in rows:
+                row.setdefault("source", self.source)
+        self.journal.record(rows, len(members))
         failed_ids = {f.member_id for f in failures}
         self._prune(members, failed_ids)
         logger.info(
             "evaluations_simulated",
-            extra={"simulated": len(members), "failed": len(bad), "journal": len(self._journal())},
+            extra={
+                "simulated": len(members),
+                "failed": len(bad),
+                "journal": len(self.journal.values),
+            },
         )
         if bad:
             raise WorkflowError(

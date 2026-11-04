@@ -129,6 +129,8 @@ nav:
       - reference/plugins/converter_skills.md
       - reference/plugins/geomodeling_skills.md
       - reference/plugins/variogram_estimators.md
+      - reference/cli/surrogate.md
+      - reference/plugins/surrogate_designs.md
   - PET migration: migration/pet_parity.md
   - GMAC and the MATLAB scripts: migration/gmac.md
   - pymoo ports (GA, PSO, NSGA): migration/pymoo.md

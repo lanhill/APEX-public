@@ -5,7 +5,7 @@ generated: reference
 
 # The assistant's tools: reference
 
-Every one of these 24 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 25 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `case_info`
 
@@ -47,6 +47,11 @@ Give a run draft of this chat a prior for its fields (the geomodeler's rules: Ga
 Write a run's configuration with a change (a JSON merge patch, e.g. a diagnosis's recommended patch, or the method, damping and localization the user asks for), from a run or a case's configuration, as a draft of this chat, validated and costed; then propose_action launches it as a new run.
 
 
+## `figure_status`
+
+A run's drawing state, queued redraw and PNGs written. Read-only.
+
+
 ## `find_cases`
 
 Find configurations in the workspace by part of their path (e.g. 'norne'): each one's path, kind (run, study, prediction, optimization), method, damping, localization and simulator. Read-only; use it before asking the user for a path.
@@ -79,7 +84,7 @@ List methods, localizations, simulators and other plugins. Example: list_plugins
 
 ## `list_runs`
 
-List runs, newest first (the first is the latest), optionally by annotation; next_offset gives the next page. Example: list_runs(annotations={"study": "loc"}).
+List runs, newest first (the first is the latest), optionally by annotation or name; next_offset gives the next page. Example: list_runs(annotations={"study": "loc"}).
 
 
 ## `monitor_run`
@@ -94,7 +99,7 @@ Plan a study for a case and a goal: a draft in this chat's drafts folder, valida
 
 ## `plot_run`
 
-Draw a run's result figures (PNG and PDF) in the background into its report/plots folder, shown on the run's page as they are drawn: what the request asks for (metric box/violin plots, forecast bands per well, layer maps, histograms) or a preset (brugge_classic: the whole classic set, minutes for a large case).
+Draw a run's result figures (PNG and PDF) in the background into its report/plots folder, shown on the run's page as they are drawn: what the request asks for (metric box/violin plots, forecast bands per well, layer maps, histograms) or a preset (brugge_classic: the whole classic set, minutes for a large case); queued behind a drawing in progress.
 
 
 ## `prediction_summary`
@@ -124,4 +129,4 @@ Get a run's results: iterations, data mismatch mean and std, metrics.
 
 ## `write_report`
 
-Write the narrative report of a run or a study (Markdown; numbers checked against the facts): a summary, the run's setup from its configuration, its results and health, and with compare_with a comparison with another run; save = true also saves it in this chat's drafts folder.
+Write the narrative report of a run or a study (Markdown; numbers checked against the facts): a summary, the run's setup from its configuration, its results and health, and with compare_with a comparison with another run; saved in this chat's drafts folder unless save = false (say where it is).

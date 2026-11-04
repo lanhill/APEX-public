@@ -401,6 +401,10 @@ def _study_fronts(cells: Sequence[OptimizationStudyCell]) -> dict[Path, FloatArr
             continue
         objectives = np.asarray(pareto["objectives"], dtype=float)
         feasible = np.asarray(pareto["violation"], dtype=float) <= 0.0
+        # A front found with a surrogate, evaluated again by the simulator:
+        # members the simulator's values dominate are listed, but not on the front.
+        for dominated in pareto.get("dominated_by_simulator", []):
+            feasible[int(dominated)] = False
         fronts[cell.run_dir] = np.ascontiguousarray(objectives[feasible].T) if objectives.size \
             else np.empty((0, 0))  # fmt: skip
     return fronts

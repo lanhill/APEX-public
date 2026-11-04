@@ -6,13 +6,13 @@ audience: public
 
 ## Goal
 
-A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs. After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator.
+A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs. After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator. You can also build one over an optimization's controls and optimize with it, the simulator checking its accepted steps and evaluating the optimum.
 
-Using a surrogate in optimization or predictions comes later. A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer.
+Using a surrogate in predictions comes later. A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer.
 
 ## Prerequisites
 
-- A history-matching configuration (`CASE.toml`) whose simulator you can run. A surrogate stands in for its whole simulator stack: the simulator, its parameterizations and its geophysics.
+- A history-matching or optimization configuration (`CASE.toml`) whose simulator you can run. A surrogate stands in for its whole simulator stack: the simulator, its parameterizations and its geophysics.
 - A surrogate plugin. `apex plugins` lists the registry `surrogate_models`; plugins come from installed packages.
 - The keys a surrogate answers need times that are step indices or ISO dates.
 
@@ -90,6 +90,8 @@ Using a surrogate in optimization or predictions comes later. A model is only ev
 
 With `[[parameterizations]]` the design is drawn in state space; the surrogate's inputs are the properties the simulator reads.
 
+For an optimization's case the design is over its controls: `lhs` (the controls' bounds, or `[design.box]`) and `file` (an ensemble of controls) apply, `prior` and `run` do not. With `[model] realizations_file` (robust optimization), design member `m` is given realization `m mod n`, so the surrogate learns the realizations too.
+
 Design plans are plugins of the registry `surrogate_designs` (entry-point group `apex.surrogate_designs`). The four above are core's own. Packages may add adaptive plans, which choose training runs from a fitted surrogate; such a plan takes its settings from `[design] options`.
 
 An adaptive build runs in rounds:
@@ -118,6 +120,14 @@ options = { dims = [50, 50, 1], factors = [2, 2, 1], means = { poro = "arithmeti
   - `arithmetic` for porosity, and for ln k, which gives k's geometric mean;
   - `geometric` or `harmonic` for positive variables.
 - **Every design run** also runs on the coarse stack, in the build's `coarse/` folder, so a build makes twice the simulator runs. The snapshots keep both stacks' outputs.
+- **Coarse-only members:** `[design] coarse_only = N` adds N members run on the coarse stack only, for surrogates that learn from many cheap coarse runs and fewer fine ones (pretrained on the coarse runs, then fine-tuned on the fine ones):
+  - they are drawn from the same plan after the held-out and training runs, so those stay the same for a given seed; with plan `file`, they are the next columns of the ensemble, which must have enough;
+  - they run in `coarse/` after the paired coarse runs; `apex validate` counts them among the simulator runs, the build's summary reports `coarse_only_runs`, and a resumed build reuses those already made;
+  - the snapshots keep their inputs and coarse outputs apart (`coarse_only_inputs`, `coarse_only_outputs`) and the plugin's fit receives them; they are never gated;
+  - a failed one is recorded with the design's failures and counted against `min_success_fraction` on its own;
+  - `coarse_only` needs `[coarse]` and a surrogate that trains on coarse runs (below; another's fit would not read them), and is refused with plan `run`; with N > 0 it joins the build's fingerprint, so changing it is refused in the same build directory;
+  - a coarse-only run that fails is reported apart, as the summary's `coarse_only_failed` (`failed` lists the runs the fit and the gate lost); `min_success_fraction` applies to them on their own.
+- **Surrogates that train on coarse runs** declare the capability `trains_on_coarse`. They take a `[coarse]` stack (and need one) without correcting a coarse forecast: they learn from the coarse runs in training only, so history matching runs no coarse stack for them, a `[policy]` judges none of that stack's files in a run, and `on_check_failure = "refit"` is refused for them.
 - **The gate** judges the corrected prediction. The validated domain bounds the coarse forecast's coordinates as well as the inputs'.
 - **The coarse stack's provenance** joins the model's, and `[coarse]` joins the build's fingerprint.
 - **The model's manifest names its coarse stack,** with its file options relative to the model's folder. History matching and `apex surrogate check` rebuild the stack from there over the case. They refuse it if it is not the stack the model was built with.
@@ -162,6 +172,7 @@ field_times = ["2025-01-01", "2026-01-01"]  # ISO dates
 ## The gate
 
 - With `outputs = "observations"`, per datatype the RMS over the held-out runs and keys of `(surrogate − simulator) / σ` must be at most `sigma_ratio` (0.5 by default), σ being the observation error's standard deviation. The surrogate's error must lie well inside the data noise the methods assume.
+- With `outputs = "responses"` (an optimization's objective's keys), relative errors as below, and the held-out runs' objectives must keep their order: Spearman's rank correlation of the surrogate's objective against the simulator's is at least `[gate] min_rank_correlation` (0.95). With several objectives, each one's.
 - With listed vectors and times, relative errors by kind of quantity: pressures against their change from the first value, rates and other quantities against their magnitude; tolerances in `[gate] relative` (`pressure`, `rate`, `plume`, `mass`, `other`; 0.05, 0.05, 0.1, 0.01, 0.05 by default) and `[gate] kinds` where a vector's mnemonic would mislead.
 
 A case that transforms its field data (`[[data_transforms]]`) cannot have its observations as outputs yet: list scalar vectors instead.
@@ -225,7 +236,7 @@ What happens during the run:
 - **Every decision is made on the surrogate's forecasts:** the acceptance of trials and their damping, the stopping criteria and, with `[validation]`, the cross-validation rule and its choice of the minimum-CV iterate. The update uses the surrogate's forecast of every member, so that the members' errors stay alike.
 - **Members outside the domain** stop the run with the members, the coordinates outside and by how much (`outside = "stop"`), or are run by the simulator and recorded as such (`outside = "simulator"`). They are never dropped.
 - **Checks:** at the check iterations, `check_members` members are run by the simulator too and gated against the surrogate's forecasts, with observation errors (`sigma_ratio`, in the space the method sees), the assimilated data and the cross-validation data apart. A check that fails:
-  - `stop` (default): the run stops before the update, at its last checkpoint, with the event `surrogate_check_failed` and the errors per datatype. Set `on_check_failure` in the run's `config.json` (or rebuild the model) and resume.
+  - `stop` (default): the run stops before the update, at its last checkpoint, with the event `surrogate_check_failed` and the errors per datatype. Set `on_check_failure` in the run's `config.json` and resume. A rebuilt model is another model (another identity), which a resume refuses: start a new run with it.
   - `refit`: the checked runs join the model's snapshots, the plugin is fitted again and gated on the held-out runs plus a share of the new ones, and the iteration's forecast is repeated with the refit. After `max_refits` refits a failing check stops the run.
   - `simulator`: the rest of the run uses the simulator.
 
@@ -258,3 +269,34 @@ runs/<name>/
 ```
 
 `history.json` records each forecast's source, and `apex report --plots` marks the surrogate's steps (`S`, or `M` where some members were simulated). Run directories written before surrogates existed are read as forecast by the simulator.
+
+## Optimization with a surrogate
+
+1. Build a surrogate of the optimization (its configuration as `[case] config_file`, `outputs = "responses"`, `[design] plan = "lhs"`), and read its gate.
+2. Add a `[surrogate]` section to the optimization's configuration:
+
+   ```toml
+   [surrogate]
+   model_file = "runs/opt_surrogate/model/surrogate.json"
+   check_every = 3            # accepted steps 3, 6, 9, ... are checked by the simulator (0: none)
+   on_check_failure = "stop"  # "stop" | "simulator"
+   outside = "stop"           # controls outside the model's domain: "stop" | "simulator"
+   # relative = { rate = 0.02 }   # the checks' tolerances: may only tighten the model's gate
+   # workers = 4              # local processes for the surrogate's evaluations
+   # max_evaluations = 50000  # the run's bound on surrogate evaluations
+   ```
+
+3. Validate it: `uv run apex validate OPT.toml`. The plan gives the surrogate's evaluations apart from the simulator's runs (the checks and the optimum's evaluations, and every evaluation when the simulator may take over); only the simulator's runs count towards approval. The run is refused when the model did not pass its gate or its last check failed, was built for another simulator stack, or on other inputs (controls, parameterizations, `[model]` arrays), or does not answer the objective's keys.
+4. Run it: `uv run apex optimize OPT.toml`.
+
+What happens during the run:
+
+- **Every evaluation the optimizer asks for is the surrogate's**, journalled in `evaluations.jsonl` with `source = "surrogate"` under a key that includes the model's identity. A run without the surrogate, or with another model, never reuses them. The simulator's evaluations (`source = "simulator"`) are journalled under the plain run's keys, so within the run directory (a resume, or the restart after a switch to the simulator) they are reused as a plain run's would be.
+- **Controls outside the domain** stop the run at its last checkpoint (`outside = "stop"`), or are evaluated by the simulator (`outside = "simulator"`).
+- **Checks:** every `check_every` accepted steps, the accepted controls are evaluated by the simulator at every realization and gated against the surrogate's values by relative errors, before the step's checkpoint. The history row records the check (`surrogate_check`), and `surrogate_state.json` keeps every check. A check that fails:
+  - `stop` (default): the run stops at its last checkpoint. Set `on_check_failure = "simulator"` in the run's `config.json` and resume. A rebuilt model is another model (another identity): a run refuses to resume with it, so start a new optimization.
+  - `simulator`: the optimization starts again from its start with the simulator for every evaluation. It does not start from its last checkpoint, which holds the surrogate's objective values. From the start it is the plain run with the same seed, and the evaluations the simulator made already are reused from the journal. A resume keeps the switch.
+- **The optimum is the simulator's:** the result's controls are evaluated by the simulator at every realization; `result.json`'s `objective` is the simulator's, `surrogate_objective` the surrogate's, and its `surrogate` section counts the evaluations of each source, the checks and whether the run switched. A multi-objective run's whole front is evaluated again, and `pareto.json` holds the simulator's objectives (and hypervolume) with the surrogate's beside them.
+- **Resume** is bit-identical to an uninterrupted run, checks included, for APEX's optimizers and for ropt's.
+- **Checking the model later:** `uv run apex surrogate check MODEL --against OPT.toml --runs N` draws `N` controls by a Latin hypercube within the box the build's design spanned, which the model's manifest records (so a copied model can be checked; older models read it from their build's `design.npz`). With `[surrogate] extent = "hull"` or `"mahalanobis"` the domain is narrower than that box, the more so the more controls: runs outside it are simulated but not gated, the check warns, and its summary says how many; too few inside (`--min-inside`) fail the check, which makes the model unusable until rebuilt. Prefer the box extent for optimizations with many controls.
+- **In a study's comparison**, `objective:final`, `front_size:final` and `hypervolume:final` are the simulator's (the front without the members the simulator's values dominate); `objective:best` comes from the history, which holds the surrogate's values.

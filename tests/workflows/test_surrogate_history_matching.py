@@ -1221,6 +1221,33 @@ def test_a_policy_checks_the_coarse_stack_a_manifest_names(
         f"{policy.COARSE_STACK}simulators.linear: forward_file"
     ]
 
+    # A model that only trained on coarse runs (trains_on_coarse) names no stack the run
+    # uses: none of its files is judged (the coder's review of phase 4).
+    class TrainsOnCoarse:
+        trains_on_coarse = True
+
+    surrogate_models.register("test_trains_on_coarse_policy")(TrainsOnCoarse)
+    try:
+        trained = coarse_built.parent.parent / "model_trained" / "surrogate.json"
+        write_surrogate(
+            trained, plugin="test_trains_on_coarse_policy",
+            model=cases.CoarseAffine.from_arrays(manifest.model, stored.arrays),
+            domain=manifest.training_domain(), provenance=manifest.provenance,
+            options=manifest.options, gate=manifest.gate,
+            coarse=surrogates.coarse_relative_to(
+                CoarseSection(options={"forward_file": str(elsewhere)}), trained.parent
+            ),
+        )  # fmt: skip
+        other = composition.load_config(
+            cases.write_case(tmp_path, name="trained", surrogate=_section(trained))
+        )
+        assert not [
+            k for _, k, _ in policy.named(other, follow=lambda path: True)
+            if k.startswith(policy.COARSE_STACK)
+        ]  # fmt: skip
+    finally:
+        surrogate_models.remove("test_trains_on_coarse_policy")
+
 
 def test_coarse_failures_members_outside_and_retention_stay_aligned(tmp_path: Path) -> None:
     """A member whose coarse run fails is the simulator's failed member; members outside the

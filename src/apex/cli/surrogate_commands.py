@@ -32,6 +32,8 @@ ShowProgress = Annotated[
 def surrogate_plan_lines(plan: SurrogateBuildPlan) -> list[str]:
     """Format a build's plan (``apex validate``) for the terminal."""
     runs = "none (the run's stored forecasts)" if plan.plan == "run" else f"{plan.simulator_runs:,}"
+    if plan.coarse_only:
+        runs += f", {plan.coarse_only:,} of them coarse-only"
     lines = [
         f"surrogate {plan.name}: {plan.model} on a {plan.plan} design of {plan.training} "
         f"training and {plan.held_out} held-out runs",
@@ -66,7 +68,13 @@ def _summary_lines(path: Path, summary: SurrogateBuildSummary) -> list[str]:
         ]
     lines = [
         f"{path}: {summary.plugin} fitted on {summary.training_runs} runs, gated on "
-        f"{summary.held_out_runs}" + (f" ({len(summary.failed)} failed)" if summary.failed else "")
+        f"{summary.held_out_runs}"
+        + (f" ({len(summary.failed)} failed)" if summary.failed else "")
+        + (
+            f", with {summary.coarse_only_runs} coarse-only runs"
+            if summary.coarse_only_runs
+            else ""
+        )
     ]
     if summary.gate is not None:
         lines += _gate_lines(summary.gate)

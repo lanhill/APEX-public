@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from apex.simulation.deck import DeckContents, deck_contents, restart_schedule
+from apex.simulation.deck import DeckContents, deck_contents, restart_schedule, schedule_keywords
 
 
 def _deck(tmp_path: Path, solution: str, schedule: str, start: str = "1 JAN 2020") -> Path:
@@ -503,3 +503,27 @@ def test_a_templated_rptrst_does_not_leave_only_basic_one(tmp_path: Path) -> Non
         "RPTSCHED\n RESTART=1 /\nRPTSCHED\n RESTART=2 /\n% if dense:\nRPTRST\n BASIC=1 /\n% endif",
     )
     assert mixed.basic_one is False
+
+
+def test_schedule_keywords_come_in_deck_order_with_includes_in_place(tmp_path: Path) -> None:
+    """``schedule_keywords``: an include's controls between the template's dates, in order
+    (``deck_keywords`` reads the includes after the template)."""
+    (tmp_path / "part.sch").write_text("WCONHIST\n P OPEN ORAT 100 /\n/\nDATES\n 1 MAR 2020 /\n/\n")
+    deck = _deck(
+        tmp_path, "",
+        "WHISTCTL\n RESV /\nDATES\n 1 FEB 2020 /\n/\nINCLUDE\n 'part.sch' /\n"
+        "TSTEP\n 10 /\nWCONHIST\n P SHUT ORAT 0 /\n/",
+    )  # fmt: skip
+    keywords, notes = schedule_keywords(deck)
+    assert [k for k, _ in keywords] == [
+        "START",
+        "SCHEDULE",
+        "WHISTCTL",
+        "DATES",
+        "WCONHIST",
+        "DATES",
+        "TSTEP",
+        "WCONHIST",
+    ]  # END stops the reading and is not returned
+    assert keywords[4][1] == ["P OPEN ORAT 100"]
+    assert notes == []

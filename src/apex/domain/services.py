@@ -125,7 +125,13 @@ class OptimizationPlan(_Document):
         default=None, description="How max_evaluations is made up, its terms with their values."
     )
     max_simulator_runs: int | None = Field(
-        description="One per evaluation for a simulated objective; 0 for an analytic one."
+        description="One per evaluation for a simulated objective; 0 for an analytic one; "
+        "with a surrogate, its checks and the optimum's evaluations (and every evaluation "
+        "when the simulator may stand in for it)."
+    )
+    surrogate_evaluations: int | None = Field(
+        default=None,
+        description="With [surrogate]: the bound on the surrogate's evaluations.",
     )
     simulator: str | None = None
     parallel_runs: int | None = None

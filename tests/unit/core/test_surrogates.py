@@ -225,6 +225,49 @@ def test_the_snapshot_digest_follows_the_content() -> None:
     assert changed.digest() != other.digest()
 
 
+def test_coarse_only_members_are_checked_kept_whole_and_digested_only_when_present() -> None:
+    """Decision 13: coarse-only members go with the set, not as its runs."""
+    base = _snapshots(5, 1)
+    coarse = np.ones((3, 5))
+    only_inputs = {"a": np.zeros((2, 4)), "b": np.ones((1, 4))}
+    only_outputs = np.full((3, 4), 2.0)
+
+    def make(**fields: object) -> SnapshotSet:
+        document = {"layout": base.layout, "inputs": base.inputs, "keys": base.keys,
+                    "outputs": base.outputs, "run_ids": base.run_ids,
+                    "provenance": base.provenance, "failed": base.failed}  # fmt: skip
+        return SnapshotSet(**{**document, **fields})  # type: ignore[arg-type]
+
+    paired = make(coarse_outputs=coarse)
+    with_only = make(coarse_outputs=coarse, coarse_only_inputs=only_inputs,
+                     coarse_only_outputs=only_outputs)  # fmt: skip
+    assert paired.n_coarse_only == 0
+    assert with_only.n_coarse_only == 4
+    assert with_only.coarse_only_inputs is not None
+    assert not with_only.coarse_only_inputs["a"].flags.writeable
+    # The digest: unchanged without them, changed with them.
+    assert make(coarse_outputs=coarse).digest() == paired.digest()
+    assert with_only.digest() != paired.digest()
+    # columns() keeps them whole: they are not runs of the set.
+    sub = with_only.columns([0, 2])
+    assert sub.n_runs == 2
+    assert sub.coarse_only_outputs is not None
+    np.testing.assert_array_equal(sub.coarse_only_outputs, only_outputs)
+    with pytest.raises(ValueError, match="both their inputs and their outputs"):
+        make(coarse_outputs=coarse, coarse_only_outputs=only_outputs)
+    with pytest.raises(ValueError, match="need the runs' coarse outputs"):
+        make(coarse_only_inputs=only_inputs, coarse_only_outputs=only_outputs)
+    with pytest.raises(ValueError, match=r"coarse-only outputs must be \(3, n\)"):
+        make(coarse_outputs=coarse, coarse_only_inputs=only_inputs,
+             coarse_only_outputs=np.zeros((2, 4)))  # fmt: skip
+    with pytest.raises(ValueError, match=r"coarse-only input 'a' must be \(2, 4\)"):
+        make(coarse_outputs=coarse, coarse_only_inputs={**only_inputs, "a": np.zeros((2, 3))},
+             coarse_only_outputs=only_outputs)  # fmt: skip
+    with pytest.raises(ValueError, match="must be the layout's variables"):
+        make(coarse_outputs=coarse, coarse_only_inputs={"a": only_inputs["a"]},
+             coarse_only_outputs=only_outputs)  # fmt: skip
+
+
 def test_provenance_names_the_stack_differences() -> None:
     a = SnapshotProvenance(simulator="opm_flow", deck_digest="d1", case_digest="c1")
     b = SnapshotProvenance(simulator="opm_flow", deck_digest="d2", case_digest=None)

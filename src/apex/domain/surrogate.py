@@ -196,6 +196,14 @@ class SnapshotSet:
     coarse_outputs
         Optional ``(n_keys, n_runs)``: a coarse simulation's values at the same ``keys`` for
         the same runs, for surrogates that correct a coarse forecast.
+    coarse_only_inputs
+        Optional ``{variable: (size, n_coarse_only)}``: the inputs of design members run on
+        the coarse stack only (``[design] coarse_only``), e.g. for a network pretrained on
+        many coarse runs and fine-tuned on the fewer fine ones. They are not runs of the set:
+        :meth:`columns` keeps them whole, and the gate never sees them.
+    coarse_only_outputs
+        ``(n_keys, n_coarse_only)``: their coarse values at ``keys``; given with
+        ``coarse_only_inputs`` and only with ``coarse_outputs``.
     """
 
     layout: StateLayout
@@ -208,6 +216,8 @@ class SnapshotSet:
     fields: Mapping[str, NDArray[np.float64]] = field(default_factory=dict)
     field_times: tuple[str, ...] = ()
     coarse_outputs: NDArray[np.float64] | None = None
+    coarse_only_inputs: Mapping[str, NDArray[np.float64]] | None = None
+    coarse_only_outputs: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
         """Check every shape against the layout, the keys and the runs; copy the arrays."""
@@ -244,6 +254,7 @@ class SnapshotSet:
                 raise ValueError(
                     f"coarse outputs must be the outputs' {outputs.shape}, got {coarse.shape}"
                 )
+        only_inputs, only_outputs = self._coarse_only(coarse, len(self.keys))
         if self.fields and not self.field_times:
             raise ValueError("field snapshots need their field_times")
         fields: dict[str, NDArray[np.float64]] = {}
@@ -265,6 +276,46 @@ class SnapshotSet:
         object.__setattr__(self, "failed", tuple(int(i) for i in self.failed))
         object.__setattr__(self, "field_times", tuple(self.field_times))
         object.__setattr__(self, "coarse_outputs", coarse)
+        object.__setattr__(self, "coarse_only_inputs", only_inputs)
+        object.__setattr__(self, "coarse_only_outputs", only_outputs)
+
+    def _coarse_only(
+        self, coarse: NDArray[np.float64] | None, n_keys: int
+    ) -> tuple[Mapping[str, NDArray[np.float64]] | None, NDArray[np.float64] | None]:
+        """Check and copy the coarse-only members (both or neither, with coarse outputs)."""
+        if (self.coarse_only_inputs is None) != (self.coarse_only_outputs is None):
+            raise ValueError("coarse-only members need both their inputs and their outputs")
+        if self.coarse_only_inputs is None or self.coarse_only_outputs is None:
+            return None, None
+        if coarse is None:
+            raise ValueError("coarse-only members need the runs' coarse outputs")
+        outputs = _array(self.coarse_only_outputs, "coarse-only outputs", 2)
+        n_only = outputs.shape[1]
+        if n_only < 1 or outputs.shape[0] != n_keys:
+            raise ValueError(
+                f"coarse-only outputs must be ({n_keys}, n) with n >= 1, got {outputs.shape}"
+            )
+        if set(self.coarse_only_inputs) != set(self.layout.names):
+            raise ValueError(
+                f"coarse-only inputs {sorted(self.coarse_only_inputs)} must be the layout's "
+                f"variables {sorted(self.layout.names)}"
+            )
+        inputs: dict[str, NDArray[np.float64]] = {}
+        for variable in self.layout.variables:
+            name = variable.name
+            array = _array(self.coarse_only_inputs[name], f"coarse-only input {name!r}", 2)
+            if array.shape != (variable.size, n_only):
+                raise ValueError(
+                    f"coarse-only input {name!r} must be ({variable.size}, {n_only}), "
+                    f"got {array.shape}"
+                )
+            inputs[name] = array
+        return MappingProxyType(inputs), outputs
+
+    @property
+    def n_coarse_only(self) -> int:
+        """Number of coarse-only members (0 without them)."""
+        return 0 if self.coarse_only_outputs is None else self.coarse_only_outputs.shape[1]
 
     @property
     def n_runs(self) -> int:
@@ -274,7 +325,8 @@ class SnapshotSet:
     def columns(self, positions: Sequence[int]) -> "SnapshotSet":
         """Return the runs at ``positions`` (e.g. the training or the held-out ones).
 
-        ``failed`` is the design's, and kept.
+        ``failed`` is the design's, and kept, as are the coarse-only members (not runs of
+        the set).
         """
         index = np.asarray(positions, dtype=np.intp)
         return SnapshotSet(
@@ -288,6 +340,8 @@ class SnapshotSet:
             fields={name: array[:, :, index] for name, array in self.fields.items()},
             field_times=self.field_times,
             coarse_outputs=None if self.coarse_outputs is None else self.coarse_outputs[:, index],
+            coarse_only_inputs=self.coarse_only_inputs,
+            coarse_only_outputs=self.coarse_only_outputs,
         )
 
     def digest(self) -> str:
@@ -324,6 +378,12 @@ class SnapshotSet:
             # Only when there are some, so that sets without them keep their digests.
             text("coarse_outputs")
             array(self.coarse_outputs)
+        if self.coarse_only_inputs is not None and self.coarse_only_outputs is not None:
+            # Likewise: sets without coarse-only members keep their digests.
+            text("coarse_only")
+            for variable in self.layout.variables:
+                array(self.coarse_only_inputs[variable.name])
+            array(self.coarse_only_outputs)
         return digest.hexdigest()
 
 
@@ -791,14 +851,20 @@ class SurrogateManifest(_Frozen):
         description="The coarse stack a coarse-corrected surrogate runs, its "
         "file options relative to the manifest's folder.",
     )
+    control_box: dict[str, tuple[list[float], list[float]]] | None = Field(
+        default=None,
+        description="An optimization's surrogate: each control's entrywise "
+        "range over the design's runs, the box a check draws within.",
+    )
 
     @model_serializer(mode="wrap")
     def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        # Absent before coarse stacks existed: manifests without one keep
-        # their bytes, so their identities do not change.
+        # Absent before coarse stacks and control boxes
+        # existed: manifests without them keep their bytes, so their identities do not change.
         document: dict[str, Any] = handler(self)
-        if document.get("coarse") is None:
-            document.pop("coarse", None)
+        for name in ("coarse", "control_box"):
+            if document.get(name) is None:
+                document.pop(name, None)
         return document
 
     def data_keys(self) -> tuple[DataKey, ...]:
@@ -862,12 +928,15 @@ class SurrogateCaseSection(_Frozen):
     """``[case]`` of a build: the configuration the surrogate stands in for, and its outputs."""
 
     config_file: Path = Field(
-        description="The history-matching configuration whose simulator stack it stands in for."
+        description="The history-matching or optimization configuration whose simulator "
+        "stack it stands in for."
     )
-    outputs: Literal["observations"] | SurrogateSeries = Field(
+    outputs: Literal["observations", "responses"] | SurrogateSeries = Field(
         default="observations",
-        description="`observations`: the case's observed keys (every role), gated against "
-        "their observation errors; or `{ vectors, times }`, gated by relative errors.",
+        description="`observations`: a history-matching case's observed keys (every role), "
+        "gated against their observation errors; `responses`: an optimization's objective's "
+        "response keys, gated by relative errors and by the rank correlation of the "
+        "objective; or `{ vectors, times }`, gated by relative errors.",
     )
     fields: list[str] = Field(
         default_factory=list,
@@ -922,6 +991,11 @@ class DesignSection(_Frozen):
 
     With ``[[parameterizations]]`` in the case, the design is drawn in state space and each
     member mapped to the properties its simulator reads, which are the surrogate's inputs.
+
+    ``coarse_only`` (with a ``[coarse]`` stack; plans ``prior``, ``lhs`` and ``file``) adds
+    members run on the coarse stack only, drawn after the held-out and the training runs (so
+    those stay the same for a given seed; plan ``file``: the next columns), e.g. for a
+    network pretrained on many cheap coarse runs and fine-tuned on the fewer fine ones.
     """
 
     plan: str = Field(
@@ -951,6 +1025,21 @@ class DesignSection(_Frozen):
         description="Fail unless at least this share of the training and of the held-out "
         "runs succeeds.",
     )
+    coarse_only: int = Field(
+        default=0,
+        ge=0,
+        description="Members run on the [coarse] stack only, drawn after the others (for "
+        "surrogates pretrained on coarse runs).",
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_absent_coarse_only(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Absent before coarse-only members existed: configurations, and the fingerprints
+        # made from them, of builds without any keep their bytes.
+        document: dict[str, Any] = handler(self)
+        if not document.get("coarse_only"):
+            document.pop("coarse_only", None)
+        return document
 
     @model_validator(mode="after")
     def _plan_inputs(self) -> Self:
@@ -969,6 +1058,11 @@ class DesignSection(_Frozen):
             raise ValueError("box is for plan = 'lhs'")
         if self.iterations != "all" and self.plan != "run":
             raise ValueError("iterations are for plan = 'run'")
+        if self.coarse_only and self.plan == "run":
+            raise ValueError(
+                "coarse_only is for drawn designs (prior, lhs, file): plan = 'run' reuses a "
+                "run's forecasts and has no coarse runs; remove coarse_only"
+            )
         for name, (lower, upper) in self.box.items():
             if not (math.isfinite(lower) and math.isfinite(upper) and lower <= upper):
                 raise ValueError(f"box of {name!r} needs finite bounds, lower <= upper")
@@ -993,10 +1087,33 @@ class GateSection(_Frozen):
         default_factory=dict,
         description="The kind of a datatype where its vector's mnemonic would mislead.",
     )
+    min_rank_correlation: float | None = Field(
+        default=None,
+        ge=-1,
+        le=1,
+        description="With outputs = 'responses' (an optimization): the smallest Spearman "
+        "correlation of the held-out runs' objectives, surrogate against simulator "
+        "(default 0.95).",
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_absent_rank(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Absent before optimizations had surrogates: the fit
+        # fingerprints of existing builds, made from this section, keep their bytes.
+        document: dict[str, Any] = handler(self)
+        if document.get("min_rank_correlation") is None:
+            document.pop("min_rank_correlation", None)
+        return document
 
     def tolerances(self) -> GateTolerances:
         """Return the gate's tolerances (the defaults where not given)."""
-        return GateTolerances(sigma_ratio=self.sigma_ratio, relative=dict(self.relative))
+        if self.min_rank_correlation is None:
+            return GateTolerances(sigma_ratio=self.sigma_ratio, relative=dict(self.relative))
+        return GateTolerances(
+            sigma_ratio=self.sigma_ratio,
+            relative=dict(self.relative),
+            min_rank_correlation=self.min_rank_correlation,
+        )
 
 
 class CoarseSection(_Frozen):
@@ -1068,6 +1185,24 @@ class SurrogateConfig(_Frozen):
         default=None, description="A coarse stack every run also runs on."
     )
 
+    @model_validator(mode="after")
+    def _rank_needs_responses(self) -> Self:
+        if self.gate.min_rank_correlation is not None and self.case.outputs != "responses":
+            raise ValueError(
+                "[gate] min_rank_correlation gates an optimization's objective, which only "
+                '[case] outputs = "responses" gives: remove it, or use those outputs'
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _coarse_only_needs_coarse(self) -> Self:
+        if self.design.coarse_only and self.coarse is None:
+            raise ValueError(
+                f"[design] coarse_only = {self.design.coarse_only} runs members on the "
+                "[coarse] stack only: add a [coarse] stack, or remove coarse_only"
+            )
+        return self
+
 
 # ------------------------------------------------------------------------ the workflow's results
 
@@ -1081,6 +1216,7 @@ class SurrogateBuildPlan(_Frozen):
     training: int
     held_out: int
     simulator_runs: int = Field(description="Full runs the design needs (0 for plan 'run').")
+    coarse_only: int = Field(default=0, description="Of them, runs on the coarse stack only.")
     keys: int = Field(description="The keys the surrogate answers.")
     datatypes: list[str]
     measure: GateMeasure
@@ -1112,6 +1248,14 @@ class SurrogateBuildSummary(_Frozen):
     failed: list[int] = Field(default_factory=list)
     pending: int = 0
     simulator_runs: int = Field(description="Full runs taken (0 for plan 'run').")
+    coarse_only_runs: int = Field(
+        default=0, description="Successful runs on the coarse stack only ([design] coarse_only)."
+    )
+    coarse_only_failed: list[int] = Field(
+        default_factory=list,
+        description="Coarse-only members whose run failed; ``failed`` lists only the "
+        "training and held-out runs that failed.",
+    )
     keys: int
     datatypes: list[str]
     gate: GateResult | None = None

@@ -34,7 +34,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from pydantic import JsonValue, ValidationError
 
 from apex.core.errors import ConfigError, validation_problems
@@ -168,12 +168,15 @@ def write_surrogate(
     fit: FitRecord | None = None,
     apex_commit: str | None = None,
     coarse: CoarseSection | None = None,
+    control_box: Mapping[str, tuple[ArrayLike, ArrayLike]] | None = None,
 ) -> StoredSurrogate:
     """Write a fitted surrogate as ``path`` (a ``.json`` manifest) and its ``.npz`` beside it.
 
     The arrays are written first and the manifest last, each atomically, so a manifest
     always names arrays that exist. ``coarse``: the coarse stack a coarse-corrected model
     runs, its file options relative to the manifest's folder.
+    ``control_box``: an optimization's surrogate's controls' ranges over its design,
+    which its checks draw within.
 
     Raises
     ------
@@ -217,6 +220,15 @@ def write_surrogate(
             sha256=hashlib.sha256(arrays_bytes).hexdigest(),
         ),
         coarse=coarse,
+        control_box=None
+        if control_box is None
+        else {
+            name: (
+                [float(v) for v in np.asarray(low, dtype=np.float64).reshape(-1)],
+                [float(v) for v in np.asarray(high, dtype=np.float64).reshape(-1)],
+            )
+            for name, (low, high) in control_box.items()
+        },
     )
     manifest_bytes = _manifest_bytes(manifest)
     path.parent.mkdir(parents=True, exist_ok=True)

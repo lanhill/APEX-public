@@ -24,6 +24,10 @@ Optional capabilities, read with ``getattr`` as the simulators' are:
   Gaussian process's;
 - ``predict_corrected`` (:class:`CoarseCorrectedSurrogate`): a correction of a coarse
   simulation's forecast, from the member's inputs and that forecast;
+- ``trains_on_coarse``, a ``bool`` (``False`` by default): the plugin learns from a
+  ``[coarse]`` stack's runs in training only (``SnapshotSet.coarse_outputs`` and the
+  coarse-only members decision 13; e.g. pretraining on them) and predicts without
+  a coarse forecast, so history matching runs no coarse stack for it;
 - ``requires``, a ``tuple[str, ...]`` of simulator capabilities the plugin needs to be
   trained (the intrusive reduced models); none by default;
 - ``version``, a ``str`` recorded in the manifest.

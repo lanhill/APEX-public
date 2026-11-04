@@ -285,3 +285,26 @@ def test_shapes_and_references_are_checked() -> None:
         gate(np.ones((2, 1)), np.full((2, 1), np.inf), keys, [0])
     with pytest.raises(ValueError, match="variances"):
         gate(np.ones((2, 1)), np.ones((2, 1)), keys, [0], variances=np.array([1.0, 0.0]))
+
+
+def test_several_objectives_are_gated_on_their_lowest_rank_correlation() -> None:
+    """Decision 2: each objective must keep its order; one anti-ranked or
+    constant objective fails the gate, whatever the others."""
+    simulator = np.array([[1.0, 2.0, 3.0, 4.0, 5.0], [5.0, 3.0, 4.0, 1.0, 2.0]])
+    empty = np.zeros((0, 5))
+    both = gate(empty, empty, [], range(5), objectives=(2.0 * simulator + 1.0, simulator))
+    assert both.rank is not None
+    assert both.rank.correlation == pytest.approx(1.0)
+    assert both.passed
+    reversed_second = np.vstack([simulator[0], -simulator[1]])
+    anti = gate(empty, empty, [], range(5), objectives=(reversed_second, simulator))
+    assert anti.rank is not None
+    assert anti.rank.correlation == pytest.approx(-1.0)
+    assert not anti.passed
+    flat_second = np.vstack([simulator[0], np.ones(5)])
+    flat = gate(empty, empty, [], range(5), objectives=(flat_second, simulator))
+    assert flat.rank is not None
+    assert flat.rank.correlation is None
+    assert not flat.passed
+    with pytest.raises(ValueError, match="objectives must be"):
+        gate(empty, empty, [], range(5), objectives=(simulator, simulator[:, :4]))

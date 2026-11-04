@@ -438,6 +438,39 @@ def deck_keywords(template_path: Path, case_dir: Path | None = None) -> list[tup
     return found
 
 
+def schedule_keywords(
+    template_path: Path, case_dir: Path | None = None
+) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Return the keywords of a deck's ``SCHEDULE`` section in deck order, and notes.
+
+    Includes are expanded where they stand (unlike :func:`deck_keywords`), so ``DATES``,
+    ``TSTEP`` and the wells' controls come in the order the simulator reads them; reading
+    stops at ``END``. ``START`` is included from wherever it stands. The notes say what could
+    not be followed (Mako lines, includes of template expressions), for readers that build a
+    schedule from the text (wells' controls by period).
+    """
+    notes: list[str] = []
+
+    def note(message: str) -> None:
+        if message not in notes:
+            notes.append(message)
+
+    found: list[tuple[str, list[str]]] = []
+    scheduled = False
+    templated = False
+    for keyword, records, mako in _ordered_records(template_path, case_dir, note):
+        if keyword == "SCHEDULE":
+            scheduled = True
+        elif keyword in _SECTIONS:
+            scheduled = False
+        if scheduled or keyword == "START":
+            found.append((keyword, records))
+            if mako and records and not templated:
+                templated = True
+                note(f"{keyword} is in a file with Mako lines: its records may differ")
+    return found, notes
+
+
 def _deck_files(template_path: Path, case_dir: Path | None = None) -> list[Path]:
     """Return the template and the files it includes, recursively (each once)."""
     case_dir = (case_dir or template_path.resolve().parent).resolve()

@@ -41,7 +41,8 @@ datatype is recorded beside it (``max_sigma_ratio``), so that one key far off sh
 
 **Objectives** (optimization): Spearman's rank correlation of the held-out runs' objectives,
 surrogate against simulator, at least ``min_rank_correlation`` (0.95). Ties take average
-ranks; a constant set of objectives has no correlation and fails.
+ranks; a constant set of objectives has no correlation and fails. With several objectives
+each is ranked, and the lowest correlation is gated.
 
 A prediction that is not finite fails its datatype (its error is ``None``). The verdict passes
 only if something was gated and everything gated passed.
@@ -248,7 +249,9 @@ def gate(
         The kind of quantity of a datatype or field, where :func:`quantity_kind` would guess
         wrong.
     objectives
-        ``((n_runs,), (n_runs,))``, the surrogate's and the simulator's objective per run.
+        ``((n_runs,), (n_runs,))``, the surrogate's and the simulator's objective per run; or
+        ``((n_obj, n_runs), (n_obj, n_runs))`` for several objectives, gated on the lowest
+        of their correlations.
     fields
         ``{name: (surrogate, simulator)}``, each ``(n_cells, n_times, n_runs)``, gated by
         relative errors (each cell a series over time).
@@ -360,11 +363,14 @@ def gate(
         entries.append(_field_gate(name, kind, fs, fy, tolerances.relative[kind]))
     rank = None
     if objectives is not None:
-        a = np.asarray(objectives[0], dtype=np.float64).reshape(-1)
-        b = np.asarray(objectives[1], dtype=np.float64).reshape(-1)
-        if a.shape != (n_runs,) or b.shape != (n_runs,):
-            raise ValueError(f"objectives must be two ({n_runs},) arrays")
-        rho = _spearman(a, b)
+        a = np.atleast_2d(np.asarray(objectives[0], dtype=np.float64))
+        b = np.atleast_2d(np.asarray(objectives[1], dtype=np.float64))
+        if a.ndim != 2 or a.shape != b.shape or a.shape[1] != n_runs:
+            raise ValueError(f"objectives must be two ({n_runs},) or (n_obj, {n_runs}) arrays")
+        # Several objectives: each must keep its ranking, so the lowest
+        # correlation is the one gated; an undefined one (a constant objective) fails.
+        rhos = [_spearman(a[i], b[i]) for i in range(a.shape[0])]
+        rho = None if any(r is None for r in rhos) else min(r for r in rhos if r is not None)
         rank = RankGate(
             correlation=rho,
             tolerance=tolerances.min_rank_correlation,

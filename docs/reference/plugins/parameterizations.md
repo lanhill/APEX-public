@@ -5,7 +5,24 @@ generated: reference
 
 # Parameterizations: reference
 
-Every one of these 4 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 5 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+
+## `block_average`
+
+Property fields averaged in blocks onto a coarser grid.
+
+Select it with:
+
+```toml
+[[parameterizations]]
+name = "block_average"
+```
+
+| option | type | default | description |
+|---|---|---|---|
+| `dims` | array | required | The fine grid, `[nx, ny, nz]`. |
+| `factors` | array | required | Fine cells per coarse cell along each axis, `[fx, fy, fz]`. |
+| `means` | object | required | Per variable its mean: `arithmetic` (porosity, ln k), `geometric` or `harmonic` (positive values). The variables averaged; other state variables pass through. |
 
 ## `control_scaling`
 

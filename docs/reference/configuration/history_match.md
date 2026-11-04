@@ -5,7 +5,7 @@ generated: reference
 
 # Configuring history match: reference
 
-Every one of these 16 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 17 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `history_match:case`
 
@@ -286,6 +286,24 @@ a plugin switch contradicts `[output]`.
 | `name` | string | required | |
 | `size` | integer | required | |
 | `upper` | number or null | | |
+
+## `history_match:surrogate`
+
+Forecasts by a fitted surrogate, checked by the simulator.
+
+| option | type | default | description |
+|---|---|---|---|
+| `check_every` | integer | 3 | Iterations whose forecast is also run by the simulator for some members and gated (iterations 3, 6, 9, ... by default); 0: no checks. |
+| `check_members` | integer or string | 10 | Members checked at a check iteration, drawn from the stream `surrogate` (or "all"). |
+| `max_evaluations` | integer | 50000 | The run's bound on surrogate evaluations (one per member forecast). |
+| `max_refits` | integer | 2 | Refits allowed before a failing check stops the run. |
+| `model_file` | string | required | The surrogate's manifest (`.json`, its arrays beside it), e.g. `runs/<build>/model/surrogate.json`. |
+| `on_check_failure` | string | stop | A check that fails: `stop` the run before the update (resumable); `refit` the surrogate with the checked runs added and repeat the iteration's forecast; or use the `simulator` for the rest of the run. |
+| `outside` | string | stop | Members outside the surrogate's validated domain: `stop` the run, or run them by the `simulator` (recorded as such). |
+| `refit_held_out` | number | 0.5 | A refit's share of the checked runs held out for its gate (the rest are fitted on), drawn from the stream `surrogate`. |
+| `sigma_ratio` | number or null | | The checks' tolerance: may only tighten the model's own gate. |
+| `variance_in_errors` | boolean | false | Add the surrogate's predictive variance (a plugin with `predict_std`), the members' mean per datum, to the observation errors of the update it serves. |
+| `workers` | integer or null | | Local worker processes for the surrogate's forecasts; none: in this process (serial). |
 
 ## `history_match:validation`
 

@@ -25,6 +25,7 @@ tolerances and what a refit needs. Workers load the model by reference
 (:func:`fitted_model`, once per process).
 """
 
+import dataclasses
 import datetime as dt
 import functools
 import hashlib
@@ -41,9 +42,11 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import ValidationError
 
+from apex.algorithms.optimization.protocols import ResponseObjective
 from apex.algorithms.surrogates.designs import (
     BUILTIN_PLANS,
     ensemble_design,
+    latin_hypercube,
     lhs_design,
     repeated_columns,
     sampled_design,
@@ -58,7 +61,7 @@ from apex.core.errors import (
     WorkflowError,
     validation_problems,
 )
-from apex.core.plugins import executors, priors, surrogate_designs, surrogate_models
+from apex.core.plugins import executors, priors, simulators, surrogate_designs, surrogate_models
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import CaseFileSimulator, Executor, Simulator
 from apex.core.surrogates import (
@@ -70,6 +73,7 @@ from apex.core.surrogates import (
 )
 from apex.domain.config import HistoryMatchConfig, PluginSection, SurrogateRunSection
 from apex.domain.observations import DataKey, ObservationSet
+from apex.domain.optimization import OptimizationConfig
 from apex.domain.state import StateLayout, StateVariable
 from apex.domain.surrogate import (
     BuildCost,
@@ -92,6 +96,7 @@ from apex.domain.surrogate import (
     time_position,
 )
 from apex.services import composition
+from apex.services import optimization as optimization_services
 from apex.services.identity import code_version, tree_hash
 from apex.services.plugins import check_options
 from apex.simulation.deck import deck_layout, restart_schedule
@@ -123,8 +128,16 @@ from apex.storage.surrogate_files import (
     write_surrogate,
 )
 from apex.workflows.parameterization import PropertyMap, parameterized
-from apex.workflows.surrogate import MembersOutcome, check_success, fit_and_gate, run_members
+from apex.workflows.simulated_objective import SimulatedObjective
+from apex.workflows.surrogate import (
+    MembersOutcome,
+    check_success,
+    column_objectives,
+    fit_and_gate,
+    run_members,
+)
 from apex.workflows.surrogate_forecasts import ActiveModel, SurrogateForecasting
+from apex.workflows.surrogate_optimization import SurrogateObjective
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +363,9 @@ def _with_contents(value: object) -> object:
     return value
 
 
-def stack_provenance(case: HistoryMatchConfig, simulator: Simulator) -> SnapshotProvenance:
+def stack_provenance(
+    case: HistoryMatchConfig | OptimizationConfig, simulator: Simulator
+) -> SnapshotProvenance:
     """Return what names a case's simulator stack, as a model records it.
 
     ``options_digest``: the simulator's options, with the content of every file they name;
@@ -362,10 +377,16 @@ def stack_provenance(case: HistoryMatchConfig, simulator: Simulator) -> Snapshot
     a deck reads through a path written inside it (not an option), is not followed: such
     a change is seen only through the deck template's folder digest.
     """
+    assert case.simulator is not None  # an optimization without one is refused before
     options = json.loads(case.simulator.model_dump_json())["options"]
     template = case.simulator.options.get("deck_template_file")
     version = getattr(simulator, "version", None)
-    document = json.loads(case.model_dump_json(include={"geophysics", "model_error"}))
+    # An optimization has neither section: its case digest is that of an empty document.
+    document = (
+        json.loads(case.model_dump_json(include={"geophysics", "model_error"}))
+        if isinstance(case, HistoryMatchConfig)
+        else {}
+    )
     return SnapshotProvenance(
         simulator=case.simulator.name,
         simulator_version=None if not callable(version) else _version(version),
@@ -391,7 +412,7 @@ class SurrogateCase:
     Attributes
     ----------
     config
-        The case's history-matching configuration (resolved).
+        The case's history-matching or optimization configuration (resolved).
     layout
         Its state layout: designs are drawn in state space.
     properties
@@ -411,9 +432,17 @@ class SurrogateCase:
         The stack's provenance (without the design's plan and seed).
     fields, field_times, field_cells
         The state fields every run also saves, the dates and the cells.
+    objective
+        An optimization's response objective, when the keys are its responses: the gate
+        ranks the held-out runs' objectives too.
+    realizations
+        An optimization's ``[model]`` arrays ``(n_values, n_realizations)`` by name (robust
+        optimization): a design member ``m`` is given realization ``m mod n_realizations``.
+    run_sections
+        The configuration's sections that fix its runs (the build's fingerprint).
     """
 
-    config: HistoryMatchConfig
+    config: HistoryMatchConfig | OptimizationConfig
     layout: StateLayout
     properties: PropertyMap
     input_layout: StateLayout
@@ -427,6 +456,53 @@ class SurrogateCase:
     fields: tuple[str, ...] = ()
     field_times: tuple[str, ...] = ()
     field_cells: int = 0
+    objective: ResponseObjective | None = None
+    realizations: Mapping[str, NDArray[np.float64]] = dataclasses.field(default_factory=dict)
+    run_sections: tuple[str, ...] = ()
+
+    @property
+    def optimization(self) -> bool:
+        """Whether the case is an optimization's (its design is over its controls)."""
+        return isinstance(self.config, OptimizationConfig)
+
+    @property
+    def history_matching(self) -> HistoryMatchConfig:
+        """The case's history-matching configuration (refused for an optimization's).
+
+        Raises
+        ------
+        ConfigError
+            If the case is an optimization's.
+        """
+        if not isinstance(self.config, HistoryMatchConfig):
+            raise ConfigError(
+                "this needs a history-matching case (a prior, observations); the case is an "
+                "optimization's"
+            )
+        return self.config
+
+    def objective_of(self) -> Callable[[NDArray[np.float64]], NDArray[np.float64]] | None:
+        """Return the objective of one column of outputs, when the keys are its responses."""
+        objective = self.objective
+        if objective is None:
+            return None
+        return lambda column: np.asarray(objective.evaluate(column), dtype=np.float64)
+
+    def with_realizations(
+        self, ids: Sequence[int], controls: Mapping[str, NDArray[np.float64]]
+    ) -> dict[str, NDArray[np.float64]]:
+        """Return design blocks: ``controls`` ``{name: (size, n)}`` and each member's model.
+
+        Member ``ids[j]`` gets realization ``ids[j] mod n_realizations`` (none: unchanged).
+        """
+        blocks = {k: np.ascontiguousarray(v) for k, v in controls.items()}
+        if not self.realizations:
+            return blocks
+        width = next(iter(self.realizations.values())).shape[1]
+        columns = np.asarray([int(m) % width for m in ids], dtype=np.int64)
+        for name, array in self.realizations.items():
+            blocks[name] = np.ascontiguousarray(array[:, columns])
+        return blocks
 
     @property
     def run_keys(self) -> tuple[DataKey, ...]:
@@ -462,16 +538,37 @@ def _input_layout(layout: StateLayout, properties: PropertyMap) -> StateLayout:
 
 
 def case_keys(
-    case: HistoryMatchConfig, outputs: object
+    case: HistoryMatchConfig | OptimizationConfig, outputs: object
 ) -> tuple[tuple[DataKey, ...], NDArray[np.float64] | None]:
     """Return a build's keys and, for the case's observations, their variances.
+
+    An optimization's are its objective's response keys (``responses``) or listed series,
+    always gated by relative errors.
 
     Raises
     ------
     ConfigError
         If the case transforms field data that would be gated, or a key's time is neither
-        a step index nor an ISO date.
+        a step index nor an ISO date, or the outputs do not suit the kind of case.
     """
+    if isinstance(case, OptimizationConfig):
+        if outputs == "observations":
+            raise ConfigError(
+                "the case is an optimization, which has no observations: [case] outputs = "
+                "'responses' (its objective's response keys) or { vectors, times }"
+            )
+        if outputs == "responses":
+            keys = tuple(optimization_services.response_objective(case).response_keys())
+        else:
+            assert isinstance(outputs, SurrogateSeries)
+            keys = tuple(DataKey(t, v) for v in outputs.vectors for t in outputs.times)
+        check_key_times(keys)
+        return keys, None
+    if outputs == "responses":
+        raise ConfigError(
+            "[case] outputs = 'responses' are an optimization's objective's keys; the case is "
+            "a history-matching configuration: use 'observations' or { vectors, times }"
+        )
     if outputs == "observations":
         observations = read_observation_section(case.observations)
         keys = observations.keys
@@ -514,7 +611,7 @@ def check_key_times(keys: Sequence[DataKey]) -> None:
 
 
 def surrogate_case(
-    case: HistoryMatchConfig,
+    case: HistoryMatchConfig | OptimizationConfig,
     keys: Sequence[DataKey],
     variances: NDArray[np.float64] | None,
     *,
@@ -536,6 +633,13 @@ def surrogate_case(
         If the case is refused, a plugin is unknown or refuses its options, or
         the keys cannot be bounded in time.
     """
+    if isinstance(case, OptimizationConfig):
+        if coarse is not None or fields:
+            raise ConfigError(
+                "a surrogate of an optimization takes no [coarse] stack and no [case] fields "
+                "yet (its keys are the objective's responses)"
+            )
+        return _optimization_case(case, keys, execution=execution)
     _refuse(case)
     if execution is not None:
         case = case.model_copy(update={"execution": execution})
@@ -576,6 +680,69 @@ def surrogate_case(
         fields=tuple(str(f).upper() for f in fields),
         field_times=tuple(field_times),
         field_cells=cells,
+        run_sections=_RUN_SECTIONS,
+    )
+
+
+#: An optimization's sections that fix its runs: what each member is given (its controls'
+#: blocks and bounds, the model arrays, the parameterizations) and what runs it.
+_OPTIMIZATION_RUN_SECTIONS = ("controls", "model", "parameterizations", "simulator")
+
+
+def _optimization_case(
+    case: OptimizationConfig, keys: Sequence[DataKey], *, execution: PluginSection | None
+) -> SurrogateCase:
+    """Compose the stack an optimization's surrogate is built (or checked) on.
+
+    The design is over the controls (with ``[model]`` arrays, each member is given one
+    realization); the surrogate's inputs are what the simulations are given, through the
+    optimization's ``[[parameterizations]]``. The objective ranks the held-out runs when the
+    keys are its response keys.
+
+    Raises
+    ------
+    ConfigError
+        If the optimization has no simulator, a plugin is unknown or refuses its options.
+    """
+    if case.simulator is None:
+        raise ConfigError(
+            "the optimization's objective is analytic (no [simulator]): a surrogate stands in "
+            "for a simulator"
+        )
+    if case.simulator.name in REFUSED_SIMULATORS:
+        raise ConfigError(
+            f"a surrogate cannot stand in for {case.simulator.name!r}: "
+            f"{REFUSED_SIMULATORS[case.simulator.name]}"
+        )
+    section = execution or case.execution
+    if section.name == "ert":
+        raise ConfigError("the 'ert' executor runs ERT's batches; use another [execution]")
+    model = optimization_services.model_arrays(case)
+    properties = optimization_services.control_properties(case, model)
+    layout = optimization_services.control_layout(case, model)
+    try:
+        raw = simulators.create(case.simulator.name, **case.simulator.options)
+        executor = executors.create(section.name, **section.options)
+        simulator = raw if properties.identity else parameterized(raw, properties)
+        composition.check_executor(executor, simulator)
+    except (TypeError, ValueError, PluginError) as error:
+        raise ConfigError(f"invalid case for a surrogate: {error}") from error
+    objective = optimization_services.response_objective(case)
+    responses = tuple(objective.response_keys())
+    return SurrogateCase(
+        config=case.model_copy(update={"execution": section}),
+        layout=layout,
+        properties=properties,
+        input_layout=_input_layout(layout, properties),
+        keys=tuple(keys),
+        variances=None,
+        simulator=simulator,
+        executor=executor,
+        provenance=stack_provenance(case, raw),
+        # Ranked only when the keys are exactly what the objective reads.
+        objective=objective if tuple(keys) == responses else None,
+        realizations={k: np.ascontiguousarray(v) for k, v in model.items()},
+        run_sections=_OPTIMIZATION_RUN_SECTIONS,
     )
 
 
@@ -733,16 +900,14 @@ def coarse_resolved_in(coarse: CoarseSection, folder: Path) -> CoarseSection:
     })  # fmt: skip
 
 
-def _case_config(path: Path) -> HistoryMatchConfig:
+def _case_config(path: Path) -> HistoryMatchConfig | OptimizationConfig:
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"cannot read the case configuration {path}: {error}") from error
-    if "optimizer" in document:
-        raise ConfigError(
-            f"{path} is an optimization; surrogates of optimizations come with "
-            "phase 4: give a history-matching configuration"
-        )
+    if optimization_services.is_optimization(document):
+        # An optimization's simulator stack, over its controls.
+        return optimization_services.load_optimization_config(path, place=False)
     return composition.load_config(path)
 
 
@@ -859,7 +1024,7 @@ def _prior_draw(
         repeat training runs).
     """
     layout = case.layout
-    stored = _stored_generators(case.config, layout)
+    stored = _stored_generators(case.history_matching, layout)
     if stored:
         raise ConfigError(
             f"plan {plan!r} draws from the prior, but {', '.join(stored)} gives stored "
@@ -868,7 +1033,7 @@ def _prior_draw(
         )
 
     def draw(n: int, generator: np.random.Generator) -> dict[str, NDArray[np.float64]]:
-        drawn = composition.draw_prior_ensemble(case.config, layout, n, generator)
+        drawn = composition.draw_prior_ensemble(case.history_matching, layout, n, generator)
         return dict(layout.split(drawn))
 
     return draw
@@ -888,12 +1053,25 @@ def design_plan(config: SurrogateConfig) -> BuiltinDesign | AdaptiveDesign:
     except UnknownPluginError:
         factory = None  # refused with its own message where the surrogate is created
     corrects = callable(getattr(factory, "predict_corrected", None))
+    # decision 13: a plugin that learns from coarse runs in training only.
+    trains = bool(getattr(factory, "trains_on_coarse", False))
     if corrects and config.coarse is None:
         raise ConfigError(
             f"the surrogate {config.surrogate.model!r} corrects a coarse simulation: it needs "
             "the runs' coarse outputs, from a [coarse] stack"
         )
-    if factory is not None and not corrects and config.coarse is not None:
+    if trains and config.coarse is None:
+        raise ConfigError(
+            f"the surrogate {config.surrogate.model!r} trains on coarse runs: it needs a "
+            "[coarse] stack (and [design] coarse_only for more coarse runs than fine ones)"
+        )
+    if factory is not None and not trains and config.design.coarse_only:
+        raise ConfigError(
+            f"[design] coarse_only = {config.design.coarse_only}: the surrogate "
+            f"{config.surrogate.model!r} does not train on coarse runs (trains_on_coarse), so "
+            "its fit would not read them: remove coarse_only, or use a plugin that does"
+        )
+    if factory is not None and not (corrects or trains) and config.coarse is not None:
         raise ConfigError(
             f"[coarse] doubles the runs, but the surrogate {config.surrogate.model!r} does not "
             "correct a coarse simulation: remove [coarse] or use a coarse-corrected plugin"
@@ -946,8 +1124,10 @@ def draw_design(
 ) -> StoredDesign:
     """Draw the design ``[design]`` describes, from the stream ``design``.
 
-    Member ids: for drawn designs, the held-out runs are ``0..H-1`` and the training runs
-    ``H..H+T-1``; for ``file`` and ``run``, the ensemble's columns.
+    Member ids: for drawn designs, the held-out runs are ``0..H-1``, the training runs
+    ``H..H+T-1`` and the coarse-only ones (``[design] coarse_only = N``) ``H+T..H+T+N-1``;
+    for ``file`` and ``run``, the ensemble's columns. The coarse-only members are drawn last,
+    so the others are those of a design without them.
 
     Raises
     ------
@@ -955,11 +1135,13 @@ def draw_design(
         If the design cannot be drawn (unbounded box, a stored prior, too few columns).
     """
     section = config.design
-    n_train, n_held = section.training, section.held_out
+    n_train, n_held, n_only = section.training, section.held_out, section.coarse_only
     layout = case.layout
+    if case.optimization:
+        return _control_design(config, case, rng)
     try:
         if section.plan == "prior":
-            design = sampled_design(_prior_draw(case, "prior"), n_train, n_held, rng)
+            design = sampled_design(_prior_draw(case, "prior"), n_train, n_held, rng, n_only)
         elif section.plan == "lhs":
             box = {}
             for variable in layout.variables:
@@ -970,11 +1152,11 @@ def draw_design(
                         f"bounds [{lower}, {upper}]; give [design.box] {variable.name} = [lo, hi]"
                     )
                 box[variable.name] = (np.full(variable.size, lower), np.full(variable.size, upper))
-            design = lhs_design(box, n_train, n_held, rng)
+            design = lhs_design(box, n_train, n_held, rng, n_only)
         elif section.plan == "file":
             assert section.ensemble_file is not None
             ensemble = _ensemble_file(section.ensemble_file, layout)
-            design = ensemble_design("file", ensemble, n_held, rng, n_train)
+            design = ensemble_design("file", ensemble, n_held, rng, n_train, n_only)
         else:
             assert section.run_dir is not None
             ensemble, outputs, finite = _run_columns(section.run_dir, section.iterations, case)
@@ -1005,12 +1187,78 @@ def draw_design(
     else:
         held_ids = tuple(range(n_held))
         train_ids = tuple(range(n_held, n_held + n_train))
+    only_ids: tuple[int, ...] = ()
+    if design.coarse_only is not None:
+        only_ids = design.coarse_only_columns or tuple(
+            range(n_held + n_train, n_held + n_train + n_only)
+        )
     return StoredDesign(
         plan=section.plan,
         held_out_ids=held_ids,
         training_ids=train_ids,
         held_out=design.held_out,
         training=design.training,
+        coarse_only_ids=only_ids,
+        coarse_only=design.coarse_only,
+    )
+
+
+def _control_design(
+    config: SurrogateConfig, case: SurrogateCase, rng: np.random.Generator
+) -> StoredDesign:
+    """Draw an optimization's design over its controls, from the stream ``design``.
+
+    ``lhs``: a Latin hypercube over the controls' bounds (or ``[design.box]``); ``file``: the
+    columns of a stored ensemble of controls. With ``[model]`` arrays each member is then
+    given its realization (:meth:`SurrogateCase.with_realizations`). Member ids as for any
+    drawn design: held-out ``0..H-1``, training ``H..H+T-1``.
+
+    Raises
+    ------
+    ConfigError
+        If the plan does not suit an optimization, or a control is unbounded.
+    """
+    section = config.design
+    controls = [v for v in case.layout.variables if v.name not in case.realizations]
+    if section.plan not in ("lhs", "file"):
+        raise ConfigError(
+            f"[design] plan = {section.plan!r} does not suit an optimization, which has no "
+            "prior and no history-matching run: use 'lhs' over the controls' bounds, or "
+            "'file' with an ensemble of controls"
+        )
+    unknown = sorted(set(section.box) - {v.name for v in controls})
+    if unknown:
+        raise ConfigError(f"[design.box] names no control: {unknown}")
+    try:
+        if section.plan == "lhs":
+            box = {}
+            for variable in controls:
+                lower, upper = section.box.get(variable.name, (variable.lower, variable.upper))
+                if not (math.isfinite(lower) and math.isfinite(upper)):
+                    raise ConfigError(
+                        f"plan 'lhs' needs bounded controls: {variable.name!r} has bounds "
+                        f"[{lower}, {upper}]; give it lower and upper, or [design.box] "
+                        f"{variable.name} = [lo, hi]"
+                    )
+                box[variable.name] = (np.full(variable.size, lower), np.full(variable.size, upper))
+            design = lhs_design(box, section.training, section.held_out, rng)
+        else:
+            assert section.ensemble_file is not None
+            ensemble = _ensemble_file(section.ensemble_file, StateLayout(controls))
+            design = ensemble_design("file", ensemble, section.held_out, rng, section.training)
+    except ValueError as error:
+        raise ConfigError(f"the design cannot be drawn: {error}") from error
+    if design.held_out_columns is not None and design.training_columns is not None:
+        held_ids, train_ids = design.held_out_columns, design.training_columns
+    else:
+        held_ids = tuple(range(section.held_out))
+        train_ids = tuple(range(section.held_out, section.held_out + section.training))
+    return StoredDesign(
+        plan=section.plan,
+        held_out_ids=held_ids,
+        training_ids=train_ids,
+        held_out=case.with_realizations(held_ids, design.held_out),
+        training=case.with_realizations(train_ids, design.training),
     )
 
 
@@ -1040,8 +1288,9 @@ def fingerprint_parts(
     mostly outputs, which a folder's digest leaves out. ``legacy``: the design by its paths, as
     builds made before were fingerprinted (:func:`_open_build` upgrades them).
     """
-    document = json.loads(case.config.model_dump_json(include=set(_RUN_SECTIONS)))
-    parts = {f"case.{name}": _digest(_with_contents(document.get(name))) for name in _RUN_SECTIONS}
+    sections = case.run_sections or _RUN_SECTIONS
+    document = json.loads(case.config.model_dump_json(include=set(sections)))
+    parts = {f"case.{name}": _digest(_with_contents(document.get(name))) for name in sections}
     stack = case.provenance.model_dump(
         include={"simulator", "simulator_version", "options_digest", "deck_digest", "case_digest"}
     )
@@ -1061,6 +1310,8 @@ def fingerprint_parts(
                 k: _file_contents(v) if _is_path_option(k, v) else v
                 for k, v in sorted(design["options"].items())
             }
+    # coarse_only enters with the design only when > 0 (DesignSection's serializer leaves
+    # it out otherwise), so builds without coarse-only members keep their fingerprints.
     parts["design"] = _digest(design)
     parts["seed"] = str(config.surrogate.seed)
     if case.fields:
@@ -1197,6 +1448,7 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
     runs = 0 if config.design.plan == "run" else config.design.training + config.design.held_out
     if config.coarse is not None:
         runs *= 2  # every run also on the coarse stack
+        runs += config.design.coarse_only  # and the members run on it only
     return SurrogateBuildPlan(
         name=config.surrogate.name,
         model=config.surrogate.model,
@@ -1204,10 +1456,11 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         training=config.design.training,
         held_out=config.design.held_out,
         simulator_runs=runs,
+        coarse_only=config.design.coarse_only,
         keys=len(case.keys),
         datatypes=sorted({k.datatype for k in case.keys}),
         measure="relative" if case.variances is None else "sigma_ratio",
-        simulator=case.config.simulator.name,
+        simulator=case.provenance.simulator,
         executor=case.config.execution.name,
         inputs=case.input_layout.n_state,
         output_dir=str(config.surrogate.output_dir),
@@ -1286,11 +1539,13 @@ def _snapshot_set(
     provenance_: SnapshotProvenance,
     failed: Sequence[int],
     coarse: Mapping[int, NDArray[np.float64]] | None = None,
+    coarse_only: tuple[Mapping[str, NDArray[np.float64]], NDArray[np.float64]] | None = None,
 ) -> SnapshotSet:
     """Return the successful members of ``ids`` as snapshots of the surrogate's inputs.
 
     With ``coarse`` (a coarse stack's values by member), only members with both, and the
-    coarse values as the set's ``coarse_outputs``.
+    coarse values as the set's ``coarse_outputs``; ``coarse_only`` (the coarse-only
+    members' inputs and outputs, :func:`_coarse_only_snapshots`) goes with the set whole.
     """
     columns = [
         j for j, m in enumerate(ids)
@@ -1319,6 +1574,33 @@ def _snapshot_set(
         else np.stack([coarse[int(ids[j])] for j in columns], axis=-1).reshape(
             len(case.keys), len(columns)
         ),
+        coarse_only_inputs=None if coarse_only is None else coarse_only[0],
+        coarse_only_outputs=None if coarse_only is None else coarse_only[1],
+    )
+
+
+def _coarse_only_snapshots(
+    case: SurrogateCase, design: StoredDesign, values: Mapping[int, NDArray[np.float64]]
+) -> tuple[dict[str, NDArray[np.float64]], NDArray[np.float64]] | None:
+    """Return the successful coarse-only members as the surrogate's inputs and outputs.
+
+    ``({variable: (size, n)}, (n_keys, n))`` in the design's order, the inputs mapped by
+    the case's parameterizations (not the coarse stack's: the surrogate's inputs are the
+    fine stack's); ``None`` if none succeeded.
+    """
+    if design.coarse_only is None:
+        return None
+    columns = [j for j, m in enumerate(design.coarse_only_ids) if int(m) in values]
+    if not columns:
+        return None
+    state = {k: np.ascontiguousarray(v[:, columns]) for k, v in design.coarse_only.items()}
+    inputs = case.properties.ensemble(state)
+    outputs = np.stack([values[int(design.coarse_only_ids[j])] for j in columns], axis=-1).reshape(
+        len(case.keys), len(columns)
+    )
+    return (
+        {k: np.ascontiguousarray(v) for k, v in inputs.items()},
+        np.ascontiguousarray(outputs),
     )
 
 
@@ -1539,6 +1821,8 @@ def _build(
     })  # fmt: skip
     keep = config.output.keep_simulations
     coarse_values: dict[int, NDArray[np.float64]] | None = None
+    coarse_only: tuple[dict[str, NDArray[np.float64]], NDArray[np.float64]] | None = None
+    coarse_only_failed: dict[int, str] = {}
     if design.plan == "run":
         assert design.held_out_outputs is not None
         assert design.training_outputs is not None
@@ -1580,17 +1864,23 @@ def _build(
         simulator_runs = len(values) + len(failed)
         if case.coarse_simulator is not None:
             # Every design run on the coarse stack too, in a folder of its own,
-            # within what is left of max_runs.
+            # within what is left of max_runs; then the coarse-only members ([design]
+            # coarse_only), in the same folder, so a resume reuses them as the others.
             budget = (
                 None if max_runs is None
                 else max(max_runs - (len(directory.journal()) - journal_before), 0)
+            )  # fmt: skip
+            only_members = (
+                [] if design.coarse_only is None
+                else _members(design.coarse_only_ids, design.coarse_only)
             )  # fmt: skip
             coarse_outcome = run_members(
                 SurrogateDirectory(directory.path / COARSE),
                 case.coarse_simulator, case.executor,
                 # Only the members whose fine run succeeded: a pair needs both.
                 [m for m in _members(design.held_out_ids, design.held_out)
-                 + _members(design.training_ids, design.training) if m[0] in values],
+                 + _members(design.training_ids, design.training) if m[0] in values]
+                + only_members,
                 case.keys, label="coarse", keep_simulations=keep, max_runs=budget,
                 progress=progress,
             )  # fmt: skip
@@ -1606,27 +1896,42 @@ def _build(
                     extra={"event": "surrogate_stopped", "pending": len(coarse_outcome.pending)},
                 )  # fmt: skip
                 return BuildResult(directory.path, summary)
-            coarse_values = dict(coarse_outcome.values)
+            only_ids = set(design.coarse_only_ids)
+            coarse_values = {m: v for m, v in coarse_outcome.values.items() if m not in only_ids}
             for member, message in coarse_outcome.failed.items():
+                if member in only_ids:
+                    # Recorded apart from the runs' failures (``failed`` are fine runs lost to
+                    # the fit or the gate), never silently dropped.
+                    coarse_only_failed[member] = message
+                    logger.warning(
+                        "a coarse-only run failed",
+                        extra={"event": "surrogate_coarse_only_failed", "member": member,
+                               "reason": message},
+                    )  # fmt: skip
+                    continue
                 # A run is a training or held-out pair: without its coarse run it is lost.
                 failed.setdefault(member, f"its coarse run failed: {message}")
                 values.pop(member, None)
             simulator_runs += len(coarse_outcome.values) + len(coarse_outcome.failed)
+            if design.coarse_only is not None:
+                check_success("coarse-only", len(only_ids), len(coarse_only_failed),
+                              config.design.min_success_fraction)  # fmt: skip
+                coarse_only = _coarse_only_snapshots(case, design, coarse_outcome.values)
         for label, ids in (("held-out", design.held_out_ids), ("training", design.training_ids)):
             check_success(label, len(ids), sum(int(m) in failed for m in ids),
                           config.design.min_success_fraction)  # fmt: skip
     failed_ids = sorted(failed)
     held_out = _snapshot_set(case, design.held_out_ids, design.held_out, values,
-                             plan_provenance, failed_ids, coarse_values)  # fmt: skip
+                             plan_provenance, failed_ids, coarse_values, coarse_only)  # fmt: skip
     training = _snapshot_set(case, design.training_ids, design.training, values,
-                             plan_provenance, failed_ids, coarse_values)  # fmt: skip
+                             plan_provenance, failed_ids, coarse_values, coarse_only)  # fmt: skip
     # Every successful run, in id order: the snapshot set a refit starts from (phase 3).
     everything = _snapshot_set(
         case,
         list(design.held_out_ids) + list(design.training_ids),
         {k: np.concatenate([design.held_out[k], design.training[k]], axis=1)
          for k in design.held_out},
-        values, plan_provenance, failed_ids, coarse_values,
+        values, plan_provenance, failed_ids, coarse_values, coarse_only,
     )  # fmt: skip
     directory.save_snapshots(everything)
     try:
@@ -1638,6 +1943,7 @@ def _build(
             model, training, held_out, streams["surrogate"],
             tolerances=config.gate.tolerances(), variances=case.variances,
             kinds=config.gate.kinds, extent=section.extent, failed=failed_ids,
+            objective=case.objective_of(),
         )  # fmt: skip
     except (TypeError, ValueError, ArithmeticError, LookupError, AttributeError) as error:
         # A plugin's own failure (an option of the wrong type, a shape it cannot take), named
@@ -1661,6 +1967,9 @@ def _build(
         coarse=None
         if config.coarse is None
         else coarse_relative_to(config.coarse, directory.model.parent),
+        # An optimization's: the box its checks draw within, kept with the
+        # model so that a copied model can be checked without its build directory.
+        control_box=_box_of(design, case) if case.optimization else None,
     )
     directory.write_json(GATE, json.loads(fitted.gate.model_dump_json()))
     # A changed plugin or gate refits on the runs made: the configuration follows the model
@@ -1683,7 +1992,10 @@ def _build(
                 extra={"event": "surrogate_untimed", "runs": len(seconds)},
             )
     summary = _summary(config, design, case, failed, 0, simulator_runs).model_copy(update={
-        "status": "complete", "gate": fitted.gate, "identity": stored.identity,
+        "status": "complete",
+        "gate": fitted.gate, "identity": stored.identity,
+        "coarse_only_runs": 0 if coarse_only is None else coarse_only[1].shape[1],
+        "coarse_only_failed": sorted(coarse_only_failed),
         "model": str(MODEL),
         "domain": DomainSummary(
             coordinates=fitted.domain.n_coordinates, points=fitted.domain.n_points,
@@ -1701,7 +2013,9 @@ def _build(
     return BuildResult(directory.path, summary)
 
 
-def _simulator_files(case: HistoryMatchConfig) -> dict[str, Path]:
+def _simulator_files(case: HistoryMatchConfig | OptimizationConfig) -> dict[str, Path]:
+    if case.simulator is None:
+        return {}
     return {
         f"simulator.{key}": Path(value)
         for key, value in case.simulator.options.items()
@@ -1880,12 +2194,18 @@ def check_surrogate(
         coarse_section = coarse_resolved_in(manifest.coarse, Path(model_path).parent)
     trained = _model_snapshots(Path(model_path), manifest)
     against = Path(against).resolve()
+    case_config: HistoryMatchConfig | OptimizationConfig
     if against.is_dir():
+        if optimization_services.holds_optimization(against):
+            raise ConfigError(
+                f"{against} is an optimization run: check an optimization's surrogate against "
+                "its configuration (controls drawn within their bounds)"
+            )
         case_config = composition.snapshot_config(RunDirectory(against))
         source = "posterior" if iteration is None else f"iteration:{iteration}"
     else:
         case_config = _case_config(against)
-        source = "prior"
+        source = "controls" if isinstance(case_config, OptimizationConfig) else "prior"
     check_id = _digest({
         "identity": loaded.identity, "against": str(against), "runs": runs, "seed": seed,
         "source": source,
@@ -1932,8 +2252,23 @@ def check_surrogate(
         composition.configure_logging(directory.path)
         design = directory.load_design()
         if design is None:
+            box = _design_box(Path(model_path), case, manifest) if source == "controls" else None
+            if source == "controls" and loaded.domain.extent != "box":
+                # The hypercube fills the box; a hull's or an ellipsoid's domain is narrower,
+                # the more so the more controls, and runs outside it are simulated but not
+                # gated (too few inside fail the check, min_inside).
+                logger.warning(
+                    "surrogate_check_box_wider_than_domain",
+                    extra={
+                        "extent": loaded.domain.extent,
+                        "runs": runs,
+                        "controls": sum(
+                            v.size for v in case.layout.variables if v.name not in case.realizations
+                        ),
+                    },
+                )
             design, trained_on = _check_design(case, trained, against, source, iteration,
-                                               runs, seed)  # fmt: skip
+                                               runs, seed, design_box=box)  # fmt: skip
             directory.save_design(design, case.layout)
             directory.write_state(trained_on=trained_on)
         trained_on = [int(m) for m in directory.read_state().get("trained_on", [])]
@@ -2021,13 +2356,25 @@ def check_surrogate(
                 names = tuple(sorted(gated.fields))
                 rebuilt = loaded.model.predict_fields(gated.inputs, names, gated.field_times)
                 fields = {n: (np.asarray(rebuilt[n]), gated.fields[n]) for n in names}
+            objective = case.objective_of()
+            objectives = (
+                None if objective is None
+                else (column_objectives(objective, predicted),
+                      column_objectives(objective, gated.outputs))
+            )  # fmt: skip
             verdict = gate(predicted, gated.outputs, case.keys, gated.run_ids, fields=fields,
                            tolerances=tolerances, variances=case.variances, kinds=kinds,
-                           failed=sorted(failed_ids))  # fmt: skip
+                           failed=sorted(failed_ids), objectives=objectives)  # fmt: skip
         else:
             verdict = GateResult(held_out=[], failed=sorted(failed_ids), datatypes=[],
                                  tolerances=tolerances, passed=False)  # fmt: skip
         notes = []
+        if source == "controls" and loaded.domain.extent != "box":
+            notes.append(
+                f"the controls were drawn over the design's box, and the model's domain is its "
+                f"{loaded.domain.extent} (narrower): {len(outside)} of {snapshots.n_runs} runs "
+                "fell outside it and were not gated"
+            )
         share = len(inside) / snapshots.n_runs
         if share < min_inside:
             notes.append(
@@ -2058,6 +2405,43 @@ def _field_cells(trained: SnapshotSet) -> int | None:
     return int(next(iter(trained.fields.values())).shape[0])
 
 
+def _design_box(
+    model_path: Path, case: SurrogateCase, manifest: SurrogateManifest
+) -> dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None:
+    """Return each control's entrywise range over a model's design runs.
+
+    ``(lower (size,), upper (size,))`` per control: what the build's Latin hypercube (or
+    stored ensemble) spanned, held-out and training runs together. From the manifest's
+    ``control_box`` (models built since it was recorded), else from the build's
+    ``design.npz`` two folders above the manifest; ``None`` without either.
+    """
+    if manifest.control_box is not None:
+        return {
+            name: (np.asarray(low, dtype=np.float64), np.asarray(high, dtype=np.float64))
+            for name, (low, high) in manifest.control_box.items()
+        }
+    build = Path(model_path).resolve().parent.parent
+    if not (build / "design.npz").is_file():
+        return None
+    design = SurrogateDirectory(build).load_design()
+    if design is None:
+        return None
+    return _box_of(design, case)
+
+
+def _box_of(
+    design: StoredDesign, case: SurrogateCase
+) -> dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]]:
+    """Return each control's entrywise range over a design's held-out and training runs."""
+    box = {}
+    for name in design.held_out:
+        if name in case.realizations:
+            continue
+        both = np.concatenate([design.held_out[name], design.training[name]], axis=1)
+        box[name] = (np.min(both, axis=1), np.max(both, axis=1))
+    return box
+
+
 def _check_design(
     case: SurrogateCase,
     trained: SnapshotSet,
@@ -2066,6 +2450,7 @@ def _check_design(
     iteration: int | None,
     runs: int,
     seed: int,
+    design_box: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
 ) -> tuple[StoredDesign, list[int]]:
     """Choose a check's members, none equal to one of the model's snapshots.
 
@@ -2077,8 +2462,53 @@ def _check_design(
         If fewer than ``runs`` members are new to the model.
     """
     rng = np.random.default_rng(np.random.SeedSequence(seed))
-    if source == "prior":
-        drawn = composition.draw_prior_ensemble(case.config, case.layout, runs, rng)
+    if source == "controls":
+        # An optimization's: a Latin hypercube over the box its design spanned
+        # (the build's [design.box], not the controls' wider bounds: runs outside the model's
+        # domain are not gated, and too few inside would fail the check), each member given
+        # its realization as in a build.
+        controls = [v for v in case.layout.variables if v.name not in case.realizations]
+        if design_box is None:
+            raise ConfigError(
+                "a check of an optimization's surrogate draws its controls within the box its "
+                "build's design spanned, which the model records neither in its manifest (built "
+                "before it did) nor beside it (its build's design.npz, two folders above the "
+                "manifest): rebuild it, or check it in its build directory"
+            )
+        missing = [v.name for v in controls if v.name not in design_box]
+        if missing:
+            raise ConfigError(f"the model's design holds no controls {missing}")
+        for variable in controls:
+            # The model's box against this optimization's controls (a manifest's, or its
+            # build's design.npz): a block of another size, or bounds out of order, would
+            # draw a misaligned box (the review of 2026-11-03).
+            low, high = (np.asarray(b, dtype=np.float64) for b in design_box[variable.name])
+            if low.shape != (variable.size,) or high.shape != (variable.size,):
+                raise ConfigError(
+                    f"the model's design box of {variable.name!r} has {low.size} lower and "
+                    f"{high.size} upper bounds, and the optimization's control has "
+                    f"{variable.size} entries: the model was built on other controls; rebuild "
+                    "it on this optimization"
+                )
+            if not (np.all(np.isfinite(low)) and np.all(np.isfinite(high))
+                    and np.all(low <= high)):  # fmt: skip
+                raise ConfigError(
+                    f"the model's design box of {variable.name!r} is not finite and ordered "
+                    "(lower <= upper): its manifest or design.npz is damaged; rebuild it"
+                )
+        lower = np.concatenate([design_box[v.name][0] for v in controls])
+        upper = np.concatenate([design_box[v.name][1] for v in controls])
+        sample = latin_hypercube(lower, upper, runs, rng)
+        offsets = np.cumsum([0] + [v.size for v in controls])
+        drawn_controls = {
+            v.name: np.ascontiguousarray(sample[offsets[i] : offsets[i + 1]])
+            for i, v in enumerate(controls)
+        }
+        ids = np.arange(runs)
+        blocks = case.with_realizations(ids.tolist(), drawn_controls)
+        what = f"the {runs} controls drawn within the model's design box"
+    elif source == "prior":
+        drawn = composition.draw_prior_ensemble(case.history_matching, case.layout, runs, rng)
         blocks = dict(case.layout.split(drawn))
         ids = np.arange(blocks[case.layout.names[0]].shape[1])
         what = f"the {ids.size} members drawn from the prior"
@@ -2264,7 +2694,7 @@ def refuse_model(
     A model whose gate failed or whose last check failed; one built for another simulator
     stack or case; one whose domain lacks an observed key (every role: history matching,
     cv, test, field keys); a ``variance_in_errors`` model without ``predict_std``; a refit
-    policy without the snapshots to refit from.
+    policy without the snapshots to refit from, or for a model that trains on coarse runs.
 
     Raises
     ------
@@ -2275,6 +2705,12 @@ def refuse_model(
     assert section is not None
     manifest = model.manifest
     name = model.path
+    if section.on_check_failure == "refit" and getattr(model.model, "trains_on_coarse", False):
+        # A run makes no coarse runs for such a model, and its refit set would need them.
+        raise ConfigError(
+            f'[surrogate] on_check_failure = "refit": the surrogate {name} trains on coarse '
+            'runs, which a run does not make; use "stop" or "simulator", or rebuild it'
+        )
     if manifest.gate is None or not manifest.gate.passed:
         failures = [] if manifest.gate is None else manifest.gate.failures()
         raise ConfigError(
@@ -2521,3 +2957,127 @@ def planned_simulator_runs(
             "counted as if it forecast everything"
         )
     return runs, notes
+
+
+# ===================================================================== optimization (§6)
+
+
+def optimization_surrogate(
+    config: OptimizationConfig, simulation: SimulatedObjective
+) -> SurrogateObjective:
+    """Return the objective an optimization with ``[surrogate]`` evaluates.
+
+    ``simulation`` is the optimization's own simulated objective; it becomes the source of
+    the checks and of the reported optimum (rows recorded ``simulator``), and the surrogate's
+    objective shares its journal under a context that includes the model's identity.
+
+    Raises
+    ------
+    ConfigError
+        If the model cannot be used: its gate or its last check failed, it was built for
+        another simulator stack or other inputs (controls, parameterizations, model arrays),
+        or it does not answer the objective's keys.
+    """
+    section = config.surrogate
+    assert section is not None
+    assert config.simulator is not None
+    path = Path(section.model_file)
+    loaded = load_surrogate(path)
+    manifest = loaded.manifest
+    if manifest.gate is None or not manifest.gate.passed:
+        failures = [] if manifest.gate is None else manifest.gate.failures()
+        raise ConfigError(
+            f"the surrogate {path} did not pass its gate ({'; '.join(failures) or 'none'}): "
+            "rebuild it"
+        )
+    check = last_check(path, loaded.identity)
+    if check is not None and not check.passed:
+        raise ConfigError(
+            f"the surrogate {path} failed its last check ({check.id}: "
+            f"{'; '.join(check.notes) or 'not passed'}): rebuild it"
+        )
+    raw = simulators.create(config.simulator.name, **config.simulator.options)
+    mismatches = manifest.provenance.stack_mismatches(stack_provenance(config, raw))
+    if mismatches:
+        raise ConfigError(
+            f"the surrogate {path} was built for another simulator stack "
+            f"({', '.join(mismatches)} differ)"
+        )
+    model = dict(simulation.model)
+    properties = optimization_services.control_properties(config, model)
+    inputs = _input_layout(optimization_services.control_layout(config, model), properties)
+    trained = _model_snapshots(path, manifest)
+    if tuple(trained.layout.names) != tuple(inputs.names) or [
+        v.size for v in trained.layout.variables
+    ] != [v.size for v in inputs.variables]:
+        raise ConfigError(
+            f"the surrogate {path} was fitted on inputs {list(trained.layout.names)}, and this "
+            f"optimization gives its simulations {list(inputs.names)} (controls, "
+            "parameterizations and [model] arrays must be the build's)"
+        )
+    outside = check_request(loaded.domain, simulation.keys)
+    if not outside.inside:
+        raise ConfigError(
+            f"the surrogate {path} cannot evaluate this objective: {outside.message()}"
+        )
+    tolerances = (
+        manifest.gate.tolerances.tightened(relative=section.relative)
+        if section.relative
+        else manifest.gate.tolerances
+    )
+    kinds = {d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None}
+    surrogate_simulator: Simulator = SurrogateSimulator(
+        loaded.model,
+        loaded.domain,
+        identity=loaded.identity,
+        loader=functools.partial(fitted_model, str(path.resolve()), loaded.identity),
+        guard=refuse_outside,
+    )
+    if not properties.identity:
+        surrogate_simulator = parameterized(surrogate_simulator, properties)
+    workers = section.workers
+    executor = (
+        executors.create("serial")
+        if workers is None
+        else executors.create("process", workers=workers)
+    )
+    context = _digest({"plain": simulation.context, "surrogate": loaded.identity})
+    surrogate = SimulatedObjective(
+        simulation.objective,
+        surrogate_simulator,
+        executor,
+        simulation.run_dir,
+        simulation.blocks,
+        model,
+        keep_simulations="none",
+        progress=simulation.progress,
+        context=context,
+        journal=simulation.journal,
+        source="surrogate",
+    )
+    simulation.source = "simulator"
+    blocks = simulation.blocks
+
+    def inside(controls: NDArray[np.float64], reals: NDArray[np.int64]) -> NDArray[np.bool_]:
+        state = {name: np.ascontiguousarray(controls[part]) for name, part in blocks}
+        state.update({n: np.ascontiguousarray(a[:, reals]) for n, a in model.items()})
+        mapped = properties.ensemble(state)
+        ids = list(range(controls.shape[1]))
+        found = check_members(loaded.domain, loaded.model, mapped, ids)
+        flagged = set(found.members)
+        return np.array([j not in flagged for j in ids], dtype=bool)
+
+    assert simulation.run_dir is not None
+    return SurrogateObjective(
+        surrogate,
+        simulation,
+        simulation.run_dir,
+        identity=loaded.identity,
+        inside=inside,
+        outside=section.outside,
+        check_every=section.check_every,
+        on_check_failure=section.on_check_failure,
+        tolerances=tolerances,
+        kinds=kinds,
+        max_evaluations=section.max_evaluations,
+    )

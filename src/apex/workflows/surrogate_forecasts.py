@@ -297,6 +297,9 @@ class SurrogateForecasting:
             coarse_outputs=None
             if base.coarse_outputs is None or coarse_outputs is None
             else np.concatenate([base.coarse_outputs, coarse_outputs], axis=1),
+            # The build's coarse-only members ([design] coarse_only) stay with the refit.
+            coarse_only_inputs=base.coarse_only_inputs,
+            coarse_only_outputs=base.coarse_only_outputs,
         )
         held_ids = set(held) | {new_ids[int(j)] for j in order[:n_held]}
         held_positions = [p for p, r in enumerate(combined.run_ids) if r in held_ids]

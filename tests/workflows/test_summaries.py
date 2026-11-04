@@ -317,6 +317,8 @@ def test_every_workflow_has_a_summarizer() -> None:
         "model_error": "the model-error (MEC) model inside history-matching runs",
         "parameterization": "maps state to properties inside other workflows",
         "simulated_objective": "evaluates an optimization's objective by simulation",
+        "surrogate_optimization": "evaluates an optimization's objective by a surrogate; its "
+        "runs are optimization run directories, which the `optimization` summarizer reads",
         "surrogate_forecasts": "a surrogate's checks and refits inside history-matching runs",
     }
     folder = Path(workflows.__file__).parent

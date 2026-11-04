@@ -7,11 +7,14 @@
       state.json           the build's fingerprint, its streams' states, complete
       provenance.json      APEX version and commit, libraries, host, input hashes
       design.npz           the design: plan, member ids and inputs (state space) of the
-                           held-out and the training runs (and, for plan "run", their outputs)
+                           held-out and the training runs (and, for plan "run", their outputs;
+                           with [design] coarse_only, the coarse-only members')
       members/member_<id>.npz   one finished full run: values (n_keys,), seconds
       snapshots.jsonl      one line per finished member: ok, or failed with its message
       snapshots.npz        the assembled SnapshotSet (the surrogate's inputs, the outputs)
       simulations/member_<id>/   the simulator's work directories ([output] keep_simulations)
+      coarse/              the coarse stack's runs ([coarse]; the coarse-only members too),
+                           laid out as members/, snapshots.jsonl, simulations/
       model/surrogate.json, model/surrogate.npz   the fitted surrogate (storage/surrogate_files)
       gate.json            the gate's verdict on the held-out runs
       summary.json         what the build did (the summarizer reads it)
@@ -99,6 +102,9 @@ class StoredDesign:
         For plan ``run``: the stored forecasts ``(n_keys, n)``; else ``None``.
     failed_ids
         For plan ``run``: the members whose stored forecasts are not finite (left out).
+    coarse_only_ids, coarse_only
+        The members run on the coarse stack only (``[design] coarse_only``) and their
+        inputs ``{variable: (size, n)}``; ``()`` and ``None`` without them.
     """
 
     plan: str
@@ -109,6 +115,8 @@ class StoredDesign:
     held_out_outputs: NDArray[np.float64] | None = None
     training_outputs: NDArray[np.float64] | None = None
     failed_ids: tuple[int, ...] = ()
+    coarse_only_ids: tuple[int, ...] = ()
+    coarse_only: Mapping[str, NDArray[np.float64]] | None = None
 
 
 class SurrogateDirectory:
@@ -225,6 +233,11 @@ class SurrogateDirectory:
         if design.held_out_outputs is not None and design.training_outputs is not None:
             arrays["held_out_outputs"] = design.held_out_outputs
             arrays["training_outputs"] = design.training_outputs
+        if design.coarse_only_ids and design.coarse_only is not None:
+            # Only when there are some: designs without them keep their files' bytes.
+            arrays["coarse_only_ids"] = np.asarray(design.coarse_only_ids, dtype=np.int64)
+            for i, name in enumerate(layout.names):
+                arrays[f"coarse_only_{i}"] = np.ascontiguousarray(design.coarse_only[name])
         _save_npz(self.path / DESIGN, arrays)
 
     def load_design(self) -> StoredDesign | None:
@@ -235,6 +248,7 @@ class SurrogateDirectory:
         with np.load(path, allow_pickle=False) as data:
             names = [str(n) for n in data["variables"]]
             outputs = "held_out_outputs" in data.files
+            only = "coarse_only_ids" in data.files
             return StoredDesign(
                 plan=str(data["plan"]),
                 held_out_ids=tuple(int(i) for i in data["held_out_ids"]),
@@ -252,6 +266,12 @@ class SurrogateDirectory:
                 if outputs
                 else None,
                 failed_ids=tuple(int(i) for i in data["failed_ids"]),
+                coarse_only_ids=tuple(int(i) for i in data["coarse_only_ids"]) if only else (),
+                coarse_only={
+                    n: np.ascontiguousarray(data[f"coarse_only_{i}"]) for i, n in enumerate(names)
+                }
+                if only
+                else None,
             )
 
     # ---------------------------------------------------------------- members
@@ -356,6 +376,11 @@ class SurrogateDirectory:
             arrays[f"input_{i}"] = snapshots.inputs[variable.name]
         if snapshots.coarse_outputs is not None:
             arrays["coarse_outputs"] = snapshots.coarse_outputs
+        if snapshots.coarse_only_inputs is not None and snapshots.coarse_only_outputs is not None:
+            # Absent without coarse-only members ([design] coarse_only), as in the digest.
+            arrays["coarse_only_outputs"] = snapshots.coarse_only_outputs
+            for i, variable in enumerate(snapshots.layout.variables):
+                arrays[f"coarse_only_input_{i}"] = snapshots.coarse_only_inputs[variable.name]
         if snapshots.fields:
             # State fields, in the same file: one digest covers them.
             arrays["field_names"] = np.array(json.dumps(sorted(snapshots.fields)))
@@ -393,6 +418,14 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 failed=tuple(int(i) for i in data["failed"]),
                 provenance=SnapshotProvenance.model_validate_json(str(data["provenance"])),
                 coarse_outputs=data["coarse_outputs"] if "coarse_outputs" in data.files else None,
+                coarse_only_inputs={
+                    v.name: data[f"coarse_only_input_{i}"] for i, v in enumerate(layout.variables)
+                }
+                if "coarse_only_outputs" in data.files
+                else None,
+                coarse_only_outputs=data["coarse_only_outputs"]
+                if "coarse_only_outputs" in data.files
+                else None,
                 fields={str(n): data[f"field_{i}"] for i, n in enumerate(names)},
                 field_times=tuple(json.loads(str(data["field_times"]))) if names else (),
             )

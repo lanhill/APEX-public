@@ -243,6 +243,26 @@ class FitOutcome:
     prediction_seconds: float
 
 
+def column_objectives(
+    objective: Callable[[NDArray[np.float64]], NDArray[np.float64]],
+    outputs: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Return the objective of each column of ``outputs`` ``(n_keys, n)``: ``(n_obj, n)``.
+
+    One column at a time, as an optimization's journal evaluates them: a reduction over a
+    batch may round in another order than over one column.
+    """
+    columns = [
+        np.asarray(
+            objective(np.ascontiguousarray(outputs[:, j : j + 1])), dtype=np.float64
+        ).reshape(-1)
+        for j in range(outputs.shape[1])
+    ]
+    if not columns:
+        return np.zeros((1, 0))
+    return np.ascontiguousarray(np.stack(columns, axis=-1))
+
+
 def fit_and_gate(
     model: SurrogateModel,
     training: SnapshotSet,
@@ -254,12 +274,15 @@ def fit_and_gate(
     kinds: Mapping[str, QuantityKind] | None = None,
     extent: DomainExtent = "box",
     failed: Sequence[int] = (),
+    objective: Callable[[NDArray[np.float64]], NDArray[np.float64]] | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> FitOutcome:
     """Fit ``model`` on ``training``, bound its domain, and gate it on ``held_out``.
 
     ``variances`` ``(n_keys,)`` gate against observation errors (``sigma_ratio``); ``None``
-    gates by relative errors.
+    gates by relative errors. ``objective`` (an optimization's) maps one
+    column of outputs ``(n_keys, 1)`` to its objective value(s) ``(1,)`` or ``(n_obj, 1)``:
+    the held-out runs' objectives, surrogate against simulator, are gated by rank too.
 
     Raises
     ------
@@ -311,6 +334,12 @@ def fit_and_gate(
         predicted_fields = model.predict_fields(held_out.inputs, names, training.field_times)
         fields = {n: (np.asarray(predicted_fields[n]), held_out.fields[n]) for n in names}
     prediction_seconds = (clock() - began) / max(held_out.n_runs, 1)
+    objectives = None
+    if objective is not None:
+        objectives = (
+            column_objectives(objective, predicted),
+            column_objectives(objective, held_out.outputs),
+        )
     verdict = gate(
         predicted,
         held_out.outputs,
@@ -321,6 +350,7 @@ def fit_and_gate(
         kinds=kinds,
         fields=fields,
         failed=failed,
+        objectives=objectives,
     )
     logger.info(
         "surrogate gated",

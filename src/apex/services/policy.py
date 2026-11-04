@@ -45,8 +45,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from apex.core.errors import ConfigError
+from apex.core.errors import ConfigError, UnknownPluginError
 from apex.core.options import Role, holds_text
+from apex.core.plugins import surrogate_models
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.optimization import OptimizationConfig
 from apex.domain.prediction import PredictionConfig
@@ -317,6 +318,14 @@ def _coarse_stack_items(
         return []
     coarse = manifest.coarse
     if coarse is None:
+        return []
+    # A run makes coarse runs only for a model that corrects them (``predict_corrected``);
+    # one that only trained on them (``trains_on_coarse``) names no stack the run uses.
+    try:
+        factory = surrogate_models.factory(manifest.plugin)
+    except UnknownPluginError:
+        factory = None  # the run refuses the model when it loads it; judged as written
+    if factory is not None and not callable(getattr(factory, "predict_corrected", None)):
         return []
     folder = model_file.parent
 

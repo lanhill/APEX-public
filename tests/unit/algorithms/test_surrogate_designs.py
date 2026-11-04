@@ -101,3 +101,46 @@ def test_held_out_runs_never_repeat_training_runs() -> None:
     repeated = {"x": np.hstack([stored[:, :5], stored[:, :5]])}  # every column twice
     with pytest.raises(ValueError, match="repeat training runs"):
         ensemble_design("file", repeated, 5, np.random.default_rng(1))
+
+
+def test_coarse_only_runs_are_drawn_last_and_leave_the_others_unchanged() -> None:
+    """Decision 13: coarse-only runs after the held-out and training runs, so a
+    design without them is drawn exactly as before, for every plan."""
+    box = {"x": (np.zeros(2), np.ones(2))}
+    plain = lhs_design(box, 6, 3, np.random.default_rng(4))
+    more = lhs_design(box, 6, 3, np.random.default_rng(4), n_coarse_only=8)
+    assert plain.coarse_only is None
+    assert more.coarse_only is not None
+    assert more.coarse_only["x"].shape == (2, 8)
+    np.testing.assert_array_equal(plain.held_out["x"], more.held_out["x"])
+    np.testing.assert_array_equal(plain.training["x"], more.training["x"])
+    unit = more.coarse_only["x"]  # a hypercube of its own
+    np.testing.assert_array_equal(np.sort(np.floor(unit[0] * 8)), np.arange(8))
+
+    calls: list[int] = []
+
+    def draw(n: int, rng: np.random.Generator) -> Mapping[str, NDArray[np.float64]]:
+        calls.append(n)
+        return {"x": rng.normal(size=(2, n))}
+
+    drawn = sampled_design(draw, 5, 2, np.random.default_rng(3), n_coarse_only=4)
+    assert calls == [2, 5, 4]
+    rng = np.random.default_rng(3)
+    np.testing.assert_array_equal(drawn.held_out["x"], rng.normal(size=(2, 2)))
+    np.testing.assert_array_equal(drawn.training["x"], rng.normal(size=(2, 5)))
+    assert drawn.coarse_only is not None
+    np.testing.assert_array_equal(drawn.coarse_only["x"], rng.normal(size=(2, 4)))
+
+    ensemble = {"x": np.arange(24.0).reshape(2, 12)}
+    without = ensemble_design("file", ensemble, 3, np.random.default_rng(9), n_training=5)
+    within = ensemble_design("file", ensemble, 3, np.random.default_rng(9), 5, n_coarse_only=4)
+    assert within.held_out_columns == without.held_out_columns
+    assert within.training_columns == without.training_columns
+    order = np.random.default_rng(9).permutation(12)
+    assert within.coarse_only_columns == tuple(int(i) for i in order[8:12])
+    assert within.coarse_only is not None
+    np.testing.assert_array_equal(
+        within.coarse_only["x"], ensemble["x"][:, within.coarse_only_columns]
+    )
+    with pytest.raises(ValueError, match="5 training and 5 coarse-only runs"):
+        ensemble_design("file", ensemble, 3, np.random.default_rng(9), 5, n_coarse_only=5)
