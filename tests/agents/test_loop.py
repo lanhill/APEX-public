@@ -357,6 +357,30 @@ def test_a_tool_call_in_claudes_xml_form_is_run(tmp_path: Path) -> None:
     assert "adaptive_per_update" in stub.requests[1].messages[-1].content
 
 
+def test_a_prompted_call_with_an_invented_result_runs_the_call_alone(tmp_path: Path) -> None:
+    """A model wrote its call, then a result of its own; the reply was shown raw (2026-11-04)."""
+    reply = (
+        '{"tool": "list_plugins", "arguments": {"registry": "localizations"}}\n\n'
+        '{"tool_result": "localizations registry unavailable"}'
+    )
+    loop, stub = _prompted(tmp_path, [reply, '{"answer": "adaptive"}'])
+
+    outcome = loop.run("Which localizations?", Reply, Fallback("x", lambda: Reply(answer="f")))
+
+    assert outcome.tool_calls == [
+        {"tool": "list_plugins", "arguments": {"registry": "localizations"}, "ok": True}
+    ]
+    assert outcome.decision.answer == "adaptive"
+    # The model saw the real result, not its own invention.
+    result = stub.requests[1].messages[-1].content
+    assert "adaptive_per_update" in result
+    assert "unavailable" not in result
+    # Nor does its own history keep the invented result: only the call it made.
+    assistant = [m.content for m in stub.requests[1].messages if m.role == "assistant"]
+    assert assistant
+    assert all("tool_result" not in m for m in assistant)
+
+
 def test_a_refused_call_adds_a_turn_to_revise_it(tmp_path: Path) -> None:
     """The 2026-10-04 chat: lookups and one refused plan used up the turns before the model
     could revise it. ``refusal_turns`` adds a model call per refused tool call."""

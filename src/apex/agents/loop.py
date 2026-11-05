@@ -426,7 +426,9 @@ class AgentLoop:
                     if last:
                         raise _Invalid("no tools are left on the last turn")
                     tool_call, malformed = self._prompted_call(answer)
-                    messages.append(Message("assistant", completion.text))
+                    # The call alone, not the reply's text: a result the model invented after
+                    # its call must not stay in its own history.
+                    messages.append(Message("assistant", json.dumps(answer, default=str)))
                     self._check_stop()
                     result = self._call_repeated(tool_call, tool_log, repeats)
                     refused(result)
@@ -809,6 +811,24 @@ def _json(text: str) -> object:
             return json.loads(candidate)
         except json.JSONDecodeError:
             continue
+    if stripped.startswith("{"):
+        # A prompted tool call followed by more text: models write the call and then a
+        # result of their own (2026-11-04: '{"tool": "list_plugins", ...}' then an
+        # invented '{"tool_result": "metrics registry unavailable"}'). The call is run; what
+        # follows it is the model's guess, never a result, and is dropped. Only a reply that
+        # starts with a tool call (a reply quoting one whole is taken by the candidates above).
+        try:
+            first, end = json.JSONDecoder().raw_decode(stripped)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(first, dict) and "tool" in first:
+                logger.warning(
+                    "text after a prompted tool call dropped",
+                    extra={"event": "prompted_call_trailing_text", "tool": first.get("tool"),
+                           "dropped_chars": len(stripped) - end},
+                )  # fmt: skip
+                return first
     raise _Invalid("the reply contains no JSON object" if stripped else "the reply is empty")
 
 
