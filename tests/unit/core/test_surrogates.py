@@ -480,6 +480,29 @@ def test_manifests_naming_unknown_plugins_options_or_other_files_are_refused(
         read_surrogate(edited(unexpected=1))
 
 
+def test_a_retired_option_in_an_older_manifest_still_loads(
+    tmp_path: Path, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plugin's ``retired_options`` (e.g. a setting that became a run-time one) load."""
+    from apex.services.surrogates import current_options, load_surrogate
+
+    path = tmp_path / "surrogate.json"
+    _write(path)
+    document = json.loads(path.read_text())
+    document["options"] = {**document["options"], "old_setting": 8}
+    path.write_text(json.dumps(document))
+    with pytest.raises(ConfigError, match="does not take"):
+        load_surrogate(path)  # not retired: refused, as any unknown option
+
+    monkeypatch.setattr(_Affine, "retired_options", frozenset({"old_setting"}), raising=False)
+    assert load_surrogate(path).manifest.plugin == "test_affine"
+    assert current_options("test_affine", {"ridge": 0.0, "old_setting": 8}) == {"ridge": 0.0}
+    document["options"] = {**document["options"], "lable": "affine"}
+    path.write_text(json.dumps(document))
+    with pytest.raises(ConfigError, match="does not take"):
+        load_surrogate(path)  # a retired option excuses no other
+
+
 def test_byte_order_does_not_change_the_identity(tmp_path: Path) -> None:
     model, training, held_out = _fitted()
     domain = training_domain(model, training.inputs, held_out.inputs)

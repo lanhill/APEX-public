@@ -164,6 +164,23 @@ class LoadedSurrogate:
     identity: str
 
 
+def current_options(plugin: str, options: Mapping[str, object]) -> dict[str, object]:
+    """Return a manifest's options without those its plugin has retired.
+
+    A plugin lists in ``retired_options`` the options it no longer takes but older
+    manifests still name (e.g. a setting that became a run-time one), so that those models
+    load and refit; the rest are checked against the plugin's options as before.
+    """
+    retired = frozenset(getattr(surrogate_models.factory(plugin), "retired_options", ()))
+    dropped = sorted(set(options) & retired)
+    if dropped:
+        logger.info(
+            "retired surrogate options ignored",
+            extra={"event": "surrogate_retired_options", "plugin": plugin, "options": dropped},
+        )
+    return {k: v for k, v in options.items() if k not in retired}
+
+
 def load_surrogate(path: Path, *, identity: str | None = None) -> LoadedSurrogate:
     """Load the surrogate whose manifest is ``path``.
 
@@ -187,7 +204,9 @@ def load_surrogate(path: Path, *, identity: str | None = None) -> LoadedSurrogat
     stored = read_surrogate(path, identity=identity)
     manifest = stored.manifest
     factory = surrogate_models.factory(manifest.plugin)
-    problems = check_options("surrogate_models", manifest.plugin, manifest.options)
+    problems = check_options(
+        "surrogate_models", manifest.plugin, current_options(manifest.plugin, manifest.options)
+    )
     if problems:
         raise ConfigError(
             f"the surrogate {Path(path).name} names options its plugin {manifest.plugin!r} "
@@ -2855,7 +2874,9 @@ def surrogate_forecasting(
     )
     # The manifest's file options are relative to the model's folder; a refit reads them
     # there and records them relative to its own.
-    resolved = options_resolved_in(manifest.options, Path(section.model_file).parent)
+    resolved = options_resolved_in(
+        current_options(manifest.plugin, manifest.options), Path(section.model_file).parent
+    )
     return SurrogateForecasting(
         section,
         original=original,

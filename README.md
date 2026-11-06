@@ -2,11 +2,11 @@
 
 **Agentic Platform for Ensemble eXploration**: An open-source agentic framework for ensemble-based history matching, forecasting, uncertainty quantification and optimization of subsurface models. It natively re-implements and extends NORCE's [Python Ensemble Toolbox (PET)](https://github.com/Python-Ensemble-Toolbox/PET).
 
-APEX ships runtime agents: assistants, driven by a language model, for the work around a study. They help bring in a case and give it a prior, plan experiments, watch and diagnose runs, draw figures and report results, and they answer questions in the web UI. An agent's facts come from code, and its model's choices are held to them, checked and recorded; anything an agent launches needs the same approvals and budgets as a user's. Agents run on OpenAI-compatible language models, hosted or local, and most fall back to deterministic rules when no language model is available. More agents may be added as APEX grows; [Runtime agents](docs/agents.md) describes the current ones.
+APEX ships runtime agents: Assistants, driven by a language model, for the work around a study. They help bring in a case and give it a prior, plan experiments, watch and diagnose runs, draw figures and report results, and they answer questions in the web UI. An agent's facts come from code, and its model's choices are held to them, checked and recorded; anything an agent launches needs the same approvals and budgets as a user's. Agents run on OpenAI-compatible language models, hosted or local, and most fall back to deterministic rules when no language model is available. More agents may be added as APEX grows; [Runtime agents](docs/agents.md) describes the current ones.
 
-APEX is compatible with ERT: with APEX's interface, each can run the other's cases ([APEX and ERT](docs/ert.md)). PET and ERT cases convert to and from APEX cases, within what each can express ([the case-converter](docs/agents.md#bringing-your-own-case-the-case-converter)).
+APEX is compatible with ERT: With APEX's interface, each can run the other's cases ([APEX and ERT](docs/ert.md)). PET and ERT cases convert to and from APEX cases, within what each can express ([the case-converter](docs/agents.md#bringing-your-own-case-the-case-converter)).
 
-Status: early development.
+Status: Early development.
 
 ## Quick start
 
@@ -26,6 +26,15 @@ Status: early development.
 </table>
 
 ▶ marks the videos of each page, on YouTube. [All the videos](https://www.youtube.com/playlist?list=PLLxKDH7QwDR4) ([list](videos/README.md)), with subtitles, include a two-minute overview, the installation and optimization.
+
+## Documentation
+
+The full documentation (getting started, the user guide, the reference and the design of each method) is online:
+
+- [lanhill.github.io/APEX-public](https://lanhill.github.io/APEX-public/), the latest version;
+- [apex-public.readthedocs.io](https://apex-public.readthedocs.io/), with a version for each release.
+
+It is also in [`docs/`](docs/index.md), and `uv run mkdocs serve` shows it locally.
 
 ## Installation
 
