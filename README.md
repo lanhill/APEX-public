@@ -156,6 +156,7 @@ With OPM Flow, `uv run apex run examples/3dbox_production_avo/config_esmda.toml`
 
 </details>
 
+<!--
 <details>
 <summary><b>7. Read the documentation</b></summary>
 
@@ -173,6 +174,7 @@ It describes the plugins, the configuration files and the workflows, with a user
 - *Write and register your own plugin*: a new performance metric and a new history-matching algorithm, each in a package of your own.
 
 </details>
+-->
 
 <details>
 <summary><b>Updating</b></summary>
