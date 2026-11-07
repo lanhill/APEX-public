@@ -82,7 +82,11 @@ Every saved ensemble (`checkpoints/iter_<k>.npz`) also holds:
 
 ## Limits
 
-- No predictions beyond the history: the network has one output layer per history report time.
+- No predictions beyond the history with `pg_lstm`: the network has one output layer per history report time. A model-error model whose residuals apply at any report time declares `forecasts = True`; a prediction of its run then forecasts `g + r` for every member, with the model built against the prediction's simulator and deck. It cannot be combined with a surrogate, which would forecast `g` alone. Its limits:
+  - **The truth is refused by default.** A model error means the observations came from another model (the real system, or a finer one), which a forecast of the true parameters by this simulator does not reproduce, so scores against it would use the wrong reference. `truth_is_simulator = true` in `[prediction]` allows it, when the observations came from this very simulator; the choice is recorded in the prediction's provenance.
+  - **The forecast deck must write restarts** at every report step the model reads (e.g. `RPTRST BASIC=2 DEN`); this is not checked from its text, so a deck without fails at its first member.
+  - **A restart deck** starts the model's recurrence at its own first report step, not the history's, so its residuals differ from the run's; the history check (on by default) shows it.
+  - **The residuals themselves** (`MEC:` vectors) cannot be requested in a prediction; the run's iterates hold them.
 - No parameterizations, adjoint update, multilevel methods (fidelity levels) or ERT export yet. A multilevel run's coarse level would feed the networks coarse-grid inputs, so one θ would give different residuals per level.
 - An output whose observations are never positive cannot be modelled: its scale u would not be positive.
 - The θ ensemble can be large: 352,920 values for Brugge's 30 wells. An adaptive taper over the whole state is then about 6 GB.

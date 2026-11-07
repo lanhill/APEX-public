@@ -493,6 +493,7 @@ def plan(
     target.write_text(result.toml(service.workspace(), target.resolve().parent))
     # An optimization study's plan compares no algorithms (OptimizationPlanResult).
     differences: tuple[str, ...] = getattr(result, "differences", ())
+    warnings: tuple[str, ...] = getattr(result, "warnings", ())
     if differences and not json_output:
         # Before any confirmation: the compared arms differ in more than the algorithm
         # (a reported issue).
@@ -511,14 +512,27 @@ def plan(
             "proposal": result.proposal.model_dump(), "study_file": str(target),
             "cost": result.cost, "within_budget": result.within_budget,
             "revisions": list(result.revisions), "differences": list(differences),
+            "warnings": list(warnings),
             "submission": outcome,
             "trace": str(result.trace),
         }))  # fmt: skip
         return
     p = result.proposal
-    typer.secho(f"study {p.name}: {len(p.variants)} variant(s) x {p.replicates} replicate(s)",
-                bold=True)  # fmt: skip
+    # The compared algorithms first: a study of two methods with one variant read as
+    # "1 variant(s) x 2 replicate(s)" alone (the release tester's H32).
+    # (Optimization studies' arms are optimizers: name and options, no engine or strategy.)
+    arms = p.methods
+    shape = f"{len(arms)} method(s) x " if arms else ""
+    typer.secho(f"study {p.name}: {shape}{len(p.variants)} variant(s) x {p.replicates} "
+                "replicate(s)", bold=True)  # fmt: skip
     typer.echo(f"hypothesis: {p.hypothesis}")
+    for label, entry in arms.items():
+        engine = getattr(entry, "engine", "apex")
+        strategy = getattr(entry, "strategy", None)
+        where = f" on {engine}" if engine != "apex" else ""
+        how = f", strategy {strategy.name}" if strategy is not None else ""
+        options = f"  {json.dumps(entry.options)}" if entry.options else ""
+        typer.echo(f"  method {label}: {entry.name}{where}{how}{options}")
     for v in p.variants:
         typer.echo(f"  {v.name}: {v.rationale}" + (f"  {json.dumps(v.patch)}" if v.patch else ""))
     colour = typer.colors.GREEN if result.within_budget else typer.colors.RED
@@ -526,6 +540,8 @@ def plan(
         f"cost: at most {result.cost} simulator runs (budget "
         f"{result.facts.budget_simulator_runs})", fg=colour,
     )  # fmt: skip
+    for warning in warnings:
+        typer.secho(f"warning: {warning}", fg=typer.colors.YELLOW)
     for i, revision in enumerate(result.revisions, 1):
         typer.secho(f"refused proposal {i}: {revision}", fg=typer.colors.YELLOW)
     typer.echo(f"written: {target}")

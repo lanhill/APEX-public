@@ -101,7 +101,7 @@ A submission with an `experiment` annotation may instead pass on a *grant*. A gr
 | `POST /v1/agents/monitor` | `{run}` or `{optimization}` (a directory), `model?` | the run monitor's report (status, recommendation, findings); it never stops anything |
 | `POST /v1/agents/diagnose` | `{run, model?}` | the diagnosis: verdict, causes with evidence, recommended changes with patches |
 | `POST /v1/agents/report` | `{run}`, `{study}` or `{optimization}`, `model?` | the narrative report, Markdown (its numbers checked against the facts) |
-| `POST /v1/agents/plan` | `{case, goal, budget?, model?}` | a study draft written to the user's UI folder (`UI/<user>/drafts/planner/`), with its variants and cost |
+| `POST /v1/agents/plan` | `{case, goal, budget?, model?}` | a study draft written to the user's UI folder (`UI/<user>/drafts/planner/`), with its compared methods (`methods`), variants, cost and `warnings`; a goal that cannot be planned within the budget is 422 "Cannot plan within the budget" |
 
 A `?` after a field name means the field is optional. `model` is a boolean. `run`, `study` and `optimization` identify what to look at.
 

@@ -424,6 +424,44 @@ def test_nsga2_on_a_one_objective_case_is_explained_and_case_info_reads_it(svc: 
     assert "pop_size" in message
 
 
+def test_an_optimization_alternative_refused_for_another_reason_is_not_a_budget_refusal(
+    svc: Service,
+) -> None:
+    """The re-review of #288 (m-a): every refused optimization plan ends with a note on how
+    to fit the budget, so matching the word 'budget' recorded an alternative refused for
+    another reason (an optimizer that needs several objectives) as one the budget cannot
+    hold, and the original's card stopped asking for one."""
+    from apex.agents.chat import ChatAssistant
+    from apex.storage.chat_store import ChatStore
+
+    _setup(svc)
+    store = ChatStore(svc.root)
+    assistant = ChatAssistant(svc.service, store, None)
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    smcopt = {"name": "smcopt", "options": {"ne": 4, "maxiter": 2}}
+    first = plan.handler(plan.arguments(
+        case="alpha/opt.toml", goal="how much does smcopt vary", budget=400,
+        methods={"smc": smcopt}, replicates=1, name="smc_only",
+    ))  # fmt: skip
+    with pytest.raises(ValueError, match="needs several objectives") as refused:
+        plan.handler(plan.arguments(
+            case="alpha/opt.toml", goal="NSGA-II against EnOpt", budget=400, name="other",
+            methods={"nsga2": {"name": "nsga2", "options": {"pop_size": 8, "maxiter": 2}},
+                     "enopt": {"name": "enopt", "options": {"ne": 4, "maxiter": 2}}},
+            alternative_to=first["draft"],
+        ))  # fmt: skip
+    assert "budget" in str(refused.value)  # the note that misled the old match
+    assert not [e for e in store.events(chat.id) if e.kind == "alternative_refused"]
+    with pytest.raises(ValueError, match="over its budget"):
+        plan.handler(plan.arguments(
+            case="alpha/opt.toml", goal="more smcopt", budget=1, name="smc_more",
+            methods={"smc": smcopt}, replicates=3, alternative_to=first["draft"],
+        ))  # fmt: skip
+    [event] = [e for e in store.events(chat.id) if e.kind == "alternative_refused"]
+    assert event.data["draft"] == first["draft"]
+
+
 def test_a_guests_case_info_and_refusals_show_no_server_paths_nor_hidden_optimizers(
     svc: Service,
 ) -> None:

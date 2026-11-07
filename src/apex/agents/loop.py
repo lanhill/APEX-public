@@ -63,6 +63,13 @@ CHARS_PER_TOKEN = 1.5
 
 #: What a trimmed tool result is replaced with.
 TRIMMED = '{"trimmed": "an older tool result, dropped to fit the model\'s context"}'
+#: What an older tool result is first shortened to, in characters (~1,300 tokens): its
+#: leading fields, which tools put first when they matter most (a plan's cost, warnings and
+#: approval). Before a result is dropped whole, every older one is shortened; on a 32k context
+#: a turn with two plans otherwise lost the first plan's warnings before the model stated them.
+SHORTENED_CHARS = 2_000
+#: The prefix of a tool result in a prompted (non-native) conversation.
+_RESULT_OF = "Result of "
 
 SYSTEM = (
     "You are an agent of APEX, a platform for ensemble history matching of reservoir "
@@ -713,7 +720,12 @@ class AgentLoop:
             raise _Invalid(_errors(error)) from error
 
     def _fit(self, messages: list[Message]) -> list[Message]:
-        """Drop the oldest tool results until the conversation fits the context."""
+        """Shorten, then drop, tool results until the conversation fits the context.
+
+        Older results go first: each is cut to its leading fields (:func:`_shortened`), and
+        if that is not enough, dropped whole, oldest first. The latest results (those the
+        model has not answered yet) are cut, then dropped, only after every older one.
+        """
         budget = self.provider.capabilities.max_context - self.settings.max_tokens
         chars = sum(len(m.content) + len(str(m.tool_calls)) for m in messages)
         size = int(chars / CHARS_PER_TOKEN)
@@ -721,13 +733,28 @@ class AgentLoop:
             # Native tool definitions travel with every request and take context too.
             size += int(self._tools_size / CHARS_PER_TOKEN)
         fitted = list(messages)
-        for index, message in enumerate(fitted):
-            if size <= budget:
-                break
-            is_result = message.role == "tool" or (message.role == "user" and message.name)
-            if is_result and message.content != TRIMMED:
-                size -= int((len(message.content) - len(TRIMMED)) / CHARS_PER_TOKEN)
-                fitted[index] = replace(message, content=TRIMMED)
+        results = [i for i, m in enumerate(fitted) if _is_result(m)]
+        # The latest results: the last group of them, the turn the model is to answer, even
+        # when a message follows (the last turn's, or a retry's after an invalid answer).
+        latest = results[-1] if results else len(fitted)
+        while latest > 0 and _is_result(fitted[latest - 1]):
+            latest -= 1
+        older = [i for i in results if i < latest]
+        newest = [i for i in results if i >= latest]
+        drop: Callable[[str], str | None] = lambda _content: TRIMMED  # noqa: E731
+        for cut, indices in ((_shortened, older), (drop, older), (_shortened, newest),
+                             (drop, newest)):  # fmt: skip
+            for index in indices:
+                if size <= budget:
+                    break
+                content = fitted[index].content
+                if content == TRIMMED:
+                    continue
+                shorter = cut(content)
+                if shorter is None or len(shorter) >= len(content):
+                    continue
+                size -= int((len(content) - len(shorter)) / CHARS_PER_TOKEN)
+                fitted[index] = replace(fitted[index], content=shorter)
         if size > budget:
             # Say what is lost and what to change (release tester C8, 2026-10-24).
             logger.warning(
@@ -782,6 +809,90 @@ _REPEATED = (
     "time: unless you are waiting for something to change, answer from what you have, or "
     "try another tool or other arguments"
 )
+
+
+def _is_result(message: Message) -> bool:
+    """Whether a message is a tool's result (native, or a prompted conversation's)."""
+    return message.role == "tool" or (message.role == "user" and bool(message.name))
+
+
+def _shortened(content: str) -> str | None:
+    """Return a tool result cut to its leading fields, within :data:`SHORTENED_CHARS`.
+
+    A JSON object keeps its fields in order; the first that does not fit is kept as a
+    preview of its text when there is room, and the result names the fields it cut. A
+    dispatcher's ``{"ok": ..., "result": {...}}`` is cut inside its ``result``, its other
+    fields (``ok``, ``repeated``) kept. None for what is not a JSON object, is short
+    already, or was cut before (its ``trimmed`` note): a result is cut once only.
+    A prompted conversation's ``Result of <tool>: `` prefix is kept.
+    """
+    prefix, body = "", content
+    if content.startswith(_RESULT_OF):
+        head, sep, body = content.partition(": ")
+        prefix = head + sep
+    if len(body) <= SHORTENED_CHARS:
+        return None
+    try:
+        value = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or "trimmed" in value:
+        return None
+    inner = value.get("result")
+    if isinstance(inner, dict):
+        outside = {k: v for k, v in value.items() if k != "result"}
+        room = SHORTENED_CHARS - len(json.dumps(outside, default=str))
+        kept, cut = _leading(inner, room)
+        shortened: dict[str, Any] = {**outside, "result": kept}
+        cut = [f"result.{k}" for k in cut]
+    else:
+        shortened, cut = _leading(value, SHORTENED_CHARS)
+    shortened["trimmed"] = "a tool result, shortened to fit the model's context; cut: " + ", ".join(
+        cut
+    )
+    return prefix + json.dumps(shortened, default=str)
+
+
+#: Below this many characters left, the first field that does not fit is cut without a
+#: preview: a few words of it would mislead more than they tell.
+_MIN_PREVIEW = 200
+
+
+def _preview(text: str, room: int) -> str:
+    """Return the start of ``text`` whose JSON encoding fits ``room`` characters.
+
+    Measured encoded: escapes (quotes, non-ASCII text as six characters each) can make it several
+    times longer than its characters.
+    """
+    cut = text[:room]
+    while cut and len(json.dumps(cut)) > room:
+        cut = cut[: max(0, len(cut) * room // len(json.dumps(cut)) - 1)]
+    return cut + " ...(cut)"
+
+
+def _leading(value: dict[str, Any], room: int) -> tuple[dict[str, Any], list[str]]:
+    """Return an object's leading fields within ``room`` characters, and those cut.
+
+    The first field that does not fit is kept as a preview of its JSON text (and named
+    among those cut) when at least :data:`_MIN_PREVIEW` characters are left.
+    """
+    kept: dict[str, Any] = {}
+    previewed: list[str] = []
+    size = 0
+    for key, item in value.items():
+        text = json.dumps(item, default=str)
+        piece = len(json.dumps(str(key))) + len(text) + 4  # '"key": value, '
+        if size + piece <= room:
+            kept[key] = item
+            size += piece
+            continue
+        left = room - size - len(json.dumps(str(key))) - 20
+        if left >= _MIN_PREVIEW:
+            # A text's own words, not its JSON quoting; anything else as JSON text.
+            kept[key] = _preview(item if isinstance(item, str) else text, left)
+            previewed.append(str(key))
+        break
+    return kept, previewed + [str(k) for k in value if k not in kept]
 
 
 def _errors(error: ValidationError) -> str:

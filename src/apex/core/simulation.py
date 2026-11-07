@@ -420,6 +420,15 @@ class ModelErrorModel(Protocol):
     Its parameters theta are the state variable ``state_variable``, of ``n_params`` values
     once :meth:`fit` has seen the observations. ``residual_keys`` are the extra keys the
     effective simulator answers with the residuals themselves (datatype ``MEC:<type>``).
+
+    A model whose residuals apply past the history (any report time of a simulated case)
+    declares ``forecasts = True``: predictions of its runs then wrap their simulator in it;
+    without it a run with the model is not predicted.
+
+    A model may also define ``check_simulator(name, options)``, raising ``ValueError`` with
+    the reason when it cannot read what the simulator ``name`` writes (composition calls it
+    when the model is built, so ``apex validate`` refuses too); without it every simulator
+    the effective simulator can wrap is accepted.
     """
 
     state_variable: str

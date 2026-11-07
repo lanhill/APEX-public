@@ -91,6 +91,25 @@ class PredictionSection(_Strict):
         default=None, description="Default: <run_dir>/predictions/<name>."
     )
     outputs: PredictionOutputsSection
+    truth_is_simulator: bool = Field(
+        default=False,
+        description="A run with a model-error model: its truth is this simulator's own (the "
+        "observations came from it, without model error), so 'truth' is forecast by the "
+        "simulator alone. Without it, 'truth' is refused: a model error means the data came "
+        "from another model, which the simulator does not reproduce.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_unset_truth_rule(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave ``truth_is_simulator`` out of the dump when it is false.
+
+        A plain prediction's ``config.json`` and fingerprint stay those of predictions made
+        before the option existed, so their folders resume.
+        """
+        data: dict[str, Any] = handler(self)
+        if not data.get("truth_is_simulator"):
+            data.pop("truth_is_simulator", None)
+        return data
 
     @model_validator(mode="after")
     def _known_ensembles(self) -> Self:

@@ -681,9 +681,19 @@ def plan_rules(
     replicates = max(1, min(t.max_replicates, cells // groups))
     variants = [OptimizationVariantProposal(name="base", rationale="the case as configured")]
     compared = " against ".join(methods) if methods else own.name
+    # The design, never the goal's question (the release tester's H32 on the history-
+    # matching planner: a goal printed as the hypothesis of a study that did not test it).
+    if methods:
+        hypothesis = f"Compares the optimizers {compared} on the case {facts.case}"
+    elif other.name not in facts.optimizers:
+        hypothesis = (f"The case {facts.case}'s own optimizer, {own.name}, alone: "
+                      f"{other.name} is not available to compare")  # fmt: skip
+    else:
+        hypothesis = (f"The case {facts.case}'s own optimizer, {own.name}, alone: one run "
+                      "of a second optimizer does not fit the budget")  # fmt: skip
     return OptimizationStudyProposal(
         name=f"{facts.case}_plan",
-        hypothesis=f"Which optimizer best serves the goal: {goal}"[:300],
+        hypothesis=hypothesis,
         methods=methods,
         variants=variants,
         replicates=replicates,

@@ -240,6 +240,9 @@ def test_the_rules_plan_a_paired_optimizer_comparison_within_the_budget(tmp_path
     result = OptimizationPlanner(service, None).plan(case, "which optimizer", budget=200)
     assert result.decided_by == "rules"
     assert set(result.proposal.methods) == {"enopt", "smcopt"}
+    # The hypothesis states the design, never the goal (the review of H32's fix, m8).
+    assert "serves the goal" not in result.proposal.hypothesis
+    assert "enopt against smcopt" in result.proposal.hypothesis
     assert result.within_budget
     assert result.cost is not None
     assert result.cost <= 200

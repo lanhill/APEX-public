@@ -1215,26 +1215,91 @@ TOOLS: dict[str, Tool] = {
 # ---------------------------------------------------------------------- dispatch
 
 
+#: What :func:`bound` adds to a result's own ``truncated`` note when it cuts further.
+BOUND_NOTE = "shortened further to fit the result limit"
+#: The fields a :class:`CutFromEnd` result's bound shortens are at least this long
+#: (characters of JSON): short fields are what an answer states, and are never cut.
+BOUND_OMIT_MIN = 200
+#: How a field :func:`bound` cut to a preview ends.
+BOUND_CUT = " ... (cut to fit the result limit)"
+
+
+class CutFromEnd(dict[str, Any]):
+    """A result whose first fields are what an answer states (#288 review).
+
+    :func:`bound` cuts such a result's long fields from its last one back, to previews,
+    instead of halving its largest field first: a study plan's cost, warnings and approval
+    come first, its long comparison blocks last. It is a plain ``dict`` to JSON and to the
+    model; most results (domain models, schemas, drafts) keep the default order.
+    """
+
+
+def _cut_mark(result: Mapping[str, Any]) -> Any:  # noqa: ANN401
+    """Return ``truncated`` for a result :func:`bound` cut: its own note kept (#289 review)."""
+    own = result.get("truncated")
+    if isinstance(own, str) and own:
+        return own if own.endswith(BOUND_NOTE) else f"{own}; {BOUND_NOTE}"
+    return True
+
+
+def _cut_from_end(result: CutFromEnd, limit: int) -> Any:  # noqa: ANN401
+    """Shorten a :class:`CutFromEnd` result: its last long field first, to a preview."""
+    for key, value in reversed(list(result.items())):
+        if key in ("truncated", "shortened"):
+            continue
+        text = json.dumps(value, default=str)
+        if len(text) < BOUND_OMIT_MIN:
+            continue
+        shortened = CutFromEnd(result)
+        if isinstance(value, list) and len(value) > 1:
+            shortened[key] = value[: max(1, len(value) // 2)]
+        elif isinstance(value, dict) and len(value) > 1:
+            shortened[key] = dict(list(value.items())[: max(1, len(value) // 2)])
+        else:  # a string (or one entry): its start, never left out whole
+            whole = value if isinstance(value, str) else text
+            body = whole[: -len(BOUND_CUT)] if whole.endswith(BOUND_CUT) else whole
+            shortened[key] = body[: max(1, len(body) // 2)] + BOUND_CUT
+        named = result.get("shortened")
+        names = list(named) if isinstance(named, list) else []
+        shortened["shortened"] = names if key in names else [*names, key]
+        shortened["truncated"] = _cut_mark(result)
+        return bound(shortened, limit)
+    return None
+
+
 def bound(result: Any, limit: int = RESULT_LIMIT) -> Any:  # noqa: ANN401
-    """Shorten a result to ``limit`` characters of JSON, marking what was cut."""
+    """Shorten a result to ``limit`` characters of JSON, marking what was cut.
+
+    A dictionary's largest list or mapping is halved until it fits; failing that, the
+    text is cut to a preview. A :class:`CutFromEnd` result is cut from its last long field
+    back instead, each to a preview (named in ``shortened``). A result's own
+    ``truncated`` note (e.g. find_cases' "showing 100 of N") is kept, with
+    :data:`BOUND_NOTE` added.
+    """
     text = json.dumps(result, default=str)
     if len(text) <= limit:
         return result
-    if isinstance(result, dict):
+    if isinstance(result, CutFromEnd):
+        cut = _cut_from_end(result, limit)
+        if cut is not None:
+            return cut
+    elif isinstance(result, dict):
         shortened = dict(result)
         for key, value in sorted(
             result.items(), key=lambda kv: -len(json.dumps(kv[1], default=str))
         ):
             if isinstance(value, list) and len(value) > 1:
                 shortened[key] = value[: max(1, len(value) // 2)]
-                shortened["truncated"] = True
+                shortened["truncated"] = _cut_mark(result)
                 return bound(shortened, limit)
             if isinstance(value, dict) and len(value) > 1:
                 items = list(value.items())
                 shortened[key] = dict(items[: max(1, len(items) // 2)])
-                shortened["truncated"] = True
+                shortened["truncated"] = _cut_mark(result)
                 return bound(shortened, limit)
-    return {"truncated": True, "preview": text[: limit - 100]}
+    mark = _cut_mark(result) if isinstance(result, dict) else True
+    room = limit - 100 - (0 if mark is True else len(json.dumps(mark)))
+    return {"truncated": mark, "preview": text[:room]}
 
 
 def call(name: str, arguments: Mapping[str, Any] | None, session: ToolSession) -> dict[str, Any]:

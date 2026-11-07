@@ -21,12 +21,14 @@ runs ``apex approve``; ``submit_study`` consumes it), after a person has confirm
 """
 
 import json
+import logging
 import os
+import re
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -36,7 +38,7 @@ from apex.agents.loop import LoopSettings
 from apex.agents.trace import CallRecorder
 from apex.algorithms.data_assimilation.registries import methods
 from apex.core.advice import advise_prompt, advise_thresholds
-from apex.core.errors import ApexError, ConfigError, UnknownPluginError
+from apex.core.errors import ApexError, ConfigError, PlanningRefused, UnknownPluginError
 from apex.core.llm import LLMProvider
 from apex.domain.config import ALGORITHM_FIELDS, HistoryMatchConfig
 from apex.domain.services import Validation
@@ -48,6 +50,8 @@ from apex.services.tools import ToolSession, call
 
 if TYPE_CHECKING:
     from apex.services.workspace import Workspace
+
+logger = logging.getLogger(__name__)
 
 #: Registries whose plugins a proposal may name (listed in the facts).
 PLUGIN_REGISTRIES = ("methods", "update_strategies", "localizations", "metrics", "simulators")
@@ -212,6 +216,42 @@ def _wants_localization(goal: str) -> bool:
     import re
 
     return re.search(r"locali[sz]|adaptive|taper", goal, re.IGNORECASE) is not None
+
+
+def _compact(word: str) -> str:
+    """Return a word as a method's name compares: "ES-MDA", "es_mda" and "esmda" alike."""
+    return re.sub(r"[-_\s]", "", word.lower())
+
+
+#: Method names that are also everyday words: they name the method only beside "method"
+#: ("the assimilated method"), not in "how well the data are assimilated".
+WORD_METHOD_NAMES = frozenset({"assimilated"})
+
+
+def named_methods(goal: str, names: Iterable[str]) -> set[str]:
+    """Return the registered methods a goal names ("compare chop with ES-MDA": chop, esmda).
+
+    A name counts as one to three adjacent words of the goal, hyphens, underscores and
+    spaces ignored, the longest first: "ES-MDA" and "ES MDA" name esmda (not es),
+    "multilevel ES-MDA" multilevel_esmda (not esmda). One of :data:`WORD_METHOD_NAMES` counts
+    only beside the word "method".
+    """
+    tokens = [_compact(w) for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", goal)]
+    keys = {_compact(name): name for name in names}
+    found: set[str] = set()
+    i = 0
+    while i < len(tokens):
+        for size in (3, 2, 1):
+            name = keys.get("".join(tokens[i : i + size]))
+            if name is None:
+                continue
+            beside = tokens[max(i - 1, 0) : i] + tokens[i + size : i + size + 1]
+            if name not in WORD_METHOD_NAMES or any(t.startswith("method") for t in beside):
+                found.add(name)
+            i += size - 1
+            break
+        i += 1
+    return found
 
 
 #: ERT's localization is in its smoother library, not in ERT's own engine (which takes
@@ -633,7 +673,7 @@ def rules(facts: PlanFacts, goal: str, thresholds: PlannerSection | None = None)
         metrics.append("cv_normalized_data_mismatch:all")
     return StudyProposal(
         name=f"{facts.case}_plan",
-        hypothesis=f"Which set-up best serves the goal: {goal}"[:300],
+        hypothesis=_rules_hypothesis(facts.case, variants, facts.localization),
         variants=variants,
         replicates=replicates,
         metrics=metrics,
@@ -642,6 +682,301 @@ def rules(facts: PlanFacts, goal: str, thresholds: PlannerSection | None = None)
             f"{' at two ensemble sizes' if any(_SMALL in v.name for v in variants) else ''}, "
             f"with {replicates} paired replicate(s) within the budget of "
             f"{facts.budget_simulator_runs} simulator runs ({facts.runs_per_cell} per run)"
+        ),
+    )
+
+
+def _rules_hypothesis(
+    case: str, variants: Sequence[VariantProposal], localization: str | None
+) -> str:
+    """Say what the rules' study of variants compares (never the goal's question: H32).
+
+    The goal may ask something this design does not test (the release tester's H32: a goal
+    comparing ES-MDA with GIES was printed as the hypothesis of baseline against adaptive
+    localization), so the hypothesis names the variants written, and says why the baseline
+    is alone when it is.
+    """
+    if len(variants) == 1:
+        why = (
+            f"it already has localization ({localization}), so the rules have no variant to compare"
+            if localization is not None
+            else "not even one replicate of a second variant fits the budget"
+        )
+        return f"The case {case} as configured, {variants[0].name} alone: {why}"
+    others = ", ".join(v.name for v in variants[1:])
+    return f"Compares {variants[0].name} (the case {case} as configured) with {others}"
+
+
+#: A comparison word that makes one sentence compare the algorithms it names, even one
+#: besides the case's ("Compare this case with GIES", "this case vs. GIES"). ``against``
+#: counts only before an algorithm (:func:`_cues`): "protect GIES against ensemble collapse"
+#: compares nothing.
+STRICT_CUES = re.compile(
+    r"\b(?:compar\w*|versus|vs\b|against|better\s+than|benchmark\w*)", re.IGNORECASE
+)
+#: Words that, with two or more algorithms named in the same sentence, make it a comparison
+#: ("Which is better, ES-MDA or GIES?"). Plain "and" lists ("We tried GIES and LM-EnRML last
+#: year"), so it is no cue on its own.
+LOOSE_CUES = re.compile(
+    r"\b(?:compar\w*|versus|vs\b|against|better|best|benchmark\w*|which|or|relative\s+to)\b",
+    re.IGNORECASE,
+)
+#: Words after which an algorithm is left out of every comparison: "not GIES".
+NEGATIONS = frozenset({"no", "not", "without"})
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+#: Where a sentence ends: ".", "?", "!" or ";" before a space or the end, except the dots of
+#: "vs.", "e.g." and "i.e." ("this case vs. GIES" is one sentence).
+_SENTENCE_END = re.compile(r"(?<!\bvs)(?<!e\.g)(?<!i\.e)[.?!;](?=\s|$)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class _Mention:
+    """An algorithm named in a goal: its plugin, its sentence, and how it is named."""
+
+    name: str
+    sentence: int
+    #: "plain"; "negated" (after no/not/without: never an arm); "aside" (possessive or
+    #: after "like": an arm only where its sentence has a comparison word).
+    kind: str
+
+
+def _sentences(goal: str) -> list[str]:
+    """Split a goal into sentences (:data:`_SENTENCE_END`)."""
+    parts, start = [], 0
+    for end in _SENTENCE_END.finditer(goal):
+        parts.append(goal[start : end.end()])
+        start = end.end()
+    parts.append(goal[start:])
+    return [p for p in parts if p.strip()]
+
+
+def _method_mentions(goal: str, names: Iterable[str]) -> list[_Mention]:
+    """Return the algorithms a goal names, sentence by sentence.
+
+    Names are read as :func:`named_methods` reads them; a wrapper's inner method named after
+    it ("CHOP on GIES": GIES is CHOP's) is left out.
+    """
+    from apex.services.plugins import wrapped
+
+    keys = {_compact(name): name for name in names}
+    found: list[_Mention] = []
+    for number, text in enumerate(_sentences(goal)):
+        words = list(_WORD.finditer(text))
+        tokens = [_compact(w.group()) for w in words]
+        wrapper_end = -2  # the word index after the last wrapper named
+        i = 0
+        while i < len(tokens):
+            for size in (3, 2, 1):
+                name = keys.get("".join(tokens[i : i + size]))
+                if name is None or i + size > len(tokens):
+                    continue
+                before = words[i - 1].group().lower() if i else ""
+                beside = tokens[max(i - 1, 0) : i] + tokens[i + size : i + size + 1]
+                end = words[i + size - 1].end()
+                if name in WORD_METHOD_NAMES and not any(t.startswith("method") for t in beside):
+                    pass  # an everyday word ("assimilated"), not the method
+                elif before in ("on", "over") and wrapper_end == i - 1:
+                    pass  # a wrapper's inner method
+                elif before in NEGATIONS:
+                    found.append(_Mention(name, number, "negated"))
+                elif before == "like" or text[end : end + 2] in ("'s", "\u2019s"):
+                    found.append(_Mention(name, number, "aside"))
+                else:
+                    found.append(_Mention(name, number, "plain"))
+                if wrapped("methods", name, {}) is not None:
+                    wrapper_end = i + size
+                i += size - 1
+                break
+            i += 1
+    return found
+
+
+def _cues(text: str, cues: re.Pattern[str], names: Iterable[str]) -> bool:
+    """Whether a sentence has a comparison word; "against" only before an algorithm."""
+    keys = {_compact(name) for name in names}
+    for match in cues.finditer(text):
+        if match.group().lower() != "against":
+            return True
+        following = [_compact(w) for w in _WORD.findall(text[match.end() :])[:3]]
+        if following and following[0] == "the":
+            following = following[1:]
+        if any("".join(following[:size]) in keys for size in (1, 2, 3) if following):
+            return True
+    return False
+
+
+def _compared_names(facts: PlanFacts, goal: str) -> tuple[list[str], list[str]]:
+    """Return the algorithms a goal compares, and the others it names (not negated)."""
+    compared, others, _ = _reading(facts, goal)
+    return compared, others
+
+
+def _reading(facts: PlanFacts, goal: str) -> tuple[list[str], list[str], list[str]]:
+    """Return the algorithms a goal compares, the others it names, and its comparing sentences.
+
+    Sentence by sentence (the review of H32's fix): a sentence compares the algorithms it
+    names when it names two or more with a :data:`LOOSE_CUES` word, or one besides the
+    case's with a :data:`STRICT_CUES` word. A possessive or "like X" name counts only in such
+    a sentence; a negated one never; the case's wrapped inner method is the case's.
+    """
+    from apex.services.plugins import wrapped
+
+    names = facts.plugins.get("methods", [])
+    split = wrapped("methods", facts.method, facts.case_method.get("options") or {})
+    inner = None if split is None else split[1]
+    mentions = [m for m in _method_mentions(goal, names) if m.name != inner]
+    sentences = _sentences(goal)
+    compared: list[str] = []
+    comparing: list[str] = []
+    for number, text in enumerate(sentences):
+        here = list(dict.fromkeys(m.name for m in mentions
+                                  if m.sentence == number and m.kind != "negated"))  # fmt: skip
+        several = len(here) >= 2 and _cues(text, LOOSE_CUES, names)
+        if several or (set(here) - {facts.method} and _cues(text, STRICT_CUES, names)):
+            compared += here
+            comparing.append(text)
+    compared = list(dict.fromkeys(compared))
+    named = list(dict.fromkeys(m.name for m in mentions if m.kind != "negated"))
+    others = [n for n in named if n not in compared and n != facts.method]
+    return compared, others, comparing
+
+
+def comparison_arms(facts: PlanFacts, goal: str) -> dict[str, MethodEntry]:
+    """Return the algorithms a goal compares, as complete method entries.
+
+    See :func:`_compared_names`. The case's own algorithm is an arm as configured
+    (``case_method``), every other its own base with its own defaults, never the case's
+    settings patched in. Empty when the goal compares no algorithm besides the case's.
+    """
+    compared, _ = _compared_names(facts, goal)
+    others = sorted(set(compared) - {facts.method})
+    if not others:
+        return {}
+    arms = {facts.method: MethodEntry.model_validate(facts.case_method)}
+    arms.update({name: MethodEntry(name=name) for name in others})
+    return arms
+
+
+def goal_methods(facts: PlanFacts, goal: str) -> set[str]:
+    """Return the algorithms a goal names and does not leave out ("not GIES" is left out)."""
+    compared, others = _compared_names(facts, goal)
+    return set(compared) | set(others)
+
+
+def unread_methods(facts: PlanFacts, goal: str) -> list[str]:
+    """Return the algorithms a goal names besides the case's, but compares in no sentence.
+
+    The rules' reading is deliberately simple; a miss is never silent: the plan warns
+    (:func:`missed_comparison_warning`).
+    """
+    compared, others = _compared_names(facts, goal)
+    return [] if set(compared) - {facts.method} else others
+
+
+def missed_comparison_warning(facts: PlanFacts, goal: str, *, by_model: bool = False) -> str | None:
+    """Return the warning of a goal naming algorithms the planned study does not compare.
+
+    The rules' reading is named only where the rules planned (``by_model`` false); a plan
+    the model chose is described as it is (the final review of H32's fix, m1).
+    """
+    missed = unread_methods(facts, goal)
+    if not missed:
+        return None
+    if by_model:
+        return f"the plan compares no methods, though the goal names {', '.join(missed)}"
+    return (
+        f"the goal names {', '.join(missed)}, but the rules did not read a comparison of "
+        f"methods; ask 'compare {facts.method} with {missed[0]}' for one"
+    )
+
+
+#: Auxiliary techniques a comparing sentence may also ask about, which a comparison of
+#: methods (one variant each) does not plan (the final review of H32's fix, m2).
+AUXILIARY_WORDS = re.compile(r"\b(?:locali[sz]\w*|taper\w*|damping|inflation)\b", re.IGNORECASE)
+
+
+def dropped_auxiliaries_warning(facts: PlanFacts, goal: str, proposal: StudyProposal) -> str | None:
+    """Return the warning of a comparison of methods that leaves out the goal's auxiliaries.
+
+    A sentence that compares methods and also names localization (or a damping scheme,
+    inflation) asks more than a study of method arms with their case's settings answers;
+    the methods x variants design is not built, it is said (the final review of H32's fix).
+    """
+    if not proposal.methods or any(v.patch for v in proposal.variants):
+        return None
+    _, _, comparing = _reading(facts, goal)
+    words = sorted({m.group().lower() for t in comparing for m in AUXILIARY_WORDS.finditer(t)})
+    if not words:
+        return None
+    return (
+        f"the goal's comparison also names {', '.join(words)}, which was not planned: the "
+        "study compares the methods only, each with the case's own settings; ask for it as "
+        "variants, or plan it separately"
+    )
+
+
+#: A comparison with fewer replicates than this can hardly tell its arms' difference from
+#: seed noise (#276, 2026-11-02: one seed compared two damping schemes); warned, not refused.
+MIN_COMPARISON_REPLICATES = 3
+
+
+def design_warnings(proposal: StudyProposal) -> list[str]:
+    """Return what may keep a planned comparison from answering its question (none refused).
+
+    Too few replicates of a study comparing two or more methods or variants (as the
+    assistant warns, #276).
+    """
+    groups = max(len(proposal.methods), 1) * len(proposal.variants)
+    if groups < 2 or proposal.replicates >= MIN_COMPARISON_REPLICATES:
+        return []
+    return [
+        f"{proposal.replicates} replicate(s): a difference between the arms may be seed "
+        f"noise; {MIN_COMPARISON_REPLICATES} or more tell it apart better"
+    ]
+
+
+def _comparison_proposal(
+    facts: PlanFacts, arms: Mapping[str, MethodEntry], replicates: int, source: str,
+    cost: int | None = None, arm_costs: Mapping[str, int | None] | None = None,
+    matched: Sequence[str] = (),
+) -> StudyProposal:  # fmt: skip
+    """Return the rules' study comparing ``arms`` (one variant: each arm as given).
+
+    ``arm_costs`` (simulator runs of one replicate per arm) are stated in the hypothesis:
+    each algorithm runs to its own budget in updates, so "the same budget" is
+    not the same cost (the review of H32's fix).
+    """
+    labels = [f"{label} ({entry.name})" if label != entry.name else label
+              for label, entry in arms.items()]  # fmt: skip
+    metrics = (["rmse:all"] if facts.synthetic else []) + ["normalized_data_mismatch:all"]
+    if facts.has_validation:
+        metrics.append("cv_normalized_data_mismatch:all")
+    per = "" if cost is None else f" of {cost} simulator runs each"
+    costs = ""
+    if arm_costs and all(c is not None for c in arm_costs.values()):
+        listed = ", ".join(f"{label} {c}" for label, c in arm_costs.items())
+        same = len(set(arm_costs.values())) == 1
+        costs = (
+            f"; the arms cost the same per replicate ({listed} simulator runs)"
+            if same
+            else f"; the arms' costs per replicate differ: {listed} simulator runs"
+        )
+    return StudyProposal(
+        name=f"{facts.case}_{'_vs_'.join(arms)}"[:80],
+        hypothesis=(
+            f"Compares the algorithms {', '.join(labels)} on the case {facts.case}, "
+            f"each a complete method entry, over {replicates} paired replicate(s), by "
+            f"{', '.join(metrics)}{costs}"
+        ),
+        methods=dict(arms),
+        variants=[VariantProposal(name="base", patch={}, rationale="each algorithm as given")],
+        replicates=replicates,
+        metrics=metrics,
+        reasoning=(
+            f"rules: {source}; each algorithm is its own complete method entry, "
+            f"the case's own as configured; {replicates} paired replicate(s){per} within the "
+            f"budget of {facts.budget_simulator_runs} simulator runs"
+            + (f"; matched: {'; '.join(matched)}" if matched else "")
         ),
     )
 
@@ -764,7 +1099,10 @@ def _ert_localization_rules(facts: PlanFacts, goal: str, t: PlannerSection) -> S
     metrics = (["rmse:all"] if facts.synthetic else []) + ["normalized_data_mismatch:all"]
     return StudyProposal(
         name=f"{facts.case}_apex_vs_ert_localization",
-        hypothesis=f"APEX's adaptive_rows against ERT's adaptive localization: {goal}"[:300],
+        hypothesis=(
+            "APEX's adaptive_rows against ERT's adaptive localization (ert_adaptive), with "
+            f"approx and ert_esmda as the unlocalized references, all ES-MDA on {facts.case}"
+        ),
         methods=entries,
         variants=[VariantProposal(name="base", patch={}, rationale="each analysis as given")],
         replicates=replicates,
@@ -794,7 +1132,10 @@ def _ert_rules(facts: PlanFacts, goal: str, t: PlannerSection) -> StudyProposal:
     metrics = (["rmse:all"] if facts.synthetic else []) + ["normalized_data_mismatch:all"]
     return StudyProposal(
         name=f"{facts.case}_apex_vs_ert",
-        hypothesis=f"APEX's {facts.method} against ERT's ES-MDA on the case: {goal}"[:300],
+        hypothesis=(
+            f"APEX's {facts.method} against ERT's ES-MDA (weights {weights}) on the case "
+            f"{facts.case}, on the same priors"
+        ),
         methods=entries,
         variants=[VariantProposal(name="base", patch={}, rationale="the case as configured")],
         replicates=replicates,
@@ -831,6 +1172,10 @@ SYSTEM = (
     "ert_esmda as the unlocalized references (ert_localized is ERT's distance taper)."
 )
 _RULE = "the planner's rules: baseline and localization within the budget"
+_COMPARISON_RULE = (
+    "the planner's rules: the algorithms compared, each a complete method entry, "
+    "with the replicates the budget allows"
+)
 
 
 @dataclass(frozen=True)
@@ -859,6 +1204,8 @@ class PlanResult:
     differences
         What the compared algorithms' arms still differ in besides the algorithm, after
         :func:`method_differences` (a reported issue).
+    warnings
+        What may keep the study from answering its question (:func:`design_warnings`).
     """
 
     facts: PlanFacts
@@ -872,6 +1219,7 @@ class PlanResult:
     trace: Path
     revisions: tuple[str, ...] = ()
     differences: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     def toml(self, workspace: "Workspace | None" = None, study_dir: Path | None = None) -> str:
         """Return the study as TOML, with the proposal's hypothesis and reasoning.
@@ -965,6 +1313,16 @@ def _drop_none(value: Any) -> Any:  # noqa: ANN401 (JSON values)
     if isinstance(value, list):
         return [_drop_none(v) for v in value]
     return value
+
+
+def _refusal(facts: PlanFacts, obstacles: Sequence[str]) -> str:
+    """Say why a comparison asked for cannot be planned, each comparison tried and why."""
+    return (
+        "the goal asks for a comparison of algorithms that could not be planned within "
+        f"the budget of {facts.budget_simulator_runs} simulator runs: "
+        f"{'; '.join(obstacles)}. Raise the budget, or lower an arm's cost (fewer "
+        "iterations or members); no other study is planned in its place"
+    )
 
 
 class Planner:
@@ -1079,8 +1437,23 @@ class Planner:
         system, prompt_advice = advise_prompt(SYSTEM, "planner", self.service.root)
         recorder.advice = sorted([*prompt_advice, *self.threshold_advice])
         rule_plan = rules(facts, goal, self.thresholds)
+        rule = _RULE
+        # A goal comparing algorithms is planned as a comparison by the rules too (the
+        # release tester's H32: the rules substituted baseline against localization).
+        goal_arms = comparison_arms(facts, goal) if not rule_plan.methods else {}
+        goal_obstacle: str | None = None
+        if goal_arms:
+            fitted, goal_obstacle, _ = self._fit_comparison(
+                facts, goal_arms, "the goal compares the algorithms"
+            )
+            if fitted is not None:
+                rule_plan, rule = fitted, _COMPARISON_RULE
+            elif self.provider is None:
+                # Refused before any decision is recorded: nothing is planned (the review's m4).
+                self._refuse(facts, [goal_obstacle or ""], recorder)
         thresholds = self.thresholds.model_dump(mode="json")
         revisions: list[str] = []
+        refused: list[StudyProposal] = []
         base_task = (
             f"Goal: {goal}\n\nFacts of the case:\n{facts.model_dump_json(indent=1)}\n\n"
             f"The rules' plan, for reference:\n{rule_plan.model_dump_json(indent=1)}\n\n"
@@ -1097,7 +1470,7 @@ class Planner:
                 )
             decision = decide(
                 self.service, self.provider, recorder, task=task,
-                response_model=StudyProposal, rules=rule_plan, rule=_RULE,
+                response_model=StudyProposal, rules=rule_plan, rule=rule,
                 thresholds=thresholds, client="planner", settings=self.settings, system=system,
             )  # fmt: skip
             if decision.decided_by != "model":
@@ -1106,24 +1479,187 @@ class Planner:
             if not errors and spec is not None and validation is not None:
                 differences = self._differences(facts, decision, recorder)
                 return self._result(facts, decision, spec, validation, cost, revisions,
-                                    differences)  # fmt: skip
+                                    differences, goal=goal)  # fmt: skip
             revisions.append("; ".join(errors))
+            refused.append(decision.value)
             recorder.record_action(
                 f"refused proposal {attempt + 1}: " + revisions[-1], proposal=decision.value
             )
         assert decision is not None
         reason = decision.reason
-        if decision.decided_by == "model":  # every revision refused: the rules plan
-            reason = f"{len(revisions)} proposal(s) refused; the rules planned"
+        # Every revision refused, or some refused and then the model failed (the review's m6):
+        # the rules plan, a comparison staying a comparison.
+        compared = self._fallback(facts, goal_arms, refused, recorder) if refused else None
+        if compared is not None or decision.decided_by == "model":
+            fallback = compared or rule_plan
+            rule = _COMPARISON_RULE if compared is not None else rule
+            reason = f"{len(revisions)} proposal(s) refused; the rules planned" + (
+                f" the comparison of {', '.join(fallback.methods)}" if compared else ""
+            )
+            if decision.decided_by != "model":
+                reason += f" (then the model failed: {decision.reason})"
             trace = recorder.record_decision(
-                self.provider, task=base_task, decision=rule_plan, fell_back=True,
-                reason=reason, rule=_RULE, thresholds=thresholds, tool_calls=[],
+                self.provider, task=base_task, decision=fallback, fell_back=True,
+                reason=reason, rule=rule, thresholds=thresholds, tool_calls=[],
             )  # fmt: skip
-            decision = Decision(rule_plan, "fallback", reason, trace)
+            decision = Decision(fallback, "fallback", reason, trace)
+        elif goal_obstacle is not None:
+            # The model failed before proposing: the rules' fallback the loop recorded is
+            # not planned either.
+            self._refuse(facts, [goal_obstacle], recorder, after="the model failed")
         spec, validation, cost, errors = self.check(facts, decision.value)
         if spec is None or validation is None:
             raise ConfigError("the rules' plan is not a valid study: " + "; ".join(errors))
-        return self._result(facts, decision, spec, validation, cost, revisions)
+        differences = (
+            self._differences(facts, decision, recorder) if rule == _COMPARISON_RULE else ()
+        )
+        return self._result(
+            facts, decision, spec, validation, cost, revisions, differences, goal=goal
+        )
+
+    def rules_plan(self, facts: PlanFacts, goal: str) -> tuple[StudyProposal, list[str]]:
+        """Return the rules' plan for a goal: the comparison it asks for, else :func:`rules`.
+
+        The assistant's rules path plans with this, so that it reads a goal as the planner
+        does (the re-review of H32's fix, m2). Also returns what :func:`match_strategies`
+        changed in a comparison's arms, for the assistant to state ("matched").
+
+        Raises
+        ------
+        PlanningRefused
+            If the goal compares algorithms and no comparison of them fits the budget.
+        """
+        plan = rules(facts, goal, self.thresholds)
+        arms = comparison_arms(facts, goal) if not plan.methods else {}
+        if not arms:
+            return plan, []
+        fitted, why, matched = self._fit_comparison(facts, arms, "the goal compares the algorithms")
+        if fitted is None:
+            raise PlanningRefused(_refusal(facts, [why or ""]))
+        return fitted, matched
+
+    def _fit_comparison(
+        self, facts: PlanFacts, arms: Mapping[str, MethodEntry], source: str
+    ) -> tuple[StudyProposal | None, str | None, list[str]]:
+        """Return the comparison of ``arms`` with the replicates the budget allows.
+
+        The arms' strategies take the case's truncation energy where they leave it unset
+        (:func:`match_strategies`, as the assistant's drafts do, #256). A study's cost is
+        its arms' cost per replicate times the replicates, so one replicate is costed and
+        the replicates are as many as fit, capped by ``max_replicates`` (the study's own
+        refusal says the same: "To fit: run N replicates"). Returns the proposal, ``None``
+        and what :func:`match_strategies` changed; ``(None, why, [])`` when the arms are no
+        valid study or one replicate is over the budget.
+        """
+        labels = ", ".join(arms)
+        one, matched = match_strategies(facts, _comparison_proposal(facts, arms, 1, source))
+        spec, validation, cost, errors = self.check(facts, one)
+        invalid = [e for e in errors if not e.startswith(OVER_BUDGET)]
+        if invalid:
+            return None, f"{labels}: not a valid study ({'; '.join(invalid)})", []
+        if cost is not None and cost > facts.budget_simulator_runs:
+            return None, f"{labels}: one replicate takes {cost} simulator runs", []
+        fits = facts.budget_simulator_runs // cost if cost else 1
+        replicates = max(1, min(self.thresholds.max_replicates, fits))
+        arm_costs = self._arm_costs(facts, spec, validation)
+        proposal = _comparison_proposal(
+            facts, one.methods, replicates, source, cost, arm_costs, matched
+        )
+        return proposal, None, matched
+
+    def _arm_costs(
+        self, facts: PlanFacts, spec: StudySpec | None, validation: Validation | None
+    ) -> dict[str, int | None] | None:
+        """Return each method arm's simulator runs per replicate, by its cells' run ids.
+
+        A run's plan is found by the run id of its cell's configuration (``run_id``), never
+        by the order of the plans (the re-review's m3). ``None`` when a cell's plan is not
+        found (another engine's arm, an invalid cell).
+        """
+        from apex.services.identity import run_id
+        from apex.services.study import expand
+
+        if spec is None or validation is None:
+            return None
+        by_id = {p.run_id: p.max_simulator_runs for p in validation.plans}
+        cells = expand(spec, self.service.root, Path(facts.config_file).parent)
+        costs: dict[str, int | None] = {}
+        for cell in cells:
+            key = run_id(cell.config)
+            if cell.method is None or cell.engine is not None or key not in by_id:
+                logger.debug(
+                    "planner: no per-arm costs: cell %s has no plan of its own (run %s)",
+                    cell.label, key,
+                )  # fmt: skip
+                return None
+            runs, before = by_id[key], costs.get(cell.method, 0)
+            costs[cell.method] = None if runs is None or before is None else before + runs
+        return costs or None
+
+    def _fallback(
+        self,
+        facts: PlanFacts,
+        goal_arms: Mapping[str, MethodEntry],
+        refused: Sequence[StudyProposal],
+        recorder: CallRecorder,
+    ) -> StudyProposal | None:
+        """Return the comparison to plan after proposals were refused.
+
+        A comparison stays a comparison (H32): the model's latest refused design with two
+        or more method arms first (refused for its budget, it fits with fewer replicates),
+        then the algorithms the goal names. ``None`` when nothing was to be compared (the
+        rules' study of variants plans); a comparison that cannot be planned is refused
+        (:meth:`_refuse`), never replaced by another study.
+        """
+        candidates: list[tuple[dict[str, MethodEntry], str]] = []
+        for proposal in reversed(refused):
+            if len(proposal.methods) >= 2:
+                source = (
+                    "the model's refused design's algorithms, with the replicates the budget allows"
+                )
+                candidates.append((dict(proposal.methods), source))
+        if goal_arms:
+            candidates.append((dict(goal_arms), "the goal names the algorithms"))
+        if not candidates:
+            return None
+        obstacles: list[str] = []
+        seen: list[dict[str, MethodEntry]] = []
+        for arms, source in candidates:
+            if arms in seen:
+                continue
+            seen.append(arms)
+            fitted, why, _ = self._fit_comparison(facts, arms, source)
+            if fitted is not None:
+                return fitted
+            if why is not None and why not in obstacles:
+                obstacles.append(why)
+        self._refuse(facts, obstacles, recorder)
+
+    def _refuse(
+        self,
+        facts: PlanFacts,
+        obstacles: Sequence[str],
+        recorder: CallRecorder,
+        *,
+        after: str | None = None,
+    ) -> NoReturn:
+        """Refuse a comparison that cannot be planned, rather than plan another study.
+
+        ``obstacles`` name each comparison tried (its arms) and why it could not be planned.
+        Nothing is planned, so the refusal is recorded as an action, and no decision of a
+        study is (the review's m4); ``after`` says what happened before (the model failed,
+        after the loop had recorded its fallback).
+
+        Raises
+        ------
+        PlanningRefused
+            Always, saying why each comparison tried could not be planned.
+        """
+        message = _refusal(facts, obstacles)
+        recorder.record_action(
+            "refused: " + message, obstacles=list(obstacles), planned=None, after=after
+        )
+        raise PlanningRefused(message)
 
     def _differences(
         self, facts: PlanFacts, decision: Decision[StudyProposal], recorder: CallRecorder
@@ -1146,11 +1682,21 @@ class Planner:
         cost: int | None,
         revisions: list[str],
         differences: tuple[str, ...] = (),
+        *,
+        goal: str,
     ) -> PlanResult:
         within = cost is not None and cost <= facts.budget_simulator_runs and validation.valid
+        warnings = design_warnings(decision.value)
+        by_model = decision.decided_by == "model"
+        if not decision.value.methods and (
+            missed := missed_comparison_warning(facts, goal, by_model=by_model)
+        ):
+            warnings.append(missed)
+        if dropped := dropped_auxiliaries_warning(facts, goal, decision.value):
+            warnings.append(dropped)
         return PlanResult(
             facts, decision.value, spec, validation, cost, within, decision.decided_by,
-            decision.reason, decision.trace, tuple(revisions), differences,
+            decision.reason, decision.trace, tuple(revisions), differences, tuple(warnings),
         )  # fmt: skip
 
 

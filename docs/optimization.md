@@ -286,6 +286,8 @@ uv run apex optimize examples/optimization/3well/enopt.toml --max-iterations 3
 
 A successful run prints its progress and writes `history.jsonl` and `result.json` as in step 1. Here the objective is −NPV in millions, so it becomes more negative as NPV improves. Simulation folders are in `simulations/eval_<id>/`.
 
+The notebook `examples/optimization/3well/optimization_demo.ipynb` walks through this case step by step: it validates and runs it as a job, plots the NPV and the controls at each accepted step, compares the field's oil and water at the initial and final controls, recomputes the NPV year by year from the simulated totals, and reruns with more iterations.
+
 **How the deck reads the controls.** The template is a Mako file. A control block named `injbhp` (after the parameterization in step 4) is a list with one value per report step. A sketch of an injector record per report step:
 
 ```mako

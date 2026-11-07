@@ -20,7 +20,7 @@ import {
   streamed,
   switchNote,
 } from "./components/Chat";
-import { answeredBy } from "./components/Agents";
+import { answeredBy, methodLine, planShape } from "./components/Agents";
 import { contributedLinks } from "./contributed";
 import { deletionLines, sizeText } from "./components/Delete";
 import { fmt, metricLabels,
@@ -451,6 +451,21 @@ describe("the agents' buttons", () => {
     expect(answeredBy({ decided_by: "rules", reason: "no model (no key): the rules answered" })).toBe(
       "the agent's rules (no model (no key): the rules answered)",
     );
+  });
+
+  it("show a planned study's compared methods, not only its variants (H32)", () => {
+    const variants = [{ name: "base", patch: {}, rationale: "each algorithm as given" }];
+    const methods = {
+      esmda: { name: "esmda", engine: "apex", options: { inflation: [4, 4] }, strategy: { name: "approx" } },
+      gies: { name: "gies", engine: "apex" },
+      ert_es_mda: { name: "es_mda", engine: "ert", options: { weights: [4] } },
+    };
+    expect(planShape({ methods, variants, replicates: 2 })).toBe("3 method(s) × 1 variant(s) × 2 replicate(s)");
+    expect(planShape({ methods: {}, variants, replicates: 2 })).toBe("1 variant(s) × 2 replicate(s)");
+    expect(planShape({ variants, replicates: 1 })).toBe("1 variant(s) × 1 replicate(s)");
+    expect(methodLine("esmda", methods.esmda)).toBe('esmda: esmda, strategy approx {"inflation":[4,4]}');
+    expect(methodLine("gies", methods.gies)).toBe("gies: gies");
+    expect(methodLine("ert_es_mda", methods.ert_es_mda)).toBe('ert_es_mda: es_mda on ert {"weights":[4]}');
   });
 
   it("ask the agent routes, with the model only when asked", async () => {

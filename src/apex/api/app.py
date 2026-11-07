@@ -42,7 +42,7 @@ from apex.api.extensions import RouteContext, UiPage, install_routes, ui_pages
 from apex.api.guard import Denied, Guard
 from apex.api.scrub import STATE_KEY, GuestPaths
 from apex.core.engines import EngineMethod
-from apex.core.errors import ApexError, ConfigError, validation_problems
+from apex.core.errors import ApexError, ConfigError, PlanningRefused, validation_problems
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.optimization import OptimizationConfig
 from apex.domain.optimization_study import OptimizationStudySpec
@@ -650,6 +650,11 @@ def create_app(
     @app.exception_handler(ConfigError)
     async def on_config(request: Request, error: ConfigError) -> JSONResponse:
         return _problem(422, "Invalid configuration", str(error))
+
+    @app.exception_handler(PlanningRefused)
+    async def on_planning_refused(request: Request, error: PlanningRefused) -> JSONResponse:
+        # A ConfigError for callers, but no configuration is wrong: the goal does not fit.
+        return _problem(422, "Cannot plan within the budget", str(error))
 
     @app.exception_handler(ApexError)
     async def on_apex(request: Request, error: ApexError) -> JSONResponse:
@@ -1381,8 +1386,11 @@ class DeletionBody(_Body):
 class ChatBody(_Body):
     """``POST /v1/chats``."""
 
-    title: str = Field(default="Chat", max_length=200)
-    context: dict[str, str] = Field(default_factory=dict)
+    title: str = Field(default="Chat", max_length=200, description="The chat's title.")
+    context: dict[str, str] = Field(
+        default_factory=dict,
+        description="Where the chat was started (the web UI sends its page, e.g. a run id).",
+    )
 
 
 class LaunchedBody(_Body):
@@ -1400,8 +1408,11 @@ class LaunchedBody(_Body):
 class MessageBody(_Body):
     """``POST /v1/chats/{id}/messages``: a user message, with the page it was sent from."""
 
-    text: str = Field(min_length=1, max_length=20_000)
-    context: dict[str, str] = Field(default_factory=dict)
+    text: str = Field(min_length=1, max_length=20_000, description="The user's message.")
+    context: dict[str, str] = Field(
+        default_factory=dict,
+        description="The page it was sent from (e.g. the run or study shown), as text.",
+    )
     model: str | None = Field(
         default=None, max_length=32,
         description="A model of GET /v1/chats/models for this answer (the owner's choice).",
@@ -1833,14 +1844,22 @@ def _agent_routes(
             current = None
         space.write(shown, result.toml(space, target.parent), current)
         p = result.proposal
+        # The compared algorithms too (the release tester's H32: a comparison of two
+        # methods read "1 variant(s) x 2 replicate(s)"); an optimization study's are
+        # optimizers (name and options).
+        methods = {
+            label: entry.model_dump(mode="json", exclude_none=True)
+            for label, entry in p.methods.items()
+        }
         return {
-            "draft": shown, "study": p.name, "hypothesis": p.hypothesis,
+            "draft": shown, "study": p.name, "hypothesis": p.hypothesis, "methods": methods,
             "variants": [v.model_dump() for v in p.variants], "replicates": p.replicates,
             "cost": result.cost, "budget": result.facts.budget_simulator_runs,
             "within_budget": result.within_budget, "decided_by": result.decided_by,
             "reason": note or result.reason, "revisions": list(result.revisions),
             # An optimization study's plan compares no algorithms (OptimizationPlanResult).
             "differences": list(getattr(result, "differences", ())),
+            "warnings": list(getattr(result, "warnings", ())),
         }  # fmt: skip
 
 
@@ -1930,6 +1949,11 @@ def _chat_routes(
 
     @app.post("/v1/chats", status_code=201)
     def create_chat(body: ChatBody, who: Who) -> dict[str, Any]:
+        """Start a chat with the assistant; it is the user's own. Body: ``title``, ``context``.
+
+        Returns the chat (``id``, ``title``, ``owner``, ...); send it messages with ``POST
+        /v1/chats/{id}/messages``. Request and response schemas: ``GET /openapi.json``.
+        """
         return dataclasses.asdict(store.create(body.title, body.context, owner=who.chat_owner))
 
     @app.get("/v1/chats/models")
@@ -1957,10 +1981,12 @@ def _chat_routes(
 
     @app.get("/v1/chats")
     def chats(who: Who) -> list[dict[str, Any]]:
+        """List the user's own chats, without their messages."""
         return [dataclasses.asdict(c) for c in store.chats() if who.owns_chat(c.owner)]
 
     @app.get("/v1/chats/{chat_id}")
     def chat(chat_id: str, who: Who) -> dict[str, Any]:
+        """Return a chat with its ``messages`` and the action cards it proposed."""
         mine(chat_id, who)
         return {
             **dataclasses.asdict(store.get(chat_id)),
@@ -2005,6 +2031,7 @@ def _chat_routes(
 
     @app.post("/v1/chats/{chat_id}/proposals/{n}:discard")
     def discard(chat_id: str, n: int, who: Who) -> dict[str, Any]:
+        """Discard a pending proposal (an action card) of the chat; nothing is submitted."""
         mine(chat_id, who)
         try:
             proposal = store.settle(chat_id, n, "discarded")
@@ -2015,12 +2042,20 @@ def _chat_routes(
 
     @app.delete("/v1/chats/{chat_id}", status_code=204)
     def delete_chat(chat_id: str, who: Who) -> Response:
+        """Delete one of the user's chats and its history."""
         mine(chat_id, who)
         store.delete(chat_id)
         return Response(status_code=204)
 
     @app.post("/v1/chats/{chat_id}/messages", status_code=202)
     def message(chat_id: str, body: MessageBody, who: Who) -> dict[str, Any]:
+        """Send the assistant a message; it answers in the background (202).
+
+        Body: ``text``; ``context``, the page it was sent from; ``model``, one of ``GET
+        /v1/chats/models`` (the owner's choice). Returns the chat's id and its events' URL:
+        read the answer from ``GET /v1/chats/{id}/events``. 409 while it is still answering,
+        400 when the chat is closed.
+        """
         mine(chat_id, who)
         model = None
         picked = _model_choice(service, who)
@@ -2063,6 +2098,11 @@ def _chat_routes(
         accept: Annotated[str | None, Header()] = None,
         last_event_id: Annotated[str | None, Header()] = None,
     ) -> Response | dict[str, Any]:
+        """Return the chat's events from ``since``: the answer's text, tool calls, proposals.
+
+        JSON (``events``, ``next_since``, ``busy``) to poll, or a server-sent event stream with
+        ``Accept: text/event-stream`` (resumed from ``Last-Event-ID``).
+        """
         mine(chat_id, who)
         if last_event_id is not None and last_event_id.isdigit():
             since = int(last_event_id) + 1

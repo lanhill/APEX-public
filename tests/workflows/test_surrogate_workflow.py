@@ -634,9 +634,11 @@ def test_a_check_failing_on_too_few_runs_becomes_the_last_check(tmp_path: Path) 
 
 def test_a_plugins_fit_error_names_the_plugin_and_its_options(tmp_path: Path) -> None:
     write_case(tmp_path)
-    with pytest.raises(ConfigError, match=r"'test_affine_build' \(ridge = 'x'\) cannot be fitted: "
-                       r".*TypeError"):  # fmt: skip
-        surrogates.build(write_build(tmp_path, options='{ ridge = "x" }'))
+    # Options of the wrong type are refused before any run now (test_a_build_refuses_an_
+    # unknown_model_or_bad_options_before_any_run); an error inside the fit names the options.
+    with pytest.raises(ConfigError, match=r"'test_affine_build' \(fail = True\) cannot be "
+                       r"fitted: ValueError: asked to fail"):  # fmt: skip
+        surrogates.build(write_build(tmp_path, options="{ fail = true }"))
 
 
 def test_checks_completing_at_once_get_distinct_order_numbers(tmp_path: Path) -> None:
@@ -873,6 +875,97 @@ def test_an_adaptive_build_survives_a_crash_between_its_writes(tmp_path: Path) -
 
 class _NeedsStd(_FarthestFirst):
     uses = ("predict_std",)
+
+
+def test_validate_reports_bad_keys_and_an_unknown_plugin_together(tmp_path: Path) -> None:
+    # The release tester's case: the linear-Gaussian example's keys are labels (t0, ...),
+    # and the model is not installed. `apex validate` stopped at the plugin, so the keys'
+    # error only came from `apex surrogate build`; both are said at once now.
+    example = Path(__file__).parents[2] / "examples" / "linear_gaussian"
+    shutil.copytree(example, tmp_path / "case")
+    build = tmp_path / "build.toml"
+    build.write_text(
+        '[surrogate]\nname = "lg"\nmodel = "no_such_model"\nseed = 1\n'
+        '[case]\nconfig_file = "case/config_esmda.toml"\n'
+        '[design]\nplan = "prior"\ntraining = 4\nheld_out = 2\n'
+    )
+
+    with pytest.raises(ConfigError) as error:
+        surrogates.plan_build(surrogates.load_surrogate_config(build))
+    assert "unknown surrogate_models plugin 'no_such_model'" in str(error.value)
+    assert "step indices or ISO dates" in str(error.value)
+    assert "'t0'" in str(error.value)
+    planned = CliRunner().invoke(app, ["validate", str(build)])
+    assert planned.exit_code == 1
+    assert "no_such_model" in planned.output
+    assert "step indices or ISO dates" in planned.output
+
+
+def test_validate_reports_an_unknown_design_plan_with_bad_keys(tmp_path: Path) -> None:
+    write_case(tmp_path, times=("t0", "t1"))
+    build = write_build(tmp_path, design='plan = "nope"\ntraining = 4\nheld_out = 2')
+
+    with pytest.raises(ConfigError) as error:
+        surrogates.plan_build(surrogates.load_surrogate_config(build))
+    assert "unknown design plan 'nope'" in str(error.value)
+    assert "step indices or ISO dates" in str(error.value)
+
+
+def test_a_build_refuses_an_unknown_model_or_bad_options_before_any_run(tmp_path: Path) -> None:
+    # The model used to be created only at the fit, after the whole design had run.
+    write_case(tmp_path)
+    for model, options, refusal in (
+        ("no_such_model", "{}", "unknown surrogate_models plugin 'no_such_model'"),
+        ("test_affine_build", "{ lambda = 1 }", "lambda: Extra inputs"),
+    ):
+        path = write_build(tmp_path, name="refused", options=options)
+        path.write_text(path.read_text().replace('"test_affine_build"', f'"{model}"'))
+        with pytest.raises(ConfigError, match=refusal):
+            surrogates.build(path)
+        # Its folder holds at most the build's lock: no design, no run, no journal.
+        held = {p.name for p in (tmp_path / "runs" / "refused").glob("*")}
+        assert held <= {"run.lock"}, held
+    # A resume is checked as well, before it runs the rest of the design.
+    first = surrogates.build(write_build(tmp_path, name="resumed"), max_runs=3)
+    journal = (first.path / JOURNAL).read_text()
+    saved = json.loads((first.path / "config.json").read_text())
+    saved["surrogate"]["model"] = "no_such_model"
+    (first.path / "config.json").write_text(json.dumps(saved))
+    with pytest.raises(ConfigError, match="no_such_model"):
+        surrogates.resume_build(first.path)
+    assert (first.path / JOURNAL).read_text() == journal
+
+
+def test_a_complete_build_returns_its_summary_after_its_plugin_is_uninstalled(
+    tmp_path: Path,
+) -> None:
+    # The refusal of an unknown plugin before any run must not hide a finished build: its
+    # summary needs no plugin. (Its configuration unchanged: a build of another model, as a
+    # config.json switched to one, is another fit, refitted or refused, not this build.)
+    write_case(tmp_path)
+    path = write_build(tmp_path, name="gone")
+    path.write_text(path.read_text().replace('"test_affine_build"', '"test_affine_gone"'))
+    surrogate_models.register("test_affine_gone")(_Affine)
+    try:
+        built = surrogates.build(path)
+    finally:
+        surrogate_models.remove("test_affine_gone")
+    assert built.complete
+
+    def contents() -> dict[Path, bytes]:
+        # run.lock records when each call took the folder's lock: not the build's content.
+        return {
+            p: p.read_bytes() for p in built.path.rglob("*") if p.is_file() and p.name != "run.lock"
+        }
+
+    files = contents()
+    assert surrogates.build(path).summary == built.summary
+    assert surrogates.resume_build(built.path).summary == built.summary
+    assert contents() == files
+    # Not complete (its model files gone): the plugin is needed, so it is refused.
+    (built.path / "model" / "surrogate.npz").unlink()
+    with pytest.raises(ConfigError, match="unknown surrogate_models plugin 'test_affine_gone'"):
+        surrogates.build(path)
 
 
 def test_validation_refuses_a_plan_or_surrogate_before_any_run(tmp_path: Path) -> None:

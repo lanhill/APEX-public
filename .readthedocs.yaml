@@ -1,5 +1,5 @@
-# The documentation on Read the Docs (the user, 2026-11-06): a version of the site per
-# release. The same build as GitHub Pages: the locked environment (its default groups include
+# The documentation on Read the Docs (the user, 2026-11-06): the latest documentation, built
+# from the default branch. The same build as GitHub Pages: the locked environment (its default groups include
 # the docs tools) and mkdocs.yml, the public pages only.
 version: 2
 

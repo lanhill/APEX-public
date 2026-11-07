@@ -39,6 +39,16 @@ def test_unknown_name_lists_available_plugins() -> None:
         registry.create("missing")
 
 
+def test_unknown_name_in_an_empty_registry_says_none_is_installed() -> None:
+    # A public user with no surrogate plugin saw "available: " and nothing after it.
+    registry: Registry[Method] = Registry("test_empty_methods")
+
+    with pytest.raises(UnknownPluginError, match=r"available: none installed$"):
+        registry.create("missing")
+    with pytest.raises(UnknownPluginError, match=r"available: none installed$"):
+        registry.factory("missing")
+
+
 def test_entry_point_group_follows_kind() -> None:
     assert Registry[Method]("methods").entry_point_group == "apex.methods"
 

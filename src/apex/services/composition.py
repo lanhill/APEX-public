@@ -1465,6 +1465,14 @@ def build_model_error(
         model = model_error_models.create(section.name, **section.options)
     except PluginError as error:
         raise ConfigError(f"[model_error]: {error}") from error
+    # A model may read what only some simulators write (e.g. a control-mode vector whose
+    # codes it has verified for those): it refuses the others here, before anything runs.
+    check = getattr(model, "check_simulator", None)
+    if callable(check):
+        try:
+            check(config.simulator.name, dict(config.simulator.options))
+        except ValueError as error:
+            raise ConfigError(f"[model_error] {section.name}: {error}") from error
     sizes = {v.name: v.size for v in layout.variables}
     name = model.state_variable
     if name not in sizes:
@@ -1492,7 +1500,10 @@ def build_model_error(
         and (config.method.strategy.options or {}).get("sensitivities")
     ):
         raise ConfigError("[model_error] cannot be combined with the adjoint update")
-    model.fit(observations)
+    try:
+        model.fit(observations)
+    except ValueError as error:  # e.g. an output the observations no longer hold
+        raise ConfigError(f"[model_error] {section.name}: {error}") from error
     return model
 
 

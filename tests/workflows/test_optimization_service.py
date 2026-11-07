@@ -479,3 +479,20 @@ def test_a_study_over_its_budget_or_with_a_derivative_optimizer_is_refused_with_
     [refusal] = over.errors
     assert "Runs per replicate: toy/enopt/base " in refusal
     assert "3 replicates). To fit:" in refusal
+
+
+def test_a_relative_services_root_places_runs_at_absolute_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A notebook's ``Client(Path("apex_home"))`` (2026-11-07): the run folder was relative,
+    and OPM Flow, started in the member's folder, could not find the rendered deck."""
+    monkeypatch.chdir(tmp_path)
+    service = ApexService(Path("home"), max_concurrent_jobs=1)
+    assert service.root == tmp_path / "home"
+    assert service.jobs.root == tmp_path / "home"
+
+    handle = service.submit_optimization(_config(), base_dir=tmp_path)
+    assert service.wait(handle.id, timeout_s=TIMEOUT, poll_s=0.2).state == "complete"
+    [row] = service.optimizations()
+    assert Path(row["path"]).is_absolute()
+    assert Path(row["path"]).is_relative_to(tmp_path / "home")

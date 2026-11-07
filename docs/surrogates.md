@@ -4,6 +4,9 @@ audience: public
 
 # Surrogate models
 
+!!! note "No surrogate model plugin is included yet"
+    APEX's core ships the surrogate interface and the workflows on this page, but no surrogate model plugin yet: models come from installed packages, and `apex plugins` lists those in the registry `surrogate_models`. A model implements the protocol `apex.core.surrogates.SurrogateModel` and is registered through the entry-point group `apex.surrogate_models`; to write one, see [Writing and registering your own plugin](getting_started/writing_a_plugin.md).
+
 ## Goal
 
 A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs. After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator. You can also build one over an optimization's controls and optimize with it, the simulator checking its accepted steps and evaluating the optimum.
@@ -358,5 +361,11 @@ options = { variable = "bhp", output = "bhp_steps", knots = [0, 60], n_steps = 1
 - **Simulators:** a deck simulator reads the controls in its template. A batch simulator that writes only its declared parameters (ERT's) is refused.
 - **A scenario is part of the prediction:** another scenario is another prediction, so give it another name. A prediction without `[controls]` is unchanged.
 - **Where they belong in the deck:** only after the history, so that the history check still reproduces the run. Template expressions are rendered in the deck template itself, not in the files it includes, so write the forecast's schedule in the template.
-- **With a surrogate:** not yet. A prediction with both `[controls]` and `[surrogate]` is refused until a model built over controls can be checked against the scenario.
+- **With a surrogate:** the model must be built over the controls, on an optimization-shaped case of the forecast:
+  - the prediction's deck template and simulator options;
+  - its `[[controls.variables]]` with bounds, and their parameterizations;
+  - the run's realizations as `[model] realizations_file` (e.g. its posterior);
+  - outputs `{ vectors, times }` over the history's report times and the forecast's: the history check compares the history's.
+
+  The design varies the controls jointly with the realizations. The prediction then checks that the model's inputs are the run's state (after its parameterizations) and the scenario's controls (after theirs), by name and size, and that each control, as the model sees it (after the parameterizations), lies within the range the design spanned, entry by entry: a surrogate does not extrapolate the controls, and another schedule can put the same values elsewhere. The model's manifest records those inputs and ranges, so a copied model needs no build directory. A model built without controls is refused with a scenario, and a model built over controls without one. The realizations are checked by name and size only: that they are the run's (and not another run's of the same shape) is the user's choice, and members far from them are outside the model's domain. The model has to take the controls as inputs over time to follow a change of schedule.
 

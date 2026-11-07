@@ -163,17 +163,6 @@ def test_a_control_named_as_a_state_variable_is_refused(finished: object) -> Non
         prediction.predict(path)
 
 
-def test_controls_with_a_surrogate_are_refused_until_checked(finished: object) -> None:
-    path, _ = _prediction(
-        finished,
-        '[[controls.variables]]\nname = "u"\nvalues = [1.0, 1.0]\n\n'
-        '[surrogate]\nmodel_file = "missing/surrogate.json"\n',
-    )
-
-    with pytest.raises(ConfigError, match=r"\[controls\] cannot use \[surrogate\] yet"):
-        prediction.predict(path)
-
-
 def test_an_unknown_control_parameterization_is_named(finished: object) -> None:
     path, _ = _prediction(
         finished,

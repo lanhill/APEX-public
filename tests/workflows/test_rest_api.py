@@ -346,6 +346,25 @@ def test_the_openapi_document_describes_the_models(http: TestClient) -> None:
     assert set(schemas["JobStatus"]["properties"]) >= {"id", "state", "children"}
 
 
+def test_the_chat_routes_say_what_they_take_and_answer(http: TestClient) -> None:
+    """Release tester H33: the generated REST reference showed the chat routes' names only.
+    Each says what it does in the OpenAPI document, and a message's fields are described."""
+    document = http.get("/openapi.json").json()
+    paths = document["paths"]
+    routes = [
+        ("/v1/chats", "post"), ("/v1/chats", "get"), ("/v1/chats/{chat_id}", "get"),
+        ("/v1/chats/{chat_id}", "delete"), ("/v1/chats/{chat_id}/messages", "post"),
+        ("/v1/chats/{chat_id}/events", "get"),
+        ("/v1/chats/{chat_id}/proposals/{n}:discard", "post"),
+    ]  # fmt: skip
+    for path, method in routes:
+        assert paths[path][method].get("description"), (method, path)
+    message = paths["/v1/chats/{chat_id}/messages"]["post"]["description"]
+    assert "/v1/chats/{id}/events" in message
+    fields = document["components"]["schemas"]["MessageBody"]["properties"]
+    assert all(fields[name].get("description") for name in ("text", "context", "model"))
+
+
 def test_a_grant_lets_a_large_submission_through_over_http(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:

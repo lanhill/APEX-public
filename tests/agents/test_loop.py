@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from apex.agents.loop import TRIMMED, AgentLoop, Fallback, LoopSettings, result_excerpt
 from apex.agents.providers.stub import StubProvider, StubRequest
 from apex.agents.trace import CallRecorder, request_hash
-from apex.core.llm import Completion, LLMInvalidOutput, LLMTimeout, ToolCall
+from apex.core.llm import Completion, LLMInvalidOutput, LLMTimeout, Message, ToolCall
 from apex.services.api import ApexService
 from apex.services.tools import TOOLS, ToolSession, call
 
@@ -265,9 +265,123 @@ def test_the_oldest_tool_results_are_trimmed_to_fit_the_context(tmp_path: Path) 
 
     assert not outcome.fell_back
     results = [m for m in seen[0].messages if m.role == "tool"]
-    assert results[0].content == TRIMMED  # the oldest went
-    assert results[1].content != TRIMMED  # the newest stayed
+    oldest = json.loads(results[0].content)
+    assert "shortened" in oldest["trimmed"]  # the oldest cut to its leading fields
+    assert "result.plugins" in oldest["trimmed"]  # ... saying what went
+    assert results[1].content != TRIMMED  # the newest stayed whole
     assert json.loads(results[1].content)["ok"]
+
+
+def _plan(warning: str, filler: str) -> Message:
+    """A plan_study-like result: what matters first, its long arms last."""
+    result = {"cost": "120 simulator runs", "design_warnings": [warning],
+              "approval": "needs approval", "methods": filler * 20_000}  # fmt: skip
+    return Message("tool", json.dumps({"ok": True, "result": result}), (), "c", "plan_study")
+
+
+@pytest.mark.parametrize(("room", "dropped"), [(26_000, False), (3_000, True)])
+def test_older_results_keep_their_leading_fields_before_any_is_dropped(
+    tmp_path: Path, room: int, dropped: bool
+) -> None:
+    """Coder's follow-up to #288 (2026-11-07): on a 32k context a turn with two plans
+    dropped the first plan's result whole, warnings included, before the model stated them.
+    Older results are first cut to their leading fields; only if that is not enough is one
+    dropped, oldest first."""
+    stub = StubProvider([ANSWER], max_context=1_000 + int(room / 1.5))
+    loop = AgentLoop(stub, CallRecorder(tmp_path / "run", "advisor"),
+                     settings=LoopSettings(max_tokens=1_000))  # fmt: skip
+    first, second = _plan("3 replicates are too few", "x"), _plan("one seed only", "y")
+    messages = [Message("user", "Plan it."), first, second]
+
+    fitted = loop._fit(messages)
+
+    if dropped:
+        assert fitted[1].content == TRIMMED
+        newest = json.loads(fitted[2].content)  # then the newest is cut too, not dropped
+        assert newest["result"]["design_warnings"] == ["one seed only"]
+        assert "result.methods" in newest["trimmed"]
+    else:
+        oldest = json.loads(fitted[1].content)
+        assert oldest["result"]["design_warnings"] == ["3 replicates are too few"]
+        assert oldest["result"]["cost"] == "120 simulator runs"
+        assert "result.methods" in oldest["trimmed"]
+        assert fitted[2] == second
+
+
+def test_a_small_older_result_goes_before_the_latest_is_cut(tmp_path: Path) -> None:
+    """Review of the follow-up: the plan the model has just made must not lose its arms
+    while an older result could go (the chat's draft-and-propose test was just over
+    budget: the old loop dropped a 368-character refusal and kept the plan whole)."""
+    refusal = Message("tool", json.dumps({"ok": False, "error": "over the budget " * 100}), (), "a")
+    plan = _plan("one seed only", "y")
+    room = len(plan.content) + 400  # the plan, the question and the call, not the refusal
+    stub = StubProvider([ANSWER], max_context=1_000 + int(room / 1.5))
+    loop = AgentLoop(stub, CallRecorder(tmp_path / "run", "advisor"),
+                     settings=LoopSettings(max_tokens=1_000))  # fmt: skip
+    asked = Message("assistant", "", (ToolCall("b", "plan_study", {}),))
+
+    for after in ([], [Message("user", "This is your last turn.")]):  # the last turn too
+        fitted = loop._fit([Message("user", "Plan it."), refusal, asked, plan, *after])
+
+        assert fitted[1].content == TRIMMED
+        assert fitted[3] == plan
+
+
+def test_a_result_is_shortened_once_and_keeps_what_it_is_told() -> None:
+    """Review of the follow-up: a cut result was cut again on later turns, losing its list
+    of cut fields or its whole result; a repeated call's hint went with the result."""
+    from apex.agents.loop import SHORTENED_CHARS, _shortened
+
+    result = {"cost": "c" * 1_900, "design_warnings": ["one seed only"], "methods": "m" * 5_000}
+    content = json.dumps({"ok": True, "result": result, "repeated": "you made this call twice"})
+
+    once = _shortened(content)
+
+    assert once is not None
+    value = json.loads(once)
+    assert value["repeated"] == "you made this call twice"
+    assert value["result"]["cost"] == result["cost"]
+    assert "result.methods" in value["trimmed"]
+    assert len(once) < SHORTENED_CHARS + 400
+    assert _shortened(once) is None  # cut once only
+
+
+def test_the_latest_results_go_whole_only_when_nothing_else_fits(tmp_path: Path) -> None:
+    """The last stage: the plan alone does not fit even when cut."""
+    plan = _plan("one seed only", "y")
+    stub = StubProvider([ANSWER], max_context=1_000 + int(500 / 1.5))
+    loop = AgentLoop(stub, CallRecorder(tmp_path / "run", "advisor"),
+                     settings=LoopSettings(max_tokens=1_000))  # fmt: skip
+
+    fitted = loop._fit([Message("user", "Plan it."), plan])
+
+    assert fitted[1].content == TRIMMED
+
+
+def test_a_preview_fits_once_encoded() -> None:
+    """Review: previews were measured before JSON encoding (non-ASCII text, quotes)."""
+    from apex.agents.loop import SHORTENED_CHARS, _shortened
+
+    for value in ({"a": "æ" * 3_000}, {"a": ["x"] * 2_000}):
+        shortened = _shortened(json.dumps(value))
+        assert shortened is not None
+        assert len(shortened) < SHORTENED_CHARS + 300
+
+
+def test_a_huge_first_field_or_a_list_keeps_a_preview() -> None:
+    """Review of the follow-up: a result whose first field is huge became empty."""
+    from apex.agents.loop import _shortened
+
+    for result in ({"plugins": ["p" * 30] * 500}, ["p" * 30] * 500):
+        shortened = _shortened(json.dumps({"ok": True, "result": result}))
+        assert shortened is not None
+        value = json.loads(shortened)
+        preview = value["result"]["plugins"] if isinstance(result, dict) else value["result"]
+        assert preview.startswith('["ppp')
+        assert preview.endswith("...(cut)")
+    error = _shortened(json.dumps({"ok": False, "error": "e" * 5_000}))
+    assert error is not None
+    assert json.loads(error)["error"].startswith("eee")
 
 
 def test_no_model_bypasses_approval(tmp_path: Path) -> None:

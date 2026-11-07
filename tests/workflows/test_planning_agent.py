@@ -26,6 +26,7 @@ from apex.agents.planner import (
 )
 from apex.agents.providers.stub import StubProvider
 from apex.cli.main import app
+from apex.domain.study import MethodEntry
 from apex.services.api import ApexService
 from apex.services.study import load_study
 
@@ -662,3 +663,412 @@ def test_a_multilevel_arm_is_refused_without_two_levels_in_one_message(
     proposal = _methods_proposal({"ml": own, "esmda": ESMDA4})
     assert level_problems(mine, proposal) == []
     assert not any(d.startswith("every level") for d in method_differences(mine, proposal))
+
+
+# ------------------------------------------------- method comparisons (release tester H32)
+
+#: The goal of H32: two algorithms named, a question about the fit for the same budget.
+COMPARE_GOAL = (
+    "Compare ES-MDA with GIES on this case: which fits the data better for the same budget?"
+)
+#: One replicate of ES-MDA (the case's 100 runs) and GIES (its default iteration limit, 241
+#: runs at 20 members): the comparison's cost per replicate.
+PER_COMPARISON = PER_RUN + 241
+
+
+def _switching_proposal() -> str:
+    """A refused design of H32: a variant switches method.name (algorithms are methods)."""
+    return _proposal(2, gies={"method": {"name": "gies"}})
+
+
+def _comparison_proposal(replicates: int) -> str:
+    proposal = _methods_proposal({"esmda": ESMDA4, "gies": {"name": "gies"}})
+    return proposal.model_copy(update={"replicates": replicates}).model_dump_json(exclude_none=True)
+
+
+def test_a_refused_method_comparison_falls_back_to_the_comparison_within_the_budget(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """H32, run 1: the model's ES-MDA against GIES design was refused only for its budget
+    (and two others for switching method.name); the rules then planned baseline against
+    adaptive localization, with no GIES. The fallback keeps the comparison, as complete
+    method entries, with the replicates the budget allows."""
+    case = linear_case(ensemble_size=MEMBERS)
+    stub = StubProvider([_switching_proposal(), _comparison_proposal(10),
+                         _switching_proposal()])  # fmt: skip
+
+    result = Planner(_service(tmp_path), stub).plan(case.config, COMPARE_GOAL, budget=1000)
+
+    assert result.decided_by == "fallback"
+    assert len(result.revisions) == 3
+    assert set(result.proposal.methods) == {"esmda", "gies"}
+    assert all("name" not in v.patch.get("method", {}) for v in result.proposal.variants)
+    assert result.proposal.replicates == 1000 // PER_COMPARISON
+    assert result.cost == result.proposal.replicates * PER_COMPARISON
+    assert result.within_budget
+    assert result.validation.valid, result.validation.errors
+    assert {m.name for m in result.spec.study.methods.values()} == {"esmda", "gies"}
+    assert "esmda" in (result.reason or "")
+    assert "gies" in (result.reason or "")
+    trace = json.loads(result.trace.read_text())
+    assert trace["decided_by"] == "fallback"
+
+
+def test_a_goal_naming_methods_is_compared_when_no_proposal_had_methods(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The goal names the algorithms: with every proposal refused, or without a model, the
+    rules compare them, the case's own algorithm as configured and the other its own base."""
+    case = linear_case(ensemble_size=MEMBERS)
+    service = _service(tmp_path)
+
+    fallback = Planner(service, StubProvider([_switching_proposal()] * 3)).plan(
+        case.config, COMPARE_GOAL, budget=1000
+    )
+    rules_only = Planner(service, None).plan(case.config, COMPARE_GOAL, budget=1000)
+
+    for result in (fallback, rules_only):
+        assert set(result.proposal.methods) == {"esmda", "gies"}
+        assert result.proposal.methods["esmda"].options == {"inflation": [4, 4, 4, 4]}
+        assert result.proposal.methods["gies"].options == {}
+        assert result.within_budget
+    assert (fallback.decided_by, rules_only.decided_by) == ("fallback", "rules")
+    # A goal that names no algorithm is planned as before.
+    assert Planner(service, None).plan(case.config, "compare", budget=1000).proposal.methods == {}
+
+
+def test_a_method_comparison_that_cannot_fit_the_budget_is_refused_not_replaced(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """H32: no other study is substituted for the comparison asked; the refusal says why."""
+    from apex.core.errors import ConfigError
+
+    case = linear_case(ensemble_size=MEMBERS)
+    service = _service(tmp_path)
+    stub = StubProvider([_comparison_proposal(2)] * 3)
+
+    for provider in (stub, None):
+        with pytest.raises(ConfigError, match="within the budget of 300") as error:
+            Planner(service, provider).plan(case.config, COMPARE_GOAL, budget=300)
+        assert f"one replicate takes {PER_COMPARISON}" in str(error.value)
+        assert "gies" in str(error.value)
+
+
+def test_the_fallbacks_hypothesis_describes_the_study_written(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """H32: the fallback printed the goal's question as the hypothesis of a study that did
+    not test it. The hypothesis says what the written study compares."""
+    case = linear_case(ensemble_size=MEMBERS)
+    goal = "Which data should I trust more for this field?"
+    over = _proposal(5, localized=LOCALIZED)
+
+    result = Planner(_service(tmp_path), StubProvider([over] * 3)).plan(
+        case.config, goal, budget=600
+    )
+
+    assert result.decided_by == "fallback"
+    assert goal not in result.proposal.hypothesis
+    assert "adaptive_localization" in result.proposal.hypothesis
+    assert "baseline" in result.proposal.hypothesis
+    compared = Planner(_service(tmp_path), None).plan(case.config, COMPARE_GOAL, budget=1000)
+    assert COMPARE_GOAL not in compared.proposal.hypothesis
+    assert "esmda" in compared.proposal.hypothesis
+    assert "gies" in compared.proposal.hypothesis
+
+
+def test_the_command_lists_the_compared_methods(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H32, run 2: the model's ES-MDA against GIES design was accepted, but the command
+    printed only "1 variant(s) x 2 replicate(s) / baseline"."""
+    from apex.agents.loop import LoopSettings
+    from apex.cli import agent_commands
+
+    case = linear_case(ensemble_size=MEMBERS)
+    service = _service(tmp_path)
+    stub = StubProvider([_comparison_proposal(2)])
+    monkeypatch.setattr(agent_commands, "_provider_and_settings",
+                        lambda *a, **k: (stub, LoopSettings(max_turns=6)))  # fmt: skip
+
+    result = CliRunner().invoke(
+        app,
+        ["agent", "plan", str(case.config), "--goal", COMPARE_GOAL, "--budget", "1000",
+         "--out", str(tmp_path / "planned.toml"), "--root", str(service.root)],
+    )  # fmt: skip
+
+    assert result.exit_code == 0, result.output
+    assert "2 method(s) x 1 variant(s) x 2 replicate(s)" in result.stdout
+    assert "method esmda: esmda" in result.stdout
+    assert "method gies: gies" in result.stdout
+
+
+# ------------------------------------- method comparisons: the review of c4ed2b72 (H32)
+
+ESMDA_CASE = 'name = "esmda"\noptions = { inflation = [4, 4, 4, 4] }'
+
+
+@pytest.mark.parametrize(
+    ("method", "goal"),
+    [
+        (ESMDA_CASE, "Does adaptive localization help ES?"),
+        (ESMDA_CASE, "Which localization suits this case? We used GIES before, not again."),
+        (ESMDA_CASE, "Should I chop the ensemble size to save runs?"),
+        ('name = "gies"\nmax_iterations = 3', "Tune GIES damping like ES-MDA's schedule"),
+        (ESMDA_CASE, "Compare localizations, not GIES"),
+        (ESMDA_CASE, "Compare localizations against ES-MDA's own schedule"),
+        (ESMDA_CASE, "Compare the localizations without LM-EnRML"),
+    ],
+)
+def test_a_goal_that_only_mentions_a_method_keeps_its_plan(
+    tmp_path: Path, linear_case: CaseFactory, method: str, goal: str
+) -> None:
+    """The review's M1: a method named as background, negated, possessive or "like X", or
+    with no comparison word, is no method comparison; the rules plan as before."""
+    case = linear_case(ensemble_size=MEMBERS, method=method)
+
+    result = Planner(_service(tmp_path), None).plan(case.config, goal, budget=1000)
+
+    assert result.proposal.methods == {}
+    assert "adaptive_localization" in [v.name for v in result.proposal.variants]
+
+
+#: Goals and the arms the rules read in them, on an ES-MDA case (or GIES's, "gies:"):
+#: sentence by sentence, two or more algorithms with a loose comparison word, or one besides
+#: the case's with a strict one (the re-review of H32's fix; every goal of both reviews).
+READINGS = [
+    (COMPARE_GOAL, {"esmda", "gies"}),
+    ("Is GIES better than the current set-up?", {"esmda", "gies"}),
+    ("ES-MDA versus LM-EnRML", {"esmda", "lm_enrml"}),
+    ("How does GIES compare on this case?", {"esmda", "gies"}),
+    ("Which of GIES and LM-EnRML fits best?", {"esmda", "gies", "lm_enrml"}),
+    ("Compare GIES with this case's method, but not LM-EnRML", {"esmda", "gies"}),
+    ("Which is better, ES-MDA or GIES?", {"esmda", "gies"}),
+    ("ES-MDA or GIES: which fits the data better?", {"esmda", "gies"}),
+    ("Benchmark GIES and ES-MDA on this case", {"esmda", "gies"}),
+    ("I would like GIES compared with ES-MDA", {"esmda", "gies"}),
+    ("Compare GIES's fit with ES-MDA's", {"esmda", "gies"}),
+    ("this case vs. GIES", {"esmda", "gies"}),
+    ("Compare localizations for GIES", {"esmda", "gies"}),  # one besides, a strict word
+    ("We tried GIES last year. Compare the localizations.", set()),
+    ("Compare the localizations. We tried GIES and LM-EnRML last year.", set()),
+    ("Does localization protect GIES against ensemble collapse?", set()),
+    ("Does adaptive localization help ES?", set()),
+    ("Which localization suits this case? We used GIES before, not again.", set()),
+    ("Should I chop the ensemble size to save runs?", set()),
+    ("Compare localizations, not GIES", set()),
+    ("Compare localizations against ES-MDA's own schedule", set()),
+    ("Compare the localizations without LM-EnRML", set()),
+    ("gies:Tune GIES damping like ES-MDA's schedule", set()),
+]
+
+
+@pytest.mark.parametrize(("goal", "arms"), READINGS)
+def test_the_rules_read_comparisons_sentence_by_sentence(
+    tmp_path: Path, linear_case: CaseFactory, goal: str, arms: set[str]
+) -> None:
+    from apex.agents.planner import comparison_arms
+
+    case = linear_case(ensemble_size=MEMBERS)
+    facts = plan_facts(_service(tmp_path), case.config, budget=1000)
+    if goal.startswith("gies:"):
+        goal = goal.removeprefix("gies:")
+        facts = facts.model_copy(update={"method": "gies", "case_method": {"name": "gies"}})
+
+    assert set(comparison_arms(facts, goal)) == arms
+
+
+@pytest.mark.parametrize(
+    ("goal", "warned"),
+    [
+        ("Does adaptive localization help ES?", "es"),
+        ("Compare the localizations. We tried GIES and LM-EnRML last year.", "gies, lm_enrml"),
+        ("Compare localizations, not GIES", None),  # left out on purpose: no warning
+        ("does localization help", None),
+        (COMPARE_GOAL, None),  # read as a comparison
+    ],
+)
+def test_a_method_the_rules_do_not_compare_is_a_warning(
+    tmp_path: Path, linear_case: CaseFactory, goal: str, warned: str | None
+) -> None:
+    """The re-review: a goal naming an algorithm the rules do not read as compared is never
+    planned silently."""
+    case = linear_case(ensemble_size=MEMBERS)
+
+    result = Planner(_service(tmp_path), None).plan(case.config, goal, budget=1000)
+
+    missed = [w for w in result.warnings if "did not read a comparison" in w]
+    if warned is None:
+        assert missed == []
+    else:
+        first = warned.split(", ")[0]
+        assert missed == [
+            f"the goal names {warned}, but the rules did not read a comparison of methods; "
+            f"ask 'compare esmda with {first}' for one"
+        ]
+
+
+def test_a_wrappers_inner_method_is_no_arm_of_its_own(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review's m5: "CHOP on GIES" names one arm (CHOP wraps GIES by default)."""
+    from apex.agents.planner import comparison_arms
+
+    case = linear_case(ensemble_size=MEMBERS)
+    facts = plan_facts(_service(tmp_path), case.config, budget=1000)
+    chop = facts.model_copy(update={"method": "chop", "case_method": {"name": "chop"}})
+
+    assert set(comparison_arms(chop, "Compare CHOP on GIES with ES-MDA")) == {"chop", "esmda"}
+    assert set(comparison_arms(facts, "Compare CHOP on GIES with ES-MDA")) == {"esmda", "chop"}
+    assert set(comparison_arms(facts, "Compare CHOP with GIES")) == {"esmda", "chop", "gies"}
+
+
+def test_a_localized_cases_baseline_says_why_it_is_alone(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review's m1: the baseline is alone because the case is localized, not for the
+    budget."""
+    method = (
+        'name = "esmda"\noptions = { inflation = [4, 4, 4, 4] }\n'
+        'strategy = { name = "approx", options = { energy = 1.0 } }\n'
+        'localization = { name = "adaptive" }'
+    )
+    case = linear_case(ensemble_size=MEMBERS, method=method)
+
+    result = Planner(_service(tmp_path), None).plan(case.config, "what helps?", budget=5000)
+
+    assert [v.name for v in result.proposal.variants] == ["baseline"]
+    assert "budget" not in result.proposal.hypothesis
+    assert "already has localization (adaptive)" in result.proposal.hypothesis
+
+
+def test_the_rules_comparison_matches_the_energy_and_states_each_arms_cost(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review's m2 and m3: the truncation energy is the case's in every arm (#256), the
+    arms' costs per replicate are stated, and too few replicates are a warning."""
+    case = linear_case(ensemble_size=MEMBERS)
+
+    result = Planner(_service(tmp_path), None).plan(case.config, COMPARE_GOAL, budget=1000)
+
+    strategy = result.proposal.methods["gies"].strategy
+    assert strategy is not None
+    assert strategy.options["energy"] == 1.0  # the case's approx energy, not GIES's 0.95
+    # The case's own arm is left as configured (the re-review's m4).
+    own = plan_facts(_service(tmp_path), case.config, budget=1000).case_method
+    assert result.proposal.methods["esmda"] == MethodEntry.model_validate(own)
+    assert f"esmda {PER_RUN}, gies 241 simulator runs" in result.proposal.hypothesis
+    assert result.proposal.replicates == 2
+    assert any("2 replicate(s)" in w and "seed noise" in w for w in result.warnings)
+    many = Planner(_service(tmp_path), None).plan(case.config, COMPARE_GOAL, budget=5000)
+    assert many.proposal.replicates == 5
+    assert many.warnings == ()
+
+
+def test_the_refused_designs_own_arms_are_kept(tmp_path: Path, linear_case: CaseFactory) -> None:
+    """The review's m7: a goal naming no algorithm, and a refused design of two arms of its
+    own (labels and methods the goal does not name): the fallback keeps those arms."""
+    case = linear_case(ensemble_size=MEMBERS)
+    design = _methods_proposal({"mine": ESMDA4, "lm": {"name": "lm_enrml"}})
+    over = design.model_copy(update={"replicates": 50}).model_dump_json(exclude_none=True)
+
+    result = Planner(_service(tmp_path), StubProvider([over] * 3)).plan(
+        case.config, "Which algorithm fits best?", budget=5000
+    )
+
+    assert result.decided_by == "fallback"
+    assert set(result.proposal.methods) == {"mine", "lm"}
+    assert result.proposal.methods["lm"].name == "lm_enrml"
+    assert result.within_budget
+
+
+def test_a_refusal_records_no_decision_and_names_the_arms_tried(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review's m4: nothing planned, so no decision of a study is recorded; the refusal
+    names every comparison tried (the model's arms and the goal's)."""
+    from apex.core.errors import ConfigError
+
+    case = linear_case(ensemble_size=MEMBERS)
+    service = _service(tmp_path)
+    design = _methods_proposal({"mine": ESMDA4, "theirs": {"name": "gies"}})
+    over = design.model_dump_json(exclude_none=True)
+
+    with pytest.raises(ConfigError) as refused:
+        Planner(service, StubProvider([over] * 3)).plan(case.config, COMPARE_GOAL, budget=300)
+    assert "mine, theirs" in str(refused.value)
+    assert "esmda, gies" in str(refused.value)
+    with pytest.raises(ConfigError):
+        Planner(service, None).plan(case.config, COMPARE_GOAL, budget=300)
+    documents = [json.loads(p.read_text()) for p in (service.root / "agents").glob("*.json")]
+    # The model's own proposals are its decisions; neither the rules nor a fallback planned.
+    decisions = [d for d in documents if d.get("kind") == "agent_decision"]
+    assert [d["decided_by"] for d in decisions] == ["model"] * 3
+    assert len([d for d in documents if str(d.get("action", "")).startswith("refused:")]) == 2
+
+
+def test_a_refused_comparison_survives_a_later_model_failure(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review's m6: the comparison is refused for its budget, then the model fails; the
+    fallback still keeps the comparison."""
+    case = linear_case(ensemble_size=MEMBERS)
+    design = _methods_proposal({"mine": ESMDA4, "lm": {"name": "lm_enrml"}})
+    over = design.model_copy(update={"replicates": 50}).model_dump_json(exclude_none=True)
+
+    result = Planner(_service(tmp_path), StubProvider([over])).plan(
+        case.config, "Which algorithm fits best?", budget=5000
+    )
+
+    assert result.decided_by == "fallback"
+    assert set(result.proposal.methods) == {"mine", "lm"}
+
+
+def test_the_ert_rules_hypotheses_describe_the_design(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review's m8: the ERT rules' hypotheses state their design, not the goal."""
+    from apex.agents.planner import _ert_localization_rules, _ert_rules
+    from apex.services.settings import PlannerSection
+
+    case = linear_case(ensemble_size=MEMBERS)
+    facts = plan_facts(_service(tmp_path), case.config, budget=1000)
+    goal = "How does APEX compare with ERT, really?"
+
+    for plan in (_ert_rules(facts, goal, PlannerSection()),
+                 _ert_localization_rules(facts, goal, PlannerSection())):  # fmt: skip
+        assert goal not in plan.hypothesis
+        assert "ERT" in plan.hypothesis
+
+
+def test_a_models_plan_without_methods_is_warned_in_its_own_words(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The final review's m1: the rules did not decide a model's plan, so its warning does
+    not blame them."""
+    case = linear_case(ensemble_size=MEMBERS)
+    goal = "Which localization is best? We used GIES before."
+
+    result = Planner(_service(tmp_path), StubProvider([_proposal(2, localized=LOCALIZED)])).plan(
+        case.config, goal, budget=1000
+    )
+
+    assert result.decided_by == "model"
+    assert "the plan compares no methods, though the goal names gies" in result.warnings
+    assert not [w for w in result.warnings if "the rules did not read" in w]
+
+
+def test_a_comparison_that_drops_the_goals_localization_says_so(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The final review's m2: the comparing sentence also asks about localization, which a
+    comparison of methods does not plan: a warning, not a silent drop."""
+    case = linear_case(ensemble_size=MEMBERS)
+    goal = "Compare adaptive localization with distance localization using GIES"
+
+    result = Planner(_service(tmp_path), None).plan(case.config, goal, budget=5000)
+
+    assert set(result.proposal.methods) == {"esmda", "gies"}
+    assert any("localization" in w and "not planned" in w for w in result.warnings)
+    plain = Planner(_service(tmp_path), None).plan(case.config, COMPARE_GOAL, budget=5000)
+    assert not [w for w in plain.warnings if "not planned" in w]

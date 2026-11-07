@@ -30,7 +30,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.core.errors import SimulationError
-from apex.core.simulation import CaseFileSimulator, MemberInput, ModelErrorModel, Simulator
+from apex.core.simulation import (
+    CaseFileSimulator,
+    MemberInput,
+    MemberSeries,
+    ModelErrorModel,
+    SeriesRequest,
+    Simulator,
+)
 from apex.domain.observations import DataKey
 from apex.simulation.deck import report_values
 
@@ -417,6 +424,15 @@ class ModelErrorSimulator:
             )
         self.inner: CaseFileSimulator = inner
         self.model = model
+        # a model whose residuals apply past the history (it declares
+        # ``forecasts``) forecasts whole series, when the inner simulator can read them from
+        # a simulated case; otherwise no ``run_series`` (predictions list keys or refuse).
+        reader = getattr(inner, "read_series", None)
+        self._read_series: Callable[[Path, SeriesRequest], MemberSeries] | None = (
+            reader if callable(reader) else None
+        )
+        if getattr(model, "forecasts", False) is True and self._read_series is not None:
+            self.run_series = self._run_series
 
     @property
     def resources(self) -> Mapping[str, int]:
@@ -461,6 +477,35 @@ class ModelErrorSimulator:
     def auxiliary_keys(self, keys: Sequence[DataKey]) -> list[DataKey]:
         """Return the residual keys the workflow may also request (saved, not assimilated)."""
         return self.model.residual_keys(keys)
+
+    def _run_series(self, member: MemberInput, request: SeriesRequest) -> MemberSeries:
+        """Return ``g(m) + r(m, theta)`` as whole series (a forecasting model's; revision 2).
+
+        The inner simulator's series at ``request`` from the simulated case, and the model's
+        residuals at every vector and time of it from the same case (0 where it corrects
+        none).
+        """
+        name = self.model.state_variable
+        if name not in member.state:
+            raise SimulationError(f"member {member.member_id} has no state variable {name!r}")
+        theta = np.asarray(member.state[name], dtype=np.float64)
+        physical = replace(member, state={k: v for k, v in member.state.items() if k != name})
+        case = self.inner.simulate(physical)
+        try:
+            assert self._read_series is not None  # run_series is set only with it
+            series = self._read_series(case, request)
+            keys = [DataKey(t, v) for v in series.vectors for t in series.times]
+            residuals = self.model.residuals(case, theta, keys)
+            values = np.asarray(series.values, dtype=np.float64) + residuals.reshape(
+                len(series.vectors), len(series.times)
+            )
+        except BaseException:
+            release = getattr(self.inner, "release", None)
+            if callable(release):
+                release(case)
+            raise
+        self.inner.clean(case)
+        return MemberSeries(series.times, series.vectors, np.ascontiguousarray(values))
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Return ``g(m) + r(m, theta)`` at ``keys`` (and ``r`` at ``MEC:`` keys)."""

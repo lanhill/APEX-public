@@ -84,6 +84,25 @@ def test_the_planner_writes_its_draft_in_the_ui_folder(
     draft = tmp_path / body["draft"]
     assert service.validate_study(draft).valid  # a study ready to launch from the editor
     assert str(tmp_path) not in draft.read_text()  # no server paths in the draft
+    assert body["methods"] == {}
+
+    # A comparison of algorithms comes back with its arms (the release tester's H32: the
+    # web UI showed "1 variant(s) x 2 replicate(s)" for ES-MDA against GIES).
+    goal = "Compare ES-MDA with GIES on this case"
+    asked = {"case": "alpha/config.toml", "goal": goal}
+    compared = http.post("/v1/agents/plan", headers=owner_ui, json={**asked, "budget": 1000})
+    assert compared.status_code == 200, compared.text
+    methods = compared.json()["methods"]
+    assert set(methods) == {"esmda", "gies"}
+    assert methods["gies"]["name"] == "gies"
+    assert methods["esmda"]["options"] == {"inflation": [4, 4, 4, 4]}
+    assert methods["esmda"]["engine"] == "apex"
+    assert methods["esmda"]["strategy"]["name"] == "approx"
+    # One that cannot fit is refused, and says so (the review's m7 and m9).
+    refused = http.post("/v1/agents/plan", headers=owner_ui, json={**asked, "budget": 300})
+    assert refused.status_code == 422
+    assert refused.json()["title"] == "Cannot plan within the budget"
+    assert "within the budget of 300" in refused.json()["detail"]
 
 
 def test_guests_use_only_listed_agents_on_their_own_runs(

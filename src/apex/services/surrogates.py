@@ -1453,12 +1453,26 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
     ConfigError
         If the configuration, its case or its plugin is invalid.
     """
-    problems = check_options("surrogate_models", config.surrogate.model, config.surrogate.options)
-    if problems:
-        raise ConfigError("[surrogate]: " + "; ".join(problems))
-    design_plan(config)  # an unknown plan, its options, the surrogate it needs: before any run
+    problems = _model_problems(config)
+    # The case's keys and the design plan are checked whether or not the plugin is
+    # installed, so that validation says everything a build would refuse, not only the first.
+    loaded = None
+    try:
+        case_config = _case_config(config.case.config_file)
+        keys, variances = case_keys(case_config, config.case.outputs)
+        loaded = (case_config, keys, variances)
+    except (ConfigError, PluginError) as error:
+        problems.append(str(error))
+    except (TypeError, ValueError) as error:  # e.g. a response objective's options
+        problems.append(f"invalid case for a surrogate: {error}")
+    try:
+        design_plan(config)  # an unknown plan, its options, the surrogate it needs
+    except ConfigError as error:
+        problems.append(str(error))
+    if problems or loaded is None:
+        raise ConfigError("\n".join(problems))
     assert config.surrogate.output_dir is not None
-    case = _build_case(config)
+    case = _build_case(config, loaded)
     warnings = []
     if config.design.plan == "lhs" and case.layout.n_state > 50:
         warnings.append(
@@ -1543,9 +1557,27 @@ def build_config(
         return _build(config, progress, max_runs)
 
 
-def _build_case(config: SurrogateConfig) -> SurrogateCase:
-    case_config = _case_config(config.case.config_file)
-    keys, variances = case_keys(case_config, config.case.outputs)
+def _model_problems(config: SurrogateConfig) -> list[str]:
+    """Return what is wrong with ``[surrogate] model`` and its options (empty when valid)."""
+    plugin = check_options("surrogate_models", config.surrogate.model, config.surrogate.options)
+    return ["[surrogate]: " + "; ".join(plugin)] if plugin else []
+
+
+def _build_case(
+    config: SurrogateConfig,
+    loaded: tuple[
+        HistoryMatchConfig | OptimizationConfig,
+        tuple[DataKey, ...],
+        NDArray[np.float64] | None,
+    ]
+    | None = None,
+) -> SurrogateCase:
+    """Compose a build's stack; ``loaded`` is its case and keys when already read."""
+    if loaded is None:
+        case_config = _case_config(config.case.config_file)
+        keys, variances = case_keys(case_config, config.case.outputs)
+    else:
+        case_config, keys, variances = loaded
     assert config.surrogate.output_dir is not None
     return surrogate_case(
         case_config, keys, variances, execution=config.execution,
@@ -1788,13 +1820,46 @@ def _run_adaptive(
         )  # fmt: skip
 
 
+def _model_files(directory: SurrogateDirectory) -> tuple[Path, Path]:
+    return directory.model, directory.model.with_suffix(".npz")
+
+
+def _completed_build(directory: SurrogateDirectory, config: SurrogateConfig) -> BuildResult | None:
+    """Return the complete build of ``config`` in ``directory``, read only; else ``None``.
+
+    The marker of :func:`_build`'s early return (complete, the same fit, its summary and
+    model files), and the same runs as :func:`_open_build` would accept: their fingerprint,
+    computed only once the marker is there (it composes the case's stack).
+    """
+    state = directory.read_state()
+    if not (state.get("complete") and state.get("fit_fingerprint") == _fit_fingerprint(config)):
+        return None
+    saved = directory.read_json(SUMMARY)
+    if saved is None or not all(f.is_file() for f in _model_files(directory)):
+        return None
+    parts = fingerprint_parts(config, _build_case(config))
+    if state.get(BUILD_FINGERPRINT) != _fingerprint(parts):
+        return None
+    return BuildResult(directory.path, SurrogateBuildSummary.model_validate(saved))
+
+
 def _build(
     config: SurrogateConfig, progress: ProgressReporter | None, max_runs: int | None
 ) -> BuildResult:
     section = config.surrogate
     assert section.output_dir is not None
-    case = _build_case(config)
     directory = SurrogateDirectory(section.output_dir)
+    # The model is created only at the fit: an unknown plugin or a misspelt option is
+    # refused here, before the design's runs (and on resume, before the rest of them).
+    # A complete build needs no plugin: its saved summary is returned as before, though
+    # the plugin has since been uninstalled.
+    problems = _model_problems(config)
+    if problems:
+        done = _completed_build(directory, config)
+        if done is not None:
+            return done
+        raise ConfigError("\n".join(problems))
+    case = _build_case(config)
     _open_build(directory, config, case)
     composition.configure_logging(directory.path)
     directory.write_json(
@@ -1807,7 +1872,7 @@ def _build(
     )  # fmt: skip
     state = directory.read_state()
     fit_key = _fit_fingerprint(config)
-    model_files = (directory.model, directory.model.with_suffix(".npz"))
+    model_files = _model_files(directory)
     if state.get("complete") and state.get("fit_fingerprint") == fit_key:
         saved = directory.read_json(SUMMARY)
         # A complete build whose model files are gone (deleted, say, to drop a model a
@@ -2000,6 +2065,18 @@ def _build(
         # An optimization's: the box its checks draw within, kept with the
         # model so that a copied model can be checked without its build directory.
         control_box=_box_of(design, case) if case.optimization else None,
+        # And the inputs the model saw (decision 6): a prediction's scenario is checked
+        # against them without the build's snapshots.
+        input_sizes=None
+        if not case.optimization
+        else {v.name: v.size for v in everything.layout.variables},
+        control_inputs=None
+        if not case.optimization
+        else {
+            name: (np.min(values, axis=1), np.max(values, axis=1))
+            for name, values in everything.inputs.items()
+            if name in _control_inputs(case)
+        },
     )
     directory.write_json(GATE, json.loads(fitted.gate.model_dump_json()))
     # A changed plugin or gate refits on the runs made: the configuration follows the model
@@ -3036,6 +3113,9 @@ def prediction_surrogate(
     property_map: PropertyMap,
     request: SeriesRequest,
     execution: str,
+    *,
+    layout: StateLayout | None = None,
+    controls: Mapping[str, NDArray[np.float64]] | None = None,
 ) -> tuple[PredictionSurrogate, SeriesRequest]:
     """Compose a prediction's surrogate and resolve its axis against the model's keys.
 
@@ -3046,6 +3126,14 @@ def prediction_surrogate(
     the requested vectors matched against the model's scalar datatypes, and its times (by
     default the model's report times), every one a key of the model: none beyond its last
     report date (its horizon).
+
+    With a control scenario (decision 6, §3): ``controls`` the blocks every
+    member is given (after ``[[controls.parameterizations]]``), ``layout`` the run's state.
+    The model must have been built over controls (an optimization-shaped case of the
+    forecast: its manifest records the controls' box): on inputs that are the run's state
+    after its parameterizations and these controls, by name and size, each control within
+    the range the design spanned (:func:`_refuse_other_controls`). A model built over
+    controls is refused without a scenario, and one built without them with one.
 
     Raises
     ------
@@ -3074,9 +3162,43 @@ def prediction_surrogate(
         raise ConfigError(
             f"the surrogate {path} failed its last check ({check.id}): rebuild or refit it"
         )
+    controls = dict(controls or {})
+    built_over = manifest.control_box is not None
+    if not built_over and manifest.provenance.case_digest == _OPTIMIZATION_CASE_DIGEST:
+        raise ConfigError(
+            f"the surrogate {path} was built on an optimization's case before its controls' "
+            "box was recorded: rebuild it to use it in a prediction"
+        )
+    if built_over and not controls:
+        raise ConfigError(
+            f"the surrogate {path} was built over controls "
+            f"({', '.join(sorted(manifest.control_box or {}))}): give the prediction's scenario "
+            "as [controls]"
+        )
+    if controls and not built_over:
+        raise ConfigError(
+            f"the surrogate {path} was built without controls, and this prediction sets "
+            f"[controls] ({', '.join(sorted(controls))}): it would predict as if the controls "
+            "were its build's; build one over the controls, on an optimization-shaped case of "
+            "the forecast (decision 6)"
+        )
     # The prediction's deck must be the build's: a changed schedule (another deck, other
     # controls) is another stack, which the model has not seen.
-    mismatches = manifest.provenance.stack_mismatches(stack_provenance(case, simulator))
+    provenance = stack_provenance(case, simulator)
+    if built_over:
+        # Its case must have been an optimization's, whose case digest is that of an empty
+        # document (no [geophysics] or [model_error]); a prediction's case never has them
+        # either (remote_config). Anything else (a hand-edited manifest, another kind of
+        # case) is refused; then the digest is left out, and the simulator, its options and
+        # the deck are compared as for any model.
+        if manifest.provenance.case_digest != _OPTIMIZATION_CASE_DIGEST:
+            raise ConfigError(
+                f"the surrogate {path} records controls but was not built on an "
+                "optimization's case (its case digest is another's): rebuild it on an "
+                "optimization-shaped case of the forecast"
+            )
+        provenance = provenance.model_copy(update={"case_digest": None})
+    mismatches = manifest.provenance.stack_mismatches(provenance)
     if mismatches:
         raise ConfigError(
             f"the surrogate {path} was built for another simulator stack or case than this "
@@ -3111,11 +3233,20 @@ def prediction_surrogate(
     if not outside.inside:
         raise ConfigError(f"the surrogate {path} cannot forecast this prediction: "
                           f"{outside.message()}")  # fmt: skip
+    if built_over:
+        if layout is None:
+            raise ValueError("prediction_surrogate needs the run's state layout with controls")
+        _refuse_other_controls(path, manifest, layout, property_map, controls)
     if isinstance(model, EarlyStartSurrogate):
         composition.refuse_early_runs(path, model.early_until, executor, simulator, execution)
+    names = set(controls)
 
     def inputs(blocks: Mapping[str, NDArray[np.float64]]) -> dict[str, NDArray[np.float64]]:
-        properties = blocks if property_map.identity else property_map.ensemble(blocks)
+        # The state by the run's parameterizations; the scenario's controls as they are
+        # (mapped by their own already, as every member is given them).
+        state = {k: v for k, v in blocks.items() if k not in names}
+        properties = state if property_map.identity else property_map.ensemble(state)
+        properties = {**properties, **{k: v for k, v in blocks.items() if k in names}}
         return {
             name: np.ascontiguousarray(np.asarray(value, dtype=np.float64))
             for name, value in properties.items()
@@ -3137,6 +3268,116 @@ def prediction_surrogate(
         kinds={d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None},
     )
     return surrogate, SeriesRequest(vectors, tuple(wanted))
+
+
+def _control_inputs(case: SurrogateCase) -> frozenset[str]:
+    """Return the surrogate's inputs that come from an optimization's controls.
+
+    The controls, followed through the case's parameterizations in order: an output of a
+    parameterization reading a control is one (``control_schedule``'s steps), an output of
+    one reading only realizations is not (a realization mapped to another name, e.g. ln k
+    to ``permx``).
+    """
+    found = {v.name for v in case.layout.variables if v.name not in case.realizations}
+    for parameterization in case.properties.parameterizations:
+        if set(parameterization.variables) & found:
+            found |= set(parameterization.outputs)
+    return frozenset(found) & frozenset(case.input_layout.names)
+
+
+def _refuse_other_controls(
+    path: Path,
+    manifest: SurrogateManifest,
+    layout: StateLayout,
+    property_map: PropertyMap,
+    controls: Mapping[str, NDArray[np.float64]],
+) -> None:
+    """Refuse a model built over other inputs or controls than a prediction's scenario.
+
+    decision 6, §3: the model's inputs must be the run's state after its
+    parameterizations and the scenario's controls after theirs, by name and size, and each
+    control, as the model sees it (after its parameterizations), must lie within the range
+    the design spanned entry by entry (a surrogate does not extrapolate the controls; other
+    knots of a schedule can put the same values elsewhere). From the manifest's
+    ``input_sizes`` and ``control_inputs``; for a model built before it recorded them, from
+    its build's snapshots.
+
+    Raises
+    ------
+    ConfigError
+        Naming what differs, or why an older model's snapshots are needed and unreadable.
+    """
+    given = {v.name: v.size for v in _input_layout(layout, property_map).variables}
+    given |= {name: int(np.asarray(v).size) for name, v in controls.items()}
+    if manifest.input_sizes is not None and manifest.control_inputs is not None:
+        fitted = dict(manifest.input_sizes)
+        ranges = {
+            name: (np.asarray(low, dtype=np.float64), np.asarray(high, dtype=np.float64))
+            for name, (low, high) in manifest.control_inputs.items()
+        }
+        for name, (low, high) in ranges.items():
+            # As control_box's (_check_design): a damaged manifest is named, not indexed.
+            size = fitted.get(name)
+            if (
+                size is None
+                or low.shape != (size,)
+                or high.shape != (size,)
+                or not (np.all(np.isfinite(low)) and np.all(np.isfinite(high)))
+                or not np.all(low <= high)
+            ):
+                raise ConfigError(
+                    f"the surrogate {path}'s recorded range of the input {name!r} is not "
+                    "finite, ordered and of the input's size: its manifest is damaged; "
+                    "rebuild it"
+                )
+    else:
+        try:
+            trained = _model_snapshots(path, manifest)
+        except ConfigError as error:
+            raise ConfigError(
+                f"the surrogate {path} was built before its manifest recorded its inputs; a "
+                "prediction's scenario is then checked against its build's snapshots, which "
+                f"cannot be read ({error}): rebuild it, or use it in its build directory"
+            ) from error
+        fitted = {v.name: v.size for v in trained.layout.variables}
+        ranges = {
+            name: (np.min(values, axis=1), np.max(values, axis=1))
+            for name, values in trained.inputs.items()
+            if name in controls
+        }
+    if given != fitted:
+        raise ConfigError(
+            f"the surrogate {path} was fitted on inputs {_sized(fitted)}, and this prediction "
+            f"gives its members {_sized(given)} (the run's state after its parameterizations, "
+            "and the scenario's controls after theirs): build it on the run's realizations "
+            "and these controls"
+        )
+    for name, values in sorted(controls.items()):
+        if name not in ranges:
+            raise ConfigError(
+                f"the surrogate {path} takes {name!r} as a realization, not a control: this "
+                "prediction's scenario sets it"
+            )
+        low, high = ranges[name]
+        value = np.asarray(values, dtype=np.float64).reshape(-1)
+        outside = [i for i in range(value.size) if not low[i] <= value[i] <= high[i]]
+        if outside:
+            i = outside[0]
+            raise ConfigError(
+                f"the scenario's {name}[{i}] = {value[i]:g} (after its parameterizations) lies "
+                f"outside the range the surrogate {path} was built over ({low[i]:g} to "
+                f"{high[i]:g}; {len(outside)} of its {value.size} entries): a surrogate does "
+                "not extrapolate the controls; widen the build's design"
+            )
+
+
+#: The case digest of an optimization's case (an empty document: ``stack_provenance``).
+_OPTIMIZATION_CASE_DIGEST = _digest(_with_contents({}))
+
+
+def _sized(sizes: Mapping[str, int]) -> str:
+    """Return ``{name: size}`` as ``name (size), ...`` in name order."""
+    return ", ".join(f"{name} ({size})" for name, size in sorted(sizes.items()))
 
 
 # ===================================================================== optimization (§6)

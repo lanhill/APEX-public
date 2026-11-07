@@ -155,6 +155,21 @@ def _write_atomically(path: Path, data: bytes) -> None:
     os.replace(temporary, path)
 
 
+def _ranges(
+    ranges: Mapping[str, tuple[ArrayLike, ArrayLike]] | None,
+) -> dict[str, tuple[list[float], list[float]]] | None:
+    """Return entrywise ranges as JSON lists (``None`` stays ``None``)."""
+    if ranges is None:
+        return None
+    return {
+        name: (
+            [float(v) for v in np.asarray(low, dtype=np.float64).reshape(-1)],
+            [float(v) for v in np.asarray(high, dtype=np.float64).reshape(-1)],
+        )
+        for name, (low, high) in ranges.items()
+    }
+
+
 def write_surrogate(
     path: Path,
     *,
@@ -169,6 +184,8 @@ def write_surrogate(
     apex_commit: str | None = None,
     coarse: CoarseSection | None = None,
     control_box: Mapping[str, tuple[ArrayLike, ArrayLike]] | None = None,
+    input_sizes: Mapping[str, int] | None = None,
+    control_inputs: Mapping[str, tuple[ArrayLike, ArrayLike]] | None = None,
 ) -> StoredSurrogate:
     """Write a fitted surrogate as ``path`` (a ``.json`` manifest) and its ``.npz`` beside it.
 
@@ -176,7 +193,9 @@ def write_surrogate(
     always names arrays that exist. ``coarse``: the coarse stack a coarse-corrected model
     runs, its file options relative to the manifest's folder.
     ``control_box``: an optimization's surrogate's controls' ranges over its design,
-    which its checks draw within.
+    which its checks draw within. ``input_sizes`` and ``control_inputs``:
+    its inputs' sizes and the ranges of those that are not realizations (the controls after
+    their parameterizations), which a prediction's scenario is checked against (decision 6).
 
     Raises
     ------
@@ -220,15 +239,11 @@ def write_surrogate(
             sha256=hashlib.sha256(arrays_bytes).hexdigest(),
         ),
         coarse=coarse,
-        control_box=None
-        if control_box is None
-        else {
-            name: (
-                [float(v) for v in np.asarray(low, dtype=np.float64).reshape(-1)],
-                [float(v) for v in np.asarray(high, dtype=np.float64).reshape(-1)],
-            )
-            for name, (low, high) in control_box.items()
-        },
+        control_box=_ranges(control_box),
+        input_sizes=None
+        if input_sizes is None
+        else {str(name): int(size) for name, size in input_sizes.items()},
+        control_inputs=_ranges(control_inputs),
     )
     manifest_bytes = _manifest_bytes(manifest)
     path.parent.mkdir(parents=True, exist_ok=True)

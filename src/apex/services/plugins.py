@@ -674,7 +674,7 @@ def _check_model(registry: str, name: str, options: Mapping[str, Any]) -> list[s
     try:
         model = option_model(registry, name)
     except PluginError:
-        known = ", ".join(REGISTRIES[registry].names())
+        known = ", ".join(REGISTRIES[registry].names()) or "none installed"
         return [f"unknown {registry} plugin {name!r}; available: {known}"]
     composed = COMPOSED.get(registry, {})
     options = {k: v for k, v in options.items() if k not in composed}

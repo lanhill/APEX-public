@@ -856,13 +856,25 @@ class SurrogateManifest(_Frozen):
         description="An optimization's surrogate: each control's entrywise "
         "range over the design's runs, the box a check draws within.",
     )
+    input_sizes: dict[str, int] | None = Field(
+        default=None,
+        description="An optimization's surrogate: the model's inputs and their sizes (the "
+        "controls and realizations after the case's parameterizations; "
+        "decision 6), which a prediction's scenario is checked against.",
+    )
+    control_inputs: dict[str, tuple[list[float], list[float]]] | None = Field(
+        default=None,
+        description="An optimization's surrogate: each input that is not a realization (the "
+        "controls after their parameterizations), its entrywise range over the design's runs: "
+        "the space the model saw, which a prediction's scenario must lie within.",
+    )
 
     @model_serializer(mode="wrap")
     def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         # Absent before coarse stacks and control boxes
         # existed: manifests without them keep their bytes, so their identities do not change.
         document: dict[str, Any] = handler(self)
-        for name in ("coarse", "control_box"):
+        for name in ("coarse", "control_box", "input_sizes", "control_inputs"):
             if document.get(name) is None:
                 document.pop(name, None)
         return document

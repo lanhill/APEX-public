@@ -140,7 +140,9 @@ class ApexService:
         store: RunStore | None = None,
         approval_threshold_runs: int | None = None,
     ) -> None:
-        self.root = Path(root) if root is not None else default_root()
+        # Absolute: run folders under it reach simulators and workers that run in other
+        # folders (a relative root gave OPM Flow a deck path it could not find).
+        self.root = (Path(root) if root is not None else default_root()).absolute()
         self.jobs = LocalJobRunner(self.root, max_concurrent_jobs)
         self.store: RunStore = store if store is not None else self.jobs.store
         settings = self.jobs.settings.approval

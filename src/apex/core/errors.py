@@ -23,6 +23,14 @@ class ConfigError(ApexError):
     """Raised when a run configuration is invalid or refers to missing inputs."""
 
 
+class PlanningRefused(ConfigError):
+    """Raised when a planner cannot plan what a goal asks within the budget.
+
+    A :class:`ConfigError`, so callers that refuse invalid configurations refuse it too; the
+    REST API titles it as a planning refusal, not an invalid configuration.
+    """
+
+
 class SimulationError(ApexError):
     """Raised by a simulator when one member's forward run fails."""
 

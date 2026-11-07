@@ -12,6 +12,7 @@ import pytest
 
 from apex.algorithms.data_assimilation.gies import UNSCALED_DATA_ANOMALIES_WARNING
 from apex.core.errors import ConfigError
+from apex.core.registry import Registry
 from apex.services import composition
 from apex.services.api import ApexService
 from apex.services.identity import run_id
@@ -61,6 +62,17 @@ def test_every_plugin_describes_and_checks_its_options() -> None:
     assert unknown.startswith("unknown methods plugin 'nope'; available: ")
     available = set(unknown.split(": ", 1)[1].split(", "))
     assert {"chop", "es", "esmda", "gies", "gn_enrml", "lm_enrml", "multilevel_esmda"} <= available
+
+
+def test_an_unknown_plugin_of_an_empty_registry_says_none_is_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # As surrogate_models in a public install: no plugin, so nothing to list.
+    monkeypatch.setitem(REGISTRIES, "test_empty", Registry[object]("test_empty"))
+
+    assert check_options("test_empty", "nope", {}) == [
+        "unknown test_empty plugin 'nope'; available: none installed"
+    ]
 
 
 def test_every_plugin_schema_is_json() -> None:

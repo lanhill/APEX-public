@@ -93,7 +93,7 @@ class Registry[T]:
         try:
             factory = self._factories[name]
         except KeyError:
-            available = ", ".join(self.names()) or "none"
+            available = ", ".join(self.names()) or "none installed"
             raise UnknownPluginError(
                 f"unknown {self.kind} plugin {name!r}; available: {available}"
             ) from None
@@ -111,7 +111,7 @@ class Registry[T]:
         try:
             return self._factories[name]
         except KeyError:
-            available = ", ".join(self.names()) or "none"
+            available = ", ".join(self.names()) or "none installed"
             raise UnknownPluginError(
                 f"unknown {self.kind} plugin {name!r}; available: {available}"
             ) from None

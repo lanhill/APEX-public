@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import tomllib
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -19,14 +19,21 @@ import apex.algorithms.metrics  # noqa: F401  (registers the forecast scores)
 from apex.algorithms import optimization as _optimization  # noqa: F401  (control_schedule)
 from apex.core.errors import ApexError, ConfigError, PluginError, validation_problems
 from apex.core.forecast import ForecastScore
-from apex.core.plugins import executors, forecast_scores, parameterizations, simulators
+from apex.core.plugins import (
+    executors,
+    forecast_scores,
+    model_error_models,
+    parameterizations,
+    simulators,
+)
 from apex.core.progress import ProgressReporter
-from apex.core.simulation import SeriesRequest
+from apex.core.simulation import ModelErrorModel, SeriesRequest
 from apex.domain.config import HistoryMatchConfig, PluginSection
 from apex.domain.observations import ObservationSet
 from apex.domain.prediction import PredictionConfig, PredictionControlsSection, PredictionResult
 from apex.domain.state import StateLayout, StateVariable
 from apex.services import composition
+from apex.simulation.model_error import RESIDUAL_PREFIX, ModelErrorSimulator
 from apex.storage import provenance
 from apex.storage.inputs import read_observation_section
 from apex.storage.locks import exclusive
@@ -138,18 +145,24 @@ def _execution(executor: object, simulator: object) -> dict[str, object]:
 
 
 def remote_config(
-    run: HistoryMatchConfig, simulator: PluginSection, output_dir: Path
+    run: HistoryMatchConfig,
+    simulator: PluginSection,
+    output_dir: Path,
+    *,
+    model_error: bool = False,
 ) -> HistoryMatchConfig:
     """Return the configuration a remote worker builds the prediction's simulator from.
 
     The run's, with the prediction's simulator and output folder, and nothing that wraps
-    the run's simulator (geophysics, model error, transforms: a prediction forecasts
-    series). A multilevel method's levels go too: every member of a prediction runs on
-    the fine model here, so it must on the hosts.
+    the run's simulator (geophysics, transforms: a prediction forecasts series), but its
+    model-error model with ``model_error`` (one that forecasts: the members are g + r
+    there too). A multilevel method's levels go too: every member of
+    a prediction runs on the fine model here, so it must on the hosts.
     """
     options = {k: v for k, v in run.method.options.items() if k != "levels"}
     return run.model_copy(update={
-        "simulator": simulator, "geophysics": None, "model_error": None,
+        "simulator": simulator, "geophysics": None,
+        "model_error": run.model_error if model_error else None,
         "data_transforms": [],
         "method": run.method.model_copy(update={"options": options}),
         "run": run.run.model_copy(update={"output_dir": output_dir}),
@@ -169,7 +182,11 @@ def as_predicted(config: PredictionConfig, run: HistoryMatchConfig) -> HistoryMa
 
 
 def _fingerprint(
-    config: PredictionConfig, run_dir: RunDirectory, simulator: PluginSection, model: str = ""
+    config: PredictionConfig,
+    run_dir: RunDirectory,
+    simulator: PluginSection,
+    model: str = "",
+    extra: Mapping[str, Path] | None = None,
 ) -> str:
     # The configuration, the run it reads and the content of the simulator's files (e.g.
     # the deck template): a changed deck must not resume from members of the old one; nor
@@ -180,18 +197,35 @@ def _fingerprint(
     digest.update(run_dir.config_text().encode())
     # The controls' parameterizations' files too: none without [controls], so a plain
     # prediction's fingerprint is unchanged.
-    for name, path in sorted({**_input_files(simulator), **_control_files(config)}.items()):
+    # ``extra``: a forecasting model-error model's files and the observations it is fitted
+    # to: a changed one must not resume from the old model's members;
+    # none for a plain prediction, whose fingerprint is unchanged.
+    found = {**_input_files(simulator), **_control_files(config), **(extra or {})}
+    for name, path in sorted(found.items()):
         digest.update(name.encode())
         digest.update(provenance.file_hash(path).encode() if path.is_file() else b"missing")
     return digest.hexdigest()
 
 
-def _input_files(simulator: PluginSection) -> dict[str, Path]:
-    return {
+def _input_files(
+    simulator: PluginSection, model_error: PluginSection | None = None
+) -> dict[str, Path]:
+    """Return the input files the prediction's forecasts depend on, by option.
+
+    The simulator's, and a forecasting model-error model's (its schedules).
+    """
+    found = {
         f"simulator.{key}": Path(value)
         for key, value in simulator.options.items()
         if key.endswith(composition.PATH_OPTION_SUFFIXES) and isinstance(value, str)
     }
+    if model_error is not None:
+        found |= {
+            f"model_error.{key}": Path(value)
+            for key, value in model_error.options.items()
+            if key.endswith(composition.PATH_OPTION_SUFFIXES) and isinstance(value, str)
+        }
+    return found
 
 
 def _control_files(config: PredictionConfig) -> dict[str, Path]:
@@ -392,13 +426,6 @@ def _predict(
     section = config.prediction
     run_dir = RunDirectory(section.run_dir)
     run_config = composition.snapshot_config(run_dir)
-    if run_config.model_error is not None:
-        # The networks have one output layer per history report time, and the
-        # run's forecasts are g + r, so a forecast of g alone would not reproduce them.
-        raise ConfigError(
-            f"{section.run_dir} ran with a model-error model ([model_error] "
-            f"{run_config.model_error.name}); predictions beyond its history are not supported"
-        )
     layout = composition.build_layout(run_config)
     try:
         results = RunResults(section.run_dir, layout)
@@ -406,11 +433,18 @@ def _predict(
         raise ConfigError(f"{section.run_dir} has no results yet: {error}") from error
     simulator_config = simulator_section(config, run_config)
     execution = config.execution or run_config.execution
+    model_error = _forecasting_model_error(config, run_config, simulator_config, layout)
+    if model_error is not None:
+        _refuse_model_error_requests(config)
     try:
         base = simulators.create(simulator_config.name, **simulator_config.options)
         # the run's parameterizations map each member's state, as in the run.
         property_map = PropertyMap(composition.build_parameterizations(run_config), layout)
         simulator = parameterized(base, property_map)
+        if model_error is not None:
+            # The run's forecasts were g + r, and so are the
+            # prediction's (a model-error run has no parameterizations: refused).
+            simulator = ModelErrorSimulator(simulator, model_error)
         executor = executors.create(execution.name, **execution.options)
         composition.check_executor(executor, simulator)
         # an executor running members whole on other hosts rebuilds the
@@ -419,8 +453,10 @@ def _predict(
         # transforms: a prediction forecasts series).
         assert section.output_dir is not None
         composition.prepare_remote(
-            executor, simulator, remote_config(run_config, simulator_config, section.output_dir)
-        )
+            executor, simulator,
+            remote_config(run_config, simulator_config, section.output_dir,
+                          model_error=model_error is not None),
+        )  # fmt: skip
         scores: dict[str, ForecastScore] = {
             name: forecast_scores.create(name) for name in section.scores
         }
@@ -447,13 +483,6 @@ def _predict(
             f"a prediction with [controls] cannot run on the {simulator_config.name} simulator: "
             "its batches write only their declared parameters, not the controls"
         )
-    if controls and config.surrogate is not None:
-        # Until a model built over controls is checked against the scenario (decision 6, §3),
-        # a model built without them would predict as if the controls were the build's.
-        raise ConfigError(
-            "a prediction with [controls] cannot use [surrogate] yet: a control-aware model "
-            "must be checked against the scenario's controls"
-        )
     surrogate = None
     if config.surrogate is not None:
         # The members (not the truth) by a fitted model, its keys the axis.
@@ -464,6 +493,7 @@ def _predict(
                 config.surrogate,
                 remote_config(run_config, simulator_config, section.output_dir),
                 base, executor, property_map, request, execution.name,
+                layout=layout, controls=controls,
             )  # fmt: skip
         except (TypeError, ValueError, PluginError) as error:
             raise ConfigError(f"invalid prediction [surrogate]: {error}") from error
@@ -471,7 +501,11 @@ def _predict(
     directory.open(
         config_text=config.model_dump_json(indent=2),
         fingerprint=_fingerprint(
-            config, run_dir, simulator_config, "" if surrogate is None else surrogate.identity
+            config,
+            run_dir,
+            simulator_config,
+            "" if surrogate is None else surrogate.identity,
+            None if model_error is None else _model_error_files(run_config),
         ),
     )
     if stopped is not None and stopped():
@@ -480,13 +514,28 @@ def _predict(
     directory.write_json(
         "provenance",
         provenance.collect(
-            {"run_config": run_dir.path / "config.json", **_input_files(simulator_config)},
+            {
+                "run_config": run_dir.path / "config.json",
+                **_input_files(
+                    simulator_config, None if model_error is None else run_config.model_error
+                ),
+            },
             simulator={
                 "name": simulator_config.name,
                 "version": _simulator_version(simulator),
             },
         )
         | _execution(executor, simulator)
+        | (
+            {}
+            if model_error is None or run_config.model_error is None
+            else {
+                "model_error": {
+                    "name": run_config.model_error.name,
+                    "truth_is_simulator": section.truth_is_simulator,
+                }
+            }
+        )
         | (
             {}
             if surrogate is None or config.surrogate is None
@@ -521,6 +570,104 @@ def _predict(
     except ValueError as error:
         raise ConfigError(f"invalid prediction: {error}") from error
     return workflow.run(ensembles, truth)
+
+
+def _forecasting_model_error(
+    config: PredictionConfig,
+    run: HistoryMatchConfig,
+    simulator: PluginSection,
+    layout: StateLayout,
+) -> ModelErrorModel | None:
+    """Return the run's model-error model for the prediction's members, if the run has one.
+
+    Built as composition builds it, against the prediction's simulator
+    (its ``check_simulator`` and the deck's SUMMARY checked), fitted to the run's
+    observations; only a model that declares ``forecasts`` (its residuals apply past the
+    history) is taken.
+
+    Raises
+    ------
+    ConfigError
+        If the model does not forecast (``pg_lstm``: an output layer per history report
+        time), or the prediction also asks for ``[surrogate]``.
+    """
+    section = run.model_error
+    if section is None:
+        return None
+    # The class says whether it forecasts: a model that does not is refused before it is
+    # built (and its files read), with the reason (the review).
+    try:
+        forecasts = getattr(model_error_models.factory(section.name), "forecasts", False)
+    except PluginError as error:
+        raise ConfigError(f"[model_error]: {error}") from error
+    if forecasts is not True:
+        raise ConfigError(
+            f"{config.prediction.run_dir} ran with a model-error model ([model_error] "
+            f"{section.name}) that does not forecast (its residuals apply at the history's "
+            "report times only, e.g. one output layer per time); predictions beyond its "
+            "history need a model that declares forecasts"
+        )
+    observations = read_observation_section(run.observations)
+    as_run = run.model_copy(update={"simulator": simulator})
+    model = composition.build_model_error(as_run, layout, observations)
+    assert model is not None
+    if config.surrogate is not None:
+        raise ConfigError(
+            "a prediction of a run with a model-error model cannot use [surrogate]: the "
+            "surrogate would forecast g alone, the run's forecasts were g + r"
+        )
+    composition.check_model_error_summary(as_run, model)
+    return model
+
+
+def _model_error_files(run: HistoryMatchConfig) -> dict[str, Path]:
+    """Return a model-error model's files and the observations it is fitted to."""
+    assert run.model_error is not None
+    found = {
+        f"model_error.{key}": Path(value)
+        for key, value in run.model_error.options.items()
+        if key.endswith(composition.PATH_OPTION_SUFFIXES) and isinstance(value, str)
+    }
+    if run.observations.file is not None:
+        found["observations.file"] = Path(run.observations.file)
+    return found
+
+
+def _refuse_model_error_requests(config: PredictionConfig) -> None:
+    """Refuse, before anything runs, what a model-error run's prediction cannot answer.
+
+    The truth (unless ``truth_is_simulator``: a model error means the data came from
+    another model, which the simulator does not reproduce, and scores against it would be
+    against the wrong reference), and the residuals' own vectors (``MEC:``, not summary
+    vectors).
+
+    Raises
+    ------
+    ConfigError
+        Saying why.
+    """
+    section = config.prediction
+    if "truth" in section.ensembles and not section.truth_is_simulator:
+        raise ConfigError(
+            "a prediction of a run with a model-error model refuses 'truth' by default: the "
+            "model corrects the simulator because the data came from another model (the "
+            "real system, or a finer one), which this simulator's forecast of the truth's "
+            "parameters does not reproduce, so scores against it would use the wrong "
+            "reference; set [prediction] truth_is_simulator = true only if the observations "
+            "came from this very simulator, without model error"
+        )
+    residual = [v for v in section.outputs.vectors if v.startswith(RESIDUAL_PREFIX)]
+    if residual:
+        raise ConfigError(
+            f"a prediction cannot request the model-error residuals ({', '.join(residual)}): "
+            "they are not summary vectors; the run's iterates hold them "
+            "(auxiliary_predicted)"
+        )
+    if section.truth_is_simulator and "truth" in section.ensembles:
+        logger.info(
+            "the truth forecast by the simulator alone",
+            extra={"event": "prediction_truth_is_simulator"},
+        )
 
 
 def _simulator_version(simulator: object) -> str | None:

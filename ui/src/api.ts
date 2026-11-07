@@ -406,16 +406,28 @@ export interface Diagnosis {
   summary: string;
 }
 
+/** One compared algorithm of a planned study (an optimizer's: name and options only). */
+export interface PlannedMethod {
+  name: string;
+  engine?: string;
+  options?: Record<string, unknown>;
+  strategy?: { name: string; options?: Record<string, unknown> } | null;
+  max_iterations?: number | null;
+}
+
 export interface PlannedStudy {
   draft: string;
   study: string;
   hypothesis: string;
+  /** The compared algorithms, label → entry ({} when the study runs the case's own; older services send none). */
+  methods?: Record<string, PlannedMethod>;
   variants: { name: string; patch: unknown; rationale: string }[];
   replicates: number;
   cost: number | null;
   budget: number;
   within_budget: boolean;
   revisions: string[];
+  warnings?: string[];
 }
 
 /** POST /v1/agents/convert: a deck imported as an APEX case, a draft in one's UI folder. */

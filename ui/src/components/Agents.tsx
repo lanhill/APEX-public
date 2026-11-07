@@ -7,6 +7,7 @@ import type {
   Diagnosis,
   Geomodeled,
   MonitorReport,
+  PlannedMethod,
   PlannedStudy,
   PlotResult,
 } from "../api";
@@ -40,6 +41,25 @@ function useAgentNames(): Set<string> {
 export function answeredBy(answer: AgentAnswer): string {
   const who = answer.decided_by === "model" ? "the model" : "the agent's rules";
   return answer.reason ? `${who} (${withoutAdr(answer.reason)})` : who;
+}
+
+/**
+ * A planned study's shape: "2 method(s) × 1 variant(s) × 2 replicate(s)". The compared methods
+ * come first: a comparison of two algorithms read "1 variant(s) × 2 replicate(s)" alone (the
+ * release tester's H32).
+ */
+export function planShape(plan: Pick<PlannedStudy, "methods" | "variants" | "replicates">): string {
+  const methods = Object.keys(plan.methods ?? {}).length;
+  const head = methods ? `${methods} method(s) × ` : "";
+  return `${head}${plan.variants.length} variant(s) × ${plan.replicates} replicate(s)`;
+}
+
+/** One compared method, as the command prints it: "gies: gies, strategy rlmmac {…}". */
+export function methodLine(label: string, method: PlannedMethod): string {
+  const engine = method.engine && method.engine !== "apex" ? ` on ${method.engine}` : "";
+  const strategy = method.strategy ? `, strategy ${method.strategy.name}` : "";
+  const options = method.options && Object.keys(method.options).length ? ` ${JSON.stringify(method.options)}` : "";
+  return `${label}: ${method.name}${engine}${strategy}${options}`;
 }
 
 type Result =
@@ -342,10 +362,22 @@ export function PlanStudy({ casePath, optimization = false }: { casePath: string
       {plan && (
         <div className="agent-result">
           <p>
-            <strong>{plan.study}</strong>: {plan.variants.length} variant(s) × {plan.replicates} replicate(s), at most{" "}
-            {plan.cost ?? "?"} simulator runs (budget {plan.budget}){plan.within_budget ? "" : ": over the budget"}.
+            <strong>{plan.study}</strong>: {planShape(plan)}, at most {plan.cost ?? "?"} simulator runs (budget{" "}
+            {plan.budget}){plan.within_budget ? "" : ": over the budget"}.
           </p>
           <p>{withoutAdr(plan.hypothesis)}</p>
+          {Object.keys(plan.methods ?? {}).length > 0 && (
+            <ul>
+              {Object.entries(plan.methods ?? {}).map(([label, m]) => (
+                <li key={`method-${label}`}>method {methodLine(label, m)}</li>
+              ))}
+            </ul>
+          )}
+          {(plan.warnings ?? []).map((w) => (
+            <p key={w} className="note">
+              Warning: {w}
+            </p>
+          ))}
           <ul>
             {plan.variants.map((v) => (
               <li key={v.name}>

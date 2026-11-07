@@ -191,6 +191,10 @@ class EclipseSimulator:
         """
         return self._simulate(member)
 
+    def read_series(self, case: Path, request: SeriesRequest) -> MemberSeries:
+        """Return a simulated ``case``'s series at ``request``."""
+        return read_series(case, request)
+
     def read(self, case: Path, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Return the summary values of a simulated ``case`` at ``keys``."""
         return read_summary(case, keys)

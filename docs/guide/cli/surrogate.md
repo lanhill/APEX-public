@@ -7,6 +7,9 @@ items:
 
 # The `apex surrogate` commands
 
+!!! note "No surrogate model plugin is included yet"
+    APEX's core ships the surrogate interface and the workflows on this page, but no surrogate model plugin yet: models come from installed packages, and `apex plugins` lists those in the registry `surrogate_models`. A model implements the protocol `apex.core.surrogates.SurrogateModel` and is registered through the entry-point group `apex.surrogate_models`; to write one, see [Writing and registering your own plugin](../../getting_started/writing_a_plugin.md).
+
 ## Goal
 
 By the end of this lesson you will be able to:

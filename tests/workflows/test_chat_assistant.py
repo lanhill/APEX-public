@@ -1197,7 +1197,10 @@ def test_the_prompt_keeps_the_users_arms_and_states_inherited_limits() -> None:
     assert "at the case's own ensemble size" in SYSTEM
     assert "joins only when every arm fits at both sizes" in SYSTEM
     assert "never some arms at one size only" in SYSTEM
-    assert "is stated as a limit with an offer to raise it: never raise it unasked" in SYSTEM
+    assert (
+        "is stated as a limit with an offer to raise it: never raise it unasked in the draft"
+        in SYSTEM
+    )
     # Its review: the "too small" rule must not override it, and the study rules are not
     # inside the optimization sentence.
     assert "a setting the arms inherit from the case is no reason to revise" in SYSTEM
@@ -2159,7 +2162,7 @@ def test_a_method_the_goal_names_is_planned_or_the_draft_refused(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
     """Issue #266 (2026-11-02): "the assimilated method" became a localization study."""
-    from apex.agents.chat import named_methods
+    from apex.agents.planner import named_methods
 
     _, _, store, assistant = _planning(tmp_path, linear_case, None)
     chat = store.create("plan")
@@ -2266,7 +2269,7 @@ def test_named_methods_reads_multiword_names_and_a_wrappers_inner_counts(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
     """The review of #266: "multilevel ES-MDA", "ES MDA", and CHOP on GIES (gies is run)."""
-    from apex.agents.chat import named_methods
+    from apex.agents.planner import named_methods
 
     names = ["es", "esmda", "multilevel_esmda", "chop", "gies", "lm_enrml"]
     assert named_methods("multilevel ES-MDA", names) == {"multilevel_esmda"}
@@ -2441,6 +2444,399 @@ def test_a_weak_comparison_is_warned_on_the_card_not_refused(
     assert [w.split(":")[0] for w in three["design_warnings"]] == ["damping"]
 
 
+def test_a_warned_plan_offers_an_alternative_beside_its_card(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """#288 (2026-11-07): plan_study warned that 2 GIES iterations and 1 replicate were too
+    few to compare LM damping with the case's, and only a card with those settings went up.
+    The result names the revision; the card's result asks for the alternative; the
+    alternative (a draft of its own) replaces neither, and the original stays launchable."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    method = 'name = "gies"\nstrategy = { name = "rlmmac" }\nmax_iterations = 2'
+    linear_case(name="gies2", ensemble_size=20, method=method)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    plan, propose = tools["plan_study"], tools["propose_action"]
+
+    def variants(iterations: int | None) -> list[dict[str, Any]]:
+        more = {} if iterations is None else {"max_iterations": iterations}
+        return [
+            {"name": "baseline", "rationale": "as configured",
+             **({"patch": {"method": more}} if more else {})},
+            {"name": "lm", "rationale": "LM damping",
+             "patch": {"method": {**more, "damping": {"name": "lm"}}}},
+        ]  # fmt: skip
+
+    first = plan.handler(plan.arguments(
+        case="gies2/config.toml", goal="LM damping against the case's", budget=5000,
+        name="damping", replicates=1, variants=variants(None)))  # fmt: skip
+    revision = first["design_revision"]
+    assert revision["replicates"] == 3
+    assert sorted(revision["max_iterations"].values()) == [3, 3]
+    assert "alternative_to" in first["design_warnings_note"]
+
+    card = propose.handler(propose.arguments(draft=first["draft"], summary="As planned."))
+    assert card["design_warnings_open"] == first["design_warnings"]
+    assert "alternative_to" in card["next"]
+
+    with pytest.raises(ValueError, match="name of its own"):  # it would overwrite the first
+        plan.handler(plan.arguments(
+            case="gies2/config.toml", goal="LM damping against the case's", budget=5000,
+            name="damping", replicates=3, variants=variants(3),
+            alternative_to=first["draft"]))  # fmt: skip
+    second = plan.handler(plan.arguments(
+        case="gies2/config.toml", goal="LM damping against the case's", budget=5000,
+        name="damping_revised", replicates=3, variants=variants(3),
+        alternative_to=first["draft"]))  # fmt: skip
+    assert second["draft"] != first["draft"]
+    assert second["alternative_to"] == first["draft"]
+    assert "design_revision" not in second  # only the plugins' defaults are left
+    assert "alternative to" in second["design_warnings_note"]
+
+    other = propose.handler(propose.arguments(draft=second["draft"], summary="Revised."))
+    assert "design_warnings_open" not in other
+    # The original stays the user's choice: not refused as replaced by the alternative.
+    again = propose.handler(propose.arguments(draft=first["draft"], summary="As planned."))
+    assert "design_warnings_open" not in again  # its alternative exists now
+    assert [p.draft for p in store.proposals(chat.id)] == [
+        first["draft"], second["draft"], first["draft"]]  # fmt: skip
+
+
+def test_the_prompt_offers_an_alternative_to_a_warned_plan_and_never_a_cut_list() -> None:
+    """#288 and #289: the rules behind the tools' fields."""
+    assert "propose the draft as planned and, beside it, an alternative" in SYSTEM
+    assert "which to launch (or neither) is the user's choice" in SYSTEM
+    assert "never present a partial or truncated list" in SYSTEM
+    assert "say how many were shown and how many matched" in SYSTEM
+    # The review of #288 (M2): the older rules no longer forbid the alternative.
+    assert "never raise it unasked; " not in SYSTEM
+    assert "a study you judge too small to answer the question is revised" not in SYSTEM
+    assert "a gap you point out in your own draft is fixed" not in SYSTEM
+    assert "never too small, which an inherited" not in SYSTEM
+    assert "that offer is the alternative draft of the next rule" in SYSTEM
+    assert "plan_study's design_warnings have their own rule" in SYSTEM
+    assert "(not a plan_study design warning, which the alternative draft answers)" in SYSTEM
+    # The re-review (m-c, m-d): only replicates and the revision's iterations are traded;
+    # cut fields are read before their values are stated.
+    assert "trade only its replicates and the revision's iterations, never members" in SYSTEM
+    assert "before stating values from them, read the draft (read_draft)" in SYSTEM
+
+
+def test_find_cases_says_when_its_list_is_cut(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#289 (2026-11-07): find_cases listed its first 100 and the assistant called them all
+    the configurations with 'config' in their name. The result counts every match (up to a
+    bound) and says, in fields and words, when the list is partial."""
+    import apex.agents.chat as chat_module
+
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    many = tmp_path / "many"
+    many.mkdir()
+    for k in range(4):
+        (many / f"config_{k}.toml").write_text(case.config.read_text())
+    monkeypatch.setattr(chat_module, "FIND_LIMIT", 3)
+    monkeypatch.setattr(chat_module, "FIND_COUNT_LIMIT", 5)
+    chat = store.create("find")
+    find = {t.name: t for t in assistant.local_tools(None, chat.id)}["find_cases"]
+
+    cut = find.handler(find.arguments(query="config", folder="many"))
+    assert (cut["shown"], cut["total"], cut["complete"]) == (3, 4, False)
+    assert len(cut["configurations"]) == 3
+    assert cut["truncated"].startswith("showing 3 of 4 matching configurations")
+
+    whole = find.handler(find.arguments(query="config_1", folder="many"))
+    assert (whole["shown"], whole["total"], whole["complete"]) == (1, 1, True)
+    assert "truncated" not in whole
+
+    for k in range(4, 10):
+        (many / f"config_{k}.toml").write_text(case.config.read_text())
+    beyond = find.handler(find.arguments(query="config", folder="many"))
+    assert (beyond["shown"], beyond["total"], beyond["complete"]) == (3, "more than 5", False)
+    assert beyond["truncated"].startswith("showing 3 of more than 5")
+
+
+def _gies2_planning(
+    tmp_path: Path, linear_case: CaseFactory
+) -> tuple[ChatStore, str, dict[str, LocalTool]]:
+    """A GIES case of 2 iterations, its chat and planning tools (#288)."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    method = 'name = "gies"\nstrategy = { name = "rlmmac" }\nmax_iterations = 2'
+    linear_case(name="gies2", ensemble_size=20, method=method)
+    chat = store.create("plan")
+    return store, chat.id, {t.name: t for t in assistant.planning_tools(chat.id, None)}
+
+
+def _damping_variants(iterations: int | None) -> list[dict[str, Any]]:
+    more = {} if iterations is None else {"max_iterations": iterations}
+    return [
+        {"name": "baseline", "rationale": "as configured",
+         **({"patch": {"method": more}} if more else {})},
+        {"name": "lm", "rationale": "LM damping",
+         "patch": {"method": {**more, "damping": {"name": "lm"}}}},
+    ]  # fmt: skip
+
+
+def _plan_damping(tools: dict[str, LocalTool], **given: object) -> dict[str, Any]:
+    plan = tools["plan_study"]
+    arguments = {"case": "gies2/config.toml", "goal": "LM damping against the case's",
+                 "budget": 5000, **given}  # fmt: skip
+    result: dict[str, Any] = plan.handler(plan.arguments(**arguments))
+    return result
+
+
+def test_an_alternatives_link_holds_for_any_spelling_and_only_from_its_latest_plan(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #288: alternative_to and propose's draft spelt absolute or with './'
+    still link the pair (m1); a later plan under the alternative's name without
+    alternative_to ends the link (m2); a run draft is no study to be an alternative to
+    (m3); an alternative's note names remaining warnings only (m5)."""
+    store, chat_id, tools = _gies2_planning(tmp_path, linear_case)
+    propose = tools["propose_action"]
+    first = _plan_damping(tools, name="damping", replicates=1,
+                          variants=_damping_variants(None))  # fmt: skip
+
+    run = tools["draft_run"].handler(tools["draft_run"].arguments(
+        case="gies2/config.toml", patch={}, name="as_run"))  # fmt: skip
+    with pytest.raises(ValueError, match="study draft of this chat of the same kind"):
+        _plan_damping(tools, name="other", replicates=3, variants=_damping_variants(3),
+                      alternative_to=run["draft"])  # fmt: skip
+
+    second = _plan_damping(tools, name="damping_revised", replicates=3,
+                           variants=_damping_variants(3),
+                           alternative_to=str(tmp_path / first["draft"]))  # fmt: skip
+    assert second["alternative_to"] == first["draft"]  # recorded as the chat names it
+    note = second["design_warnings_note"]
+    assert "design warnings remain" in note  # the plugins' defaults still differ
+    assert "design_revision of its own" not in note
+    propose.handler(propose.arguments(draft="./" + first["draft"], summary="As planned."))
+    propose.handler(propose.arguments(draft=second["draft"], summary="Revised."))
+    assert [p.draft for p in store.proposals(chat_id)] == [first["draft"], second["draft"]]
+
+    # A new design under the alternative's name, not offered as one: the link ends.
+    _plan_damping(tools, name="damping_revised", replicates=4, variants=_damping_variants(3))
+    with pytest.raises(ValueError, match="replaced by a later draft"):
+        propose.handler(propose.arguments(draft=first["draft"], summary="As planned."))
+
+
+def test_a_draft_revised_under_another_spelling_is_still_the_same_draft(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The re-review of #288 (m-b): revise_draft recorded the draft as typed ('./...'), so
+    proposing it under the same spelling was refused as replaced by its own revision."""
+    store, chat_id, tools = _gies2_planning(tmp_path, linear_case)
+    first = _plan_damping(tools, name="damping", replicates=1,
+                          variants=_damping_variants(None))  # fmt: skip
+    text = (tmp_path / first["draft"]).read_text() + "\n# revised\n"
+    revise = tools["revise_draft"]
+    revised = revise.handler(revise.arguments(draft="./" + first["draft"], text=text))
+    assert revised["draft"] == first["draft"]
+    [event] = [e for e in store.events(chat_id) if e.kind == "draft_revised"]
+    assert event.data["draft"] == first["draft"]
+    propose = tools["propose_action"]
+    propose.handler(propose.arguments(draft="./" + first["draft"], summary="Revised."))
+    assert [p.draft for p in store.proposals(chat_id)] == [first["draft"]]
+
+
+def test_an_alternative_the_budget_cannot_hold_stops_the_reminder(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #288 (m4): the alternative refused on budget is recorded, and the
+    original's card no longer asks for one but quotes the refusal."""
+    _, _, tools = _gies2_planning(tmp_path, linear_case)
+    propose = tools["propose_action"]
+    first = _plan_damping(tools, name="damping", replicates=1,
+                          variants=_damping_variants(None))  # fmt: skip
+    with pytest.raises(ValueError, match="budget") as refused:
+        _plan_damping(tools, name="damping_revised", replicates=3, budget=first["cost"],
+                      variants=_damping_variants(3), alternative_to=first["draft"])  # fmt: skip
+    card = propose.handler(propose.arguments(draft=first["draft"], summary="As planned."))
+    assert "design_warnings_open" not in card
+    assert card["alternative_refused"] == str(refused.value)[:2000]
+    assert "quote the refusal's cost" in card["next"]
+
+
+def test_a_plans_result_states_its_cost_and_warnings_first_and_fits_the_limit(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #288 (m6) and the release tester's H33: a plan's cost line, design
+    warnings and revision, approval and arm costs come before its long blocks, so that the
+    events' excerpt and the tools' bound keep them; over the limit, the long blocks are left
+    out whole, never the cost or the warnings."""
+    import apex.agents.chat as chat_module
+    from apex.agents.loop import result_excerpt
+    from apex.services.tools import BOUND_OMIT_MIN, bound
+
+    _, _, tools = _gies2_planning(tmp_path, linear_case)
+    first = _plan_damping(tools, name="damping", replicates=1,
+                          variants=_damping_variants(None))  # fmt: skip
+    keys = list(first)
+    for key in ("cost", "cost_line", "design_warnings", "design_revision", "approval",
+                "arm_costs", "next"):  # fmt: skip
+        if key in first:
+            assert keys.index(key) < keys.index("differs") < len(keys), key
+            assert keys.index(key) < keys.index("held_fixed"), key
+    excerpt = result_excerpt(first)
+    for key in ("cost", "design_revision", "approval"):
+        assert key in excerpt, key
+
+    last = [k for k in chat_module.PLAN_LAST if k in first]
+    assert keys[-len(last) :] == last
+    # The tools' bound on a long plan cuts the long blocks from the end, never the rest.
+    head = {k: v for k, v in first.items() if k not in chat_module.PLAN_LAST}
+    whole = len(json.dumps(first, default=str))
+    room = len(json.dumps(head, default=str)) + len(chat_module.PLAN_LAST) * BOUND_OMIT_MIN + 300
+    assert room < whole - 100
+    for limit in (whole - 100, room):
+        small = bound(first, limit=limit)
+        assert len(json.dumps(small, default=str)) <= limit
+        assert {k: small[k] for k in head} == head  # only the long blocks were cut
+        assert small["truncated"] is True
+
+
+def test_a_plans_arms_are_cut_last(tmp_path: Path, linear_case: CaseFactory) -> None:
+    """The re-review's suite (2026-11-07): a plan of ES-MDA's four localization arms reached
+    the model with two, since bound() cut its methods before its comparison blocks. The
+    arms are cut last; the comparison's note and the defaults (read_draft gives them) first."""
+    from apex.services.tools import bound
+
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("arms")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+    base = {"name": "esmda", "options": {"inflation": [2, 2]}}
+    methods = {
+        "esmda_approx": {**base, "strategy": {"name": "approx", "options": {"energy": 0.99}}},
+        "esmda_rows": {**base, "strategy": {"name": "adaptive_rows", "options": {"energy": 0.99}}},
+        "esmda_three": {"name": "esmda", "options": {"inflation": [3, 3, 3]},
+                        "strategy": {"name": "approx", "options": {"energy": 0.99}}},
+        "esmda_rows3": {"name": "esmda", "options": {"inflation": [3, 3, 3]},
+                        "strategy": {"name": "adaptive_rows", "options": {"energy": 0.99}}},
+    }  # fmt: skip
+    first: dict[str, Any] = plan.handler(plan.arguments(
+        case="alpha/config.toml", goal="adaptive localization", budget=5000, methods=methods,
+        variants=[{"name": "plain", "rationale": "as configured"}]))  # fmt: skip
+    assert set(first["methods"]) == set(methods)
+    whole = len(json.dumps(first, default=str))
+    lighter = {k: v for k, v in first.items()
+               if k not in ("note", "defaults", "held_fixed", "differs")}  # fmt: skip
+    limit = len(json.dumps(lighter, default=str)) + 1000  # their previews, bound's marks
+    assert limit < whole
+    view = bound(first, limit=limit)
+    assert len(json.dumps(view, default=str)) <= limit
+    assert view["methods"] == first["methods"]
+
+
+def test_find_cases_fits_the_tools_bound_and_counts_what_it_keeps(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #289 (M1): 60 matches, all under FIND_LIMIT, are over the tools'
+    result limit; bound() halved the list and left shown 60 and complete true. find_cases
+    now keeps what fits, and its counts and note say so, through bound() as the loop
+    applies it."""
+    from apex.services.tools import RESULT_LIMIT, bound
+
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    many = tmp_path / "many_configurations_of_the_field_model"
+    many.mkdir()
+    for k in range(60):
+        (many / f"config_history_match_variant_{k:02d}.toml").write_text(case.config.read_text())
+    chat = store.create("find")
+    find = {t.name: t for t in assistant.local_tools(None, chat.id)}["find_cases"]
+
+    view = bound(find.handler(find.arguments(query="config_history", folder=many.name)))
+
+    assert len(json.dumps(view, default=str)) <= RESULT_LIMIT
+    assert view["total"] == 60
+    assert view["shown"] == len(view["configurations"]) < 60
+    assert view["complete"] is False
+    assert view["truncated"].startswith(f"showing {view['shown']} of 60 matching")
+
+
+def test_bound_keeps_a_results_own_truncation_note_and_its_short_fields() -> None:
+    """The review of #289 and #288: bound() kept no note of a result's own (it wrote True
+    over find_cases' 'showing N of M'); a plan's result (CutFromEnd) is cut from its end,
+    its long strings to previews, never left out whole, its short fields never; any other
+    result keeps the old order (the re-review: read_draft lost its text)."""
+    from apex.services.tools import BOUND_CUT, CutFromEnd, bound
+
+    rows = {"truncated": "showing 3 of 9", "rows": [{"i": i, "t": "x" * 50} for i in range(80)]}
+    assert bound(rows, limit=2000)["truncated"].startswith("showing 3 of 9; ")
+
+    fields = {"draft": "d.toml", "cost_line": "120 simulator runs", "approval": "not needed",
+              "held_fixed": "h" * 3000, "differs": "d" * 3000}  # fmt: skip
+    view = bound(CutFromEnd(fields), limit=2000)
+    assert len(json.dumps(view)) <= 2000
+    assert (view["cost_line"], view["approval"]) == ("120 simulator runs", "not needed")
+    assert set(view["shortened"]) == {"held_fixed", "differs"}
+    for key in ("held_fixed", "differs"):
+        assert view[key].endswith(BOUND_CUT)
+        assert view[key].startswith(fields[key][0] * 10)  # its start, not left out
+    assert bound(fields, limit=2000) == _old_bound(fields, 2000)  # a plain dict: as before
+
+
+def _old_bound(result: Any, limit: int) -> Any:  # noqa: ANN401
+    """bound() as it was before #288's review (services/tools.py at 707e2c23)."""
+    text = json.dumps(result, default=str)
+    if len(text) <= limit:
+        return result
+    if isinstance(result, dict):
+        shortened = dict(result)
+        for key, value in sorted(
+            result.items(), key=lambda kv: -len(json.dumps(kv[1], default=str))
+        ):
+            if isinstance(value, list) and len(value) > 1:
+                shortened[key] = value[: max(1, len(value) // 2)]
+                shortened["truncated"] = True
+                return _old_bound(shortened, limit)
+            if isinstance(value, dict) and len(value) > 1:
+                items = list(value.items())
+                shortened[key] = dict(items[: max(1, len(items) // 2)])
+                shortened["truncated"] = True
+                return _old_bound(shortened, limit)
+    return {"truncated": True, "preview": text[: limit - 100]}
+
+
+def test_bound_keeps_its_order_for_drafts_and_run_summaries() -> None:
+    """The re-review of #288 (M1): cutting every result from its end deleted read_draft's
+    11k-character text whole and halved a run summary's posterior metrics before its
+    per-iteration ones. Results that do not ask for it (CutFromEnd) are cut as before."""
+    from apex.services.tools import RESULT_LIMIT, bound
+
+    text = "".join(f'[study.variants.v{k}]\nrationale = "variant {k} of the design"\n'
+                   f'patch = {{ method = {{ max_iterations = {k} }} }}\n\n'
+                   for k in range(120))[:11000]  # fmt: skip
+    draft = {
+        "draft": "UI/owner/drafts/c/study_x.toml", "text": text, "truncated": False,
+        "held_fixed": {f"method.option_{k}": k for k in range(40)},
+        "differs": {f"arm{a}": {"method.damping.name": "lm" if a else "rlmmac"}
+                    for a in range(2)},
+        "inherited": "a study's draft names only what it sets; " * 5,
+        "approval": {"needed": False, "runs": 6},
+    }  # fmt: skip
+    assert len(json.dumps(draft)) > RESULT_LIMIT
+    view = bound(draft)
+    assert view == _old_bound(draft, RESULT_LIMIT)
+    assert json.dumps(text[:200])[1:-1] in view["preview"]  # the text's start, as before
+
+    labels = ("normalized_data_mismatch", "rmse", "ssim", "model_change", "data_mismatch",
+              "cv_normalized_data_mismatch")  # fmt: skip
+    summary = {
+        "run_id": "abc", "path": "runs/x", "name": "x", "method": "gies", "state": "complete",
+        "converged": True, "iterations": list(range(15)), "posterior_iteration": 14,
+        "members": 100,
+        "data_mismatch": {str(k): [100.0 / (k + 1), 3.0] for k in range(15)},
+        "metrics": {str(k): {m: {f"layer_{j}": 0.1 * k + j for j in range(6)}
+                             for m in labels} for k in range(15)},
+        "posterior_metrics": {m: {"PERMX": 0.11, "PORO": 0.22, "all": 0.33} for m in labels},
+        "simulator_runs": 1500, "annotations": {"experiment": "e"},
+    }  # fmt: skip
+    assert len(json.dumps(summary)) > RESULT_LIMIT
+    view = bound(summary)
+    assert view == _old_bound(summary, RESULT_LIMIT)
+    assert view["posterior_metrics"] == summary["posterior_metrics"]
+
+
 def test_design_warnings_spare_es_mda_iterations_and_alike_defaults() -> None:
     """The review of #276: max_iterations below 3 on ES-MDA (not iterative) warned; a set
     section and the same plugin left to the method compared as different."""
@@ -2460,3 +2856,39 @@ def test_design_warnings_spare_es_mda_iterations_and_alike_defaults() -> None:
                                        "b": {"name": "gies"}}  # fmt: skip
     flat = {k: {"method.name": "gies"} for k in gies}
     assert _design_warnings(cells, flat, gies) == []  # rlmmac set, and rlmmac by default
+
+
+def test_a_goal_only_comparison_reports_its_differences_and_matches(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The final review of H32's fix (M1): the rules' path drafts "Compare ES-MDA with GIES"
+    as a comparison, so the answer must carry how the arms differ (GIES's own iteration
+    limit) and the energy the rules matched, as a design given with methods does."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+
+    result = plan.handler(plan.arguments(case="alpha/config.toml",
+                                         goal="Compare ES-MDA with GIES on this case",
+                                         budget=5000))  # fmt: skip
+
+    assert set(result["methods"]) == {"esmda", "gies"}
+    assert any(d.startswith("gies runs to its own iteration limit")
+               for d in result["differences"])  # fmt: skip
+    assert any("gies: rlmmac energy 0.95 -> 1.0" in m for m in result["matched"])
+    assert result["next"].startswith("the compared algorithms differ")
+
+
+def test_a_refused_goal_only_comparison_names_no_server_path(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The final review's m6: the refusal reaches the chat model without server paths."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    plan = {t.name: t for t in assistant.planning_tools(chat.id, None)}["plan_study"]
+
+    with pytest.raises(ValueError, match="within the budget of 300") as refused:
+        plan.handler(plan.arguments(case="alpha/config.toml",
+                                    goal="Compare ES-MDA with GIES on this case",
+                                    budget=300))  # fmt: skip
+    assert str(tmp_path) not in str(refused.value)

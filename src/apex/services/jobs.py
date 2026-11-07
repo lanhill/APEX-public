@@ -121,7 +121,7 @@ class LocalJobRunner:
     ) -> None:
         if max_concurrent_jobs is not None and max_concurrent_jobs < 1:
             raise ValueError(f"max_concurrent_jobs must be at least 1, got {max_concurrent_jobs}")
-        self.root = Path(root)
+        self.root = Path(root).absolute()  # as ApexService's: workers run elsewhere
         self.jobs = self.root / "jobs"
         self.store = SQLiteStore(self.root)
         # A worker reads it leniently: it may run older (pinned) code than wrote it.

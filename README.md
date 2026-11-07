@@ -32,7 +32,7 @@ Status: Early development.
 The full documentation (getting started, the user guide, the reference and the design of each method) is online:
 
 - [lanhill.github.io/APEX-public](https://lanhill.github.io/APEX-public/), the latest version;
-- [apex-public.readthedocs.io](https://apex-public.readthedocs.io/), with a version for each release.
+- [apex-public.readthedocs.io](https://apex-public.readthedocs.io/), the latest documentation (the main branch).
 
 It is also in [`docs/`](docs/index.md), and `uv run mkdocs serve` shows it locally.
 

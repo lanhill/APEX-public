@@ -18,7 +18,9 @@ from typing import Self
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from typer.testing import CliRunner
 
+from apex.cli.main import app
 from apex.core.errors import ConfigError, SurrogateDomainError
 from apex.core.plugins import simulators, surrogate_models
 from apex.core.simulation import MemberInput
@@ -350,6 +352,26 @@ def test_a_robust_optimization_gives_each_design_member_a_realization(tmp_path: 
     result = layout.read_result(run.run_dir)
     assert len(result["objective_per_realization"]) == 3
     assert result["objective"] == pytest.approx(result["surrogate_objective"], rel=1e-10)
+
+
+def test_validate_reports_an_unknown_plugin_and_a_bad_objective_option(tmp_path: Path) -> None:
+    # The objective's options are given to its plugin while the keys are read: a refusal
+    # there is said as text beside the unknown surrogate plugin, not as a traceback.
+    case = _case(tmp_path, "case")
+    case.write_text(case.read_text().replace("wop = 1.0", "no_such_option = 1.0"))
+    text = BUILD.format(name="bad", bias=0.0, case="case.toml", box="")
+    (tmp_path / "bad.toml").write_text(text.replace('"test_toy_features"', '"no_such_model"'))
+
+    with pytest.raises(ConfigError) as error:
+        surrogates.plan_build(surrogates.load_surrogate_config(tmp_path / "bad.toml"))
+    assert "unknown surrogate_models plugin 'no_such_model'" in str(error.value)
+    assert "no_such_option" in str(error.value)
+    planned = CliRunner().invoke(app, ["validate", str(tmp_path / "bad.toml")])
+    assert planned.exit_code == 1
+    assert "no_such_model" in planned.output
+    assert "no_such_option" in planned.output
+    assert "Traceback" not in planned.output
+    assert not isinstance(planned.exception, (TypeError, ValueError))
 
 
 def test_what_an_optimization_with_a_surrogate_refuses(tmp_path: Path) -> None:
@@ -741,10 +763,14 @@ def test_a_manifest_without_a_control_box_keeps_its_bytes(tmp_path: Path) -> Non
     explicit = write_surrogate(
         tmp_path / "b" / "surrogate.json",
         control_box=None,
+        input_sizes=None,
+        control_inputs=None,
         **kwargs,  # type: ignore[arg-type]
     )
     text = without.path.read_text()
     assert "control_box" not in text
+    assert "input_sizes" not in text
+    assert "control_inputs" not in text
     assert text == explicit.path.read_text()
     assert without.identity == explicit.identity
     # The same model with its box recorded is another file, so another identity.

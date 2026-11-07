@@ -310,7 +310,8 @@ def test_report_times_are_in_time_order(monkeypatch: pytest.MonkeyPatch) -> None
     model = SimpleNamespace(keys=tuple(DataKey(t, "WOPR:P1") for t in sorted(labels)))
     manifest = SimpleNamespace(
         gate=SimpleNamespace(passed=True, tolerances=GateTolerances(), datatypes=[]),
-        provenance=SimpleNamespace(stack_mismatches=lambda other: []),
+        provenance=SimpleNamespace(stack_mismatches=lambda other: [], case_digest=None),
+        control_box=None,
     )
     loaded = SimpleNamespace(manifest=manifest, model=model, identity="i", domain=None,
                              simulator=None)  # fmt: skip
