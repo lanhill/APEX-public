@@ -1949,6 +1949,11 @@ def draw_prior_ensemble(
     if unknown:
         raise ConfigError(f"[prior.variables] names unknown state variables: {', '.join(unknown)}")
     blocks = _draw_groups(config, layout, n_members, rng)
+    # Without [prior] ensemble_size, a generator that gives a stored ensemble of its own size
+    # (``file``: needs_ensemble_size = False) sets it for the others, which are drawn after it
+    # (the helper's report, 2026-11-07: validate counted the file's members, the run refused).
+    # With a size given, or no such generator, the order is the layout's, as always.
+    deferred: list[tuple[StateVariable, PriorGenerator, str]] = []
     for variable in layout.variables:
         if variable.name in blocks:
             continue
@@ -1969,17 +1974,39 @@ def draw_prior_ensemble(
                 f"{context}: {section.name!r} draws variables jointly; name them in "
                 "[prior.groups.<name>] variables"
             )
-        try:
-            block = generator.generate(variable, n_members, rng)
-        except ValueError as error:
-            raise ConfigError(f"{context}: {error}") from error
-        if getattr(generator, "clip", True):
-            block = np.clip(block, variable.lower, variable.upper)
-        blocks[variable.name] = block
+        if n_members is None and getattr(generator, "needs_ensemble_size", True):
+            deferred.append((variable, generator, context))
+            continue
+        blocks[variable.name] = _generated(generator, variable, n_members, rng, context)
+    if deferred:
+        stored = {name: block.shape[-1] for name, block in blocks.items()}
+        if len(set(stored.values())) > 1:
+            raise ConfigError(f"prior variables have different ensemble sizes: {stored}")
+        # None (nothing stored): the generators ask for [prior] ensemble_size themselves.
+        size = next(iter(stored.values()), None)
+        for variable, generator, context in deferred:
+            blocks[variable.name] = _generated(generator, variable, size, rng, context)
     sizes = {name: block.shape[-1] for name, block in blocks.items()}
     if len(set(sizes.values())) != 1:
         raise ConfigError(f"prior variables have different ensemble sizes: {sizes}")
     return layout.stack(blocks)
+
+
+def _generated(
+    generator: PriorGenerator,
+    variable: StateVariable,
+    n_members: int | None,
+    rng: np.random.Generator,
+    context: str,
+) -> np.ndarray:
+    """Return one variable's prior block, clipped to its bounds unless the generator says not."""
+    try:
+        block = generator.generate(variable, n_members, rng)
+    except ValueError as error:
+        raise ConfigError(f"{context}: {error}") from error
+    if getattr(generator, "clip", True):
+        block = np.clip(block, variable.lower, variable.upper)
+    return block
 
 
 def start(

@@ -12,7 +12,11 @@ from typer.testing import CliRunner
 
 from apex.cli.main import app
 from apex.core.errors import ConfigError, WorkflowError
+from apex.core.plugins import priors
+from apex.core.simulation import PriorGenerator
+from apex.domain.config import HistoryMatchConfig
 from apex.services import composition
+from apex.services.validation import validate_history_match
 from apex.storage.run_directory import RunDirectory
 
 
@@ -401,6 +405,106 @@ def test_stored_prior_ensembles_are_not_clipped(linear_case: CaseFactory) -> Non
 
     # As PET's importstate: a stored ensemble is used as is.
     np.testing.assert_array_equal(composition.draw_prior(run), stored)
+
+
+def _with_stored_x_and_sampled_z(case: Case, size_line: str) -> HistoryMatchConfig:
+    np.savez(case.config.parent / "stored.npz", x=np.arange(30.0).reshape(3, 10))
+    _with_prior(
+        case,
+        f'[prior]\n{size_line}generator = {{ name = "file", options = {{ ensemble_file = '
+        '"stored.npz" } }\n\n[prior.variables.z]\nname = "gaussian"',
+        state_extra='\n[[state.variables]]\nname = "z"\nsize = 2',
+    )
+    return composition.load_config(case.config)
+
+
+def test_a_stored_prior_sets_the_ensemble_size_of_sampled_variables(
+    linear_case: CaseFactory,
+) -> None:
+    """Without [prior] ensemble_size, a sampled variable takes a stored ensemble's size.
+
+    The helper's report (2026-11-07): validate counted the stored ensemble's members, and the
+    run refused the sampled variable for want of an ensemble size.
+    """
+    case = linear_case()
+    config = _with_stored_x_and_sampled_z(case, "")
+    layout = composition.build_layout(config)
+
+    drawn = composition.draw_prior_ensemble(config, layout, None, np.random.default_rng(3))
+
+    blocks = layout.split(drawn)
+    assert blocks["z"].shape == (2, 10)
+    np.testing.assert_array_equal(blocks["x"], np.arange(30.0).reshape(3, 10))
+
+
+def test_a_variables_own_stored_prior_sets_the_size_and_validate_counts_it(
+    linear_case: CaseFactory,
+) -> None:
+    """A stored prior given per variable, the default sampled: both agree on the size.
+
+    The review of the fix (2026-11-07): validate counted members only for a default ``file``
+    generator, so this plan had no members while the run drew 10.
+    """
+    case = linear_case()
+    np.savez(case.config.parent / "stored_z.npz", z=np.ones((2, 10)))
+    _with_prior(
+        case,
+        '[prior]\ngenerator = { name = "gaussian" }\n\n[prior.variables.z]\nname = "file"\n'
+        'options = { ensemble_file = "stored_z.npz" }',
+        state_extra='\n[[state.variables]]\nname = "z"\nsize = 2',
+    )
+    truth = dict(np.load(case.config.parent / "truth.npz"))
+    np.savez(case.config.parent / "truth.npz", **truth, z=np.ones(2))
+    config = composition.load_config(case.config)
+    layout = composition.build_layout(config)
+
+    drawn = composition.draw_prior_ensemble(config, layout, None, np.random.default_rng(3))
+    validation = validate_history_match(case.config)
+
+    assert layout.split(drawn)["x"].shape == (3, 10)
+    assert validation.valid, validation.errors
+    assert validation.plan is not None
+    assert validation.plan.members == 10
+
+
+def test_stored_priors_of_different_sizes_are_refused(linear_case: CaseFactory) -> None:
+    case = linear_case()
+    np.savez(case.config.parent / "stored.npz", x=np.zeros((3, 10)))
+    np.savez(case.config.parent / "stored_z.npz", z=np.ones((2, 8)))
+    _with_prior(
+        case,
+        '[prior]\ngenerator = { name = "file", options = { ensemble_file = "stored.npz" } }\n\n'
+        '[prior.variables.z]\nname = "file"\noptions = { ensemble_file = "stored_z.npz" }\n\n'
+        '[prior.variables.w]\nname = "gaussian"',
+        state_extra='\n[[state.variables]]\nname = "z"\nsize = 2\n\n'
+        '[[state.variables]]\nname = "w"\nsize = 1',
+    )
+    truth = dict(np.load(case.config.parent / "truth.npz"))
+    np.savez(case.config.parent / "truth.npz", **truth, z=np.ones(2), w=np.ones(1))
+    config = composition.load_config(case.config)
+    layout = composition.build_layout(config)
+
+    with pytest.raises(ConfigError, match="different ensemble sizes"):
+        composition.draw_prior_ensemble(config, layout, None, np.random.default_rng(3))
+    validation = validate_history_match(case.config)
+    assert not validation.valid
+    assert "different ensemble sizes" in validation.errors[0]
+
+
+def test_with_an_ensemble_size_the_draw_order_is_the_layouts(linear_case: CaseFactory) -> None:
+    case = linear_case()
+    config = _with_stored_x_and_sampled_z(case, "ensemble_size = 10\n")
+    layout = composition.build_layout(config)
+
+    drawn = composition.draw_prior_ensemble(config, layout, 10, np.random.default_rng(3))
+
+    # Pins the drawn values with a size given (no deferral). A stored prior draws nothing from
+    # the stream, so deferral could not reorder the stream's draws anyway; this guards the
+    # values against a change in how the stream is passed.
+    gaussian = priors.create("gaussian")
+    assert isinstance(gaussian, PriorGenerator)
+    expected = gaussian.generate(layout.variables[1], 10, np.random.default_rng(3))
+    np.testing.assert_array_equal(layout.split(drawn)["z"], expected)
 
 
 @pytest.mark.parametrize(

@@ -333,6 +333,32 @@ def test_a_failing_check_refits_and_repeats_the_forecast(tmp_path: Path, built: 
     np.testing.assert_array_equal(model.weights, stored.arrays["weights"])
 
 
+def test_a_model_naming_a_retired_option_refits(
+    tmp_path: Path, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plugin's retired option in an older manifest: the refit creates the plugin without it.
+
+    The loader drops ``retired_options`` before its check; the refit, which creates the plugin
+    from the manifest's options, must too, and the refitted manifest no longer names it.
+    """
+    biased = _biased(built)
+    document = json.loads(biased.read_text())
+    document["options"] = {**document["options"], "old_setting": 8}
+    biased.write_text(json.dumps(document))
+    monkeypatch.setattr(cases.Affine, "retired_options", frozenset({"old_setting"}), raising=False)
+    config = cases.write_case(
+        tmp_path,
+        name="hm",
+        surrogate=_section(biased, check_every=1, check_members=6, on_check_failure="refit"),
+    )
+    composition.start(config)
+    run = _run(tmp_path, "hm")
+    [refit] = _named(run, "surrogate_refit")
+    assert refit["passed"]
+    stored = read_surrogate(run / "surrogates" / "refit_1" / "model" / "surrogate.json")
+    assert "old_setting" not in stored.manifest.options
+
+
 def test_refits_are_bounded(tmp_path: Path, built: Path) -> None:
     """After ``max_refits`` a failing check stops the run (§5)."""
     biased = _biased(built)

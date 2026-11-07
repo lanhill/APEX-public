@@ -129,4 +129,4 @@ Get a run's results: iterations, data mismatch mean and std, metrics.
 
 ## `write_report`
 
-Write the narrative report of a run or a study (Markdown; numbers checked against the facts): a summary, the run's setup from its configuration, its results and health, and with compare_with a comparison with another run; saved in this chat's drafts folder unless save = false (say where it is).
+Write the narrative report of a run or a study (Markdown; numbers checked against the facts): a summary, the run's setup from its configuration, its results and health, and with compare_with a comparison with another run; saved in this chat's drafts folder unless save = false (say where it is). Each call writes the whole report and updates this chat's earlier one (asked to add a section, call it again, e.g. with compare_with).

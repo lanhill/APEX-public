@@ -5,7 +5,7 @@ generated: reference
 
 # Configuring optimization: reference
 
-Every one of these 10 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 11 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `optimization:controls`
 
@@ -109,3 +109,17 @@ The simulator of a response objective such as npv.
 | `diagnostics` | object or null | | Per-plugin diagnostics switches (name = true/false, max_mb, every); they override [output] diagnostics for this plugin. |
 | `name` | string | required | |
 | `options` | object | | |
+
+## `optimization:surrogate`
+
+Evaluations by a fitted surrogate, checked by the simulator.
+
+| option | type | default | description |
+|---|---|---|---|
+| `check_every` | integer | 3 | Accepted steps whose controls are also evaluated by the simulator and gated (steps 3, 6, 9, ... by default); 0: no checks. |
+| `max_evaluations` | integer | 50000 | The run's bound on surrogate evaluations (one per control vector and realization). |
+| `model_file` | string | required | The surrogate's manifest (`.json`, its arrays beside it), e.g. `runs/<build>/model/surrogate.json`. |
+| `on_check_failure` | string | stop | A check that fails: `stop` the optimization at its last checkpoint (resumable); or start it again with the `simulator` for every evaluation (the plain run with the same seed; the evaluations already simulated are reused). |
+| `outside` | string | stop | Controls outside the surrogate's validated domain: `stop` the optimization, or evaluate them by the `simulator` (recorded as such). |
+| `relative` | object | | The checks' relative tolerances by kind of quantity (pressure, rate, plume, mass, other): may only tighten the model's own gate. |
+| `workers` | integer or null | | Local worker processes for the surrogate's evaluations; none: in this process (serial). |

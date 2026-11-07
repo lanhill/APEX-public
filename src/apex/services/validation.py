@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from apex.algorithms.data_assimilation.gies import UNSCALED_DATA_ANOMALIES_WARNING
 from apex.core.errors import ApexError
+from apex.core.plugins import priors
 from apex.core.storage import RunStore
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.services import RunPlan, Validation
@@ -46,6 +47,29 @@ def _stored_members(path: Path) -> int | None:
     except (OSError, StopIteration, ValueError, zipfile.BadZipFile):
         return None
     return int(shape[-1]) if shape else None
+
+
+def _sized_priors(config: HistoryMatchConfig) -> dict[str, int | None]:
+    """Members of each variable's generator that gives its own size, in the state's order.
+
+    As ``draw_prior_ensemble``: without [prior] ensemble_size, the generators whose class sets
+    ``needs_ensemble_size = False`` (a stored prior, the default generator's or a variable's
+    own) give the size; variables drawn by [prior.groups] are not theirs. A size is None
+    when it cannot be read from the generator's ``ensemble_file``.
+    """
+    grouped = {name for group in config.prior.groups.values() for name in group.variables}
+    sizes: dict[str, int | None] = {}
+    for variable in config.state.variables:
+        if variable.name in grouped:
+            continue
+        section = config.prior.generator_for(variable.name)
+        if section.name not in priors.names():
+            continue
+        if getattr(priors.factory(section.name), "needs_ensemble_size", True):
+            continue
+        stored = section.options.get("ensemble_file")
+        sizes[variable.name] = None if stored is None else _stored_members(Path(str(stored)))
+    return sizes
 
 
 def _plugin_errors(config: HistoryMatchConfig) -> list[str]:
@@ -99,6 +123,12 @@ def validate_history_match(
         run = composition.build_run(resolved)
     except (ApexError, OSError, ValueError) as error:
         return Validation(valid=False, errors=[str(error)])
+    if resolved.prior.ensemble_size is None:
+        sizes = {k: n for k, n in _sized_priors(resolved).items() if n is not None}
+        if len(set(sizes.values())) > 1:
+            return Validation(
+                valid=False, errors=[f"prior variables have different ensemble sizes: {sizes}"]
+            )
     planned = plan(resolved, run, store)
     section = resolved.surrogate
     if (
@@ -122,8 +152,8 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
     warnings: list[str] = []
     members = config.prior.ensemble_size
     generator = config.prior.generator
-    if members is None and generator.name == "file":
-        members = _stored_members(Path(str(generator.options.get("ensemble_file"))))
+    if members is None:
+        members = next(iter(_sized_priors(config).values()), None)
     if generator.name == "file" and not config.prior.variables:
         warnings.append(
             "the prior is stored (file): runs with another seed share it and differ only in "
