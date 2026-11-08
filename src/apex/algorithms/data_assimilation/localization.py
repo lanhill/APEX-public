@@ -46,7 +46,7 @@ then are read with ``"adaptive_per_update"`` (``services.composition.snapshot_co
 
 import logging
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
 
 import numpy as np
@@ -93,6 +93,40 @@ class Localization(Protocol):
 
     def restore_state(self, arrays: Mapping[str, NDArray[np.float64]]) -> None:
         """Restore what :meth:`export_state` returned (on resume)."""
+        ...
+
+
+#: A model's mask of which data each of its parameters can affect:
+#: ``keys -> (n_rows, len(keys))`` booleans.
+ParameterMask = Callable[[Sequence[DataKey]], NDArray[np.bool_]]
+
+
+@runtime_checkable
+class RestrictableLocalization(Protocol):
+    """A localization that multiplies its taper's rows by a fixed structural mask.
+
+    A model whose parameters can affect only some data (a model-error network's per-step
+    blocks: their own step's data, or the later steps') declares the mask; composition
+    hands it here. The mask is exact (zero where the true sensitivity
+    is zero), so the product loses nothing. It is a deterministic function of the data
+    keys; the taper it shapes is saved and restored as before.
+    """
+
+    def restrict(self, rows: slice, mask: ParameterMask) -> None:
+        """Multiply the taper's ``rows`` by ``mask(keys)`` when it is built."""
+        ...
+
+
+@runtime_checkable
+class LocalizedMethod(Protocol):
+    """A method that can say which localization its updates use (``None``: none).
+
+    Composition asks it, not the method's internals, e.g. to hand the localization a
+    model's parameter mask.
+    """
+
+    def current_localization(self) -> object | None:
+        """Return the localization the method's updates apply, if any."""
         ...
 
 
@@ -438,6 +472,7 @@ class _AdaptiveBase(EmitsDiagnostics):
         self.taper: Taper = taper
         self.threshold = threshold
         self.cutoff = cutoff
+        self._restrictions: list[tuple[slice, ParameterMask]] = []
 
     def _taper(
         self, a: NDArray[np.float64], b: NDArray[np.float64], rng: np.random.Generator
@@ -767,8 +802,40 @@ class PriorAdaptiveLocalization(_AdaptiveBase, _GainTaper):
         keys: Sequence[DataKey],
         rng: np.random.Generator,
     ) -> None:
-        """Build the taper from the prior ensemble and its forecast."""
-        self.taper_matrix = self._taper(prior_state, prior_predicted, rng)
+        """Build the taper from the prior ensemble and its forecast (and any masks)."""
+        taper = self._taper(prior_state, prior_predicted, rng)
+        for rows, mask in self._restrictions:
+            # A model's structural mask: exact zeros where its
+            # parameters cannot affect a datum; sample correlations there are noise that a
+            # threshold of 3/sqrt(N) still lets through (about 0.3 % of pairs).
+            found = np.asarray(mask(keys))
+            expected = (rows.stop - rows.start, len(keys))
+            if found.dtype != np.bool_ or found.shape != expected:
+                raise ValueError(
+                    f"a parameter mask must be booleans {expected}, got {found.dtype} {found.shape}"
+                )
+            if not found.any():
+                # Every datum masked off: the variable would never be updated, silently.
+                raise ValueError(
+                    f"the parameter mask of state rows {rows.start}..{rows.stop - 1} keeps no "
+                    "assimilated datum: the variable would never be updated"
+                )
+            taper[rows] *= found
+        self.taper_matrix = taper
+
+    def restrict(self, rows: slice, mask: ParameterMask) -> None:
+        """Multiply the taper's ``rows`` by ``mask(keys)`` when :meth:`prepare` builds it.
+
+        Raises
+        ------
+        ValueError
+            If ``rows`` is not a non-empty, contiguous range of the state's rows.
+        """
+        total = sum(self.block_sizes)
+        start, stop, step = rows.indices(total)
+        if step != 1 or start >= stop or (rows.stop is not None and rows.stop > total):
+            raise ValueError(f"rows {rows} are not a range of the state's {total} rows")
+        self._restrictions.append((slice(start, stop), mask))
 
 
 #: The same plugin under its earlier name (kept: configurations use it).

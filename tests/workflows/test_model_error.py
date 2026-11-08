@@ -518,3 +518,112 @@ def test_a_model_error_predictions_fingerprint_holds_its_files(tmp_path: Path) -
     after = _fingerprint(prediction, run, config.simulator, "", files)
     assert len({plain, before, after}) == 3
     assert _fingerprint(prediction, run, config.simulator) == plain
+
+
+class Halves(Offset):
+    """``r = theta_0`` on the first half of the times, ``theta_1`` on the rest; it says so.
+
+    A model with a parameter mask: each parameter acts on its half of
+    the data only, exactly.
+    """
+
+    n_params = 2
+    masks_parameters = True
+
+    def residuals(
+        self, case: Path, theta: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        return np.array([theta[0] if int(k.time[1:]) < N_DATA // 2 else theta[1] for k in keys])
+
+    def parameter_mask(self, keys: Sequence[DataKey]) -> NDArray[np.bool_]:
+        early = np.array([int(k.time[1:]) < N_DATA // 2 for k in keys])
+        return np.vstack([early, ~early])
+
+
+def _halves_case(directory: Path, localization: str | None) -> Path:
+    config = _case(directory, mec=True, size=2)
+    text = config.read_text().replace('name = "test_offset"', 'name = "test_halves"')
+    if localization is not None:
+        text = text.replace(
+            'strategy = { name = "rlmmac", options = { energy = 1.0 } }',
+            'strategy = { name = "rlmmac", options = { energy = 1.0 } }\n' + localization,
+        )
+    config.write_text(text)
+    return config
+
+
+def test_a_models_parameter_mask_reaches_the_runs_taper_and_resumes_bit_identically(
+    tmp_path: Path,
+) -> None:
+    """Through a whole run: the taper of nn_params is the mask (with
+    nn_params unlocalized), a run without a localization is refused before anything runs,
+    and a resumed run equals an uninterrupted one bit for bit."""
+    model_error_models.register("test_halves")(Halves)
+    try:
+        with pytest.raises(ConfigError, match="it has none"):
+            composition.start(_halves_case(tmp_path / "none", None))
+        localization = ('localization = { name = "adaptive_prior", options = { unlocalized = '
+                        '["nn_params"] } }')  # fmt: skip
+        whole = composition.start(_halves_case(tmp_path / "whole", localization), max_steps=4)
+        checkpoints = tmp_path / "whole" / "runs" / "run" / "checkpoints"
+        state = np.load(sorted(checkpoints.glob("algorithm_state_*.npz"))[-1])
+        matrix = state["method_state:taper"]
+        early = np.arange(N_DATA) < N_DATA // 2
+        np.testing.assert_array_equal(matrix[N_STATE:], np.vstack([early, ~early]).astype(float))
+        parts = _halves_case(tmp_path / "parts", localization)
+        composition.start(parts, max_steps=2)
+        resumed = composition.resume(tmp_path / "parts" / "runs" / "run", max_steps=2)
+        np.testing.assert_array_equal(resumed.posterior, whole.posterior)
+    finally:
+        model_error_models._factories.pop("test_halves")
+
+
+@pytest.mark.parametrize(
+    ("method", "match"),
+    [
+        ('name = "chop"\nmax_iterations = 3\n'
+         'strategy = { name = "rlmmac", options = { energy = 0.99 } }\n'
+         'options = { inner = "gies", components = [{ name = "length_scale", mode = "data" }] }',
+         "ChopTaper cannot apply one"),
+        ('name = "es"\nstrategy = { name = "adaptive_rows" }', "it has none"),
+    ],
+)  # fmt: skip
+def test_methods_that_cannot_apply_a_parameter_mask_are_refused_by_name(
+    tmp_path: Path, method: str, match: str
+) -> None:
+    """CHOP tapers per member (its own ChopTaper); adaptive_rows has no gain taper."""
+    model_error_models.register("test_halves")(Halves)
+    try:
+        config = _halves_case(tmp_path, None)
+        text = config.read_text()
+        start = text.index("[method]")
+        config.write_text(text[:start] + "[method]\n" + method + "\n")
+        with pytest.raises(ConfigError, match=match):
+            composition.build_run(composition.load_config(config))
+    finally:
+        model_error_models._factories.pop("test_halves")
+
+
+def test_a_parameter_mask_with_local_analysis_and_held_out_data(tmp_path: Path) -> None:
+    """local_rlmmac selects its data by adaptive_prior's taper, the mask applied; with cv
+    data held out, the mask is evaluated on the assimilated keys only."""
+    model_error_models.register("test_halves")(Halves)
+    try:
+        localization = ('localization = { name = "adaptive_prior", options = { unlocalized = '
+                        '["nn_params"] } }')  # fmt: skip
+        local = _halves_case(tmp_path / "local", localization)
+        local.write_text(local.read_text().replace('name = "rlmmac"', 'name = "local_rlmmac"'))
+        composition.start(local, max_steps=2)
+        held = _halves_case(tmp_path / "held", localization)
+        held.write_text(
+            held.read_text() + '\n[validation]\ncv = { datatypes = ["y"], times = ["t6", "t7"] }\n'
+        )
+        composition.start(held, max_steps=2)
+        checkpoints = tmp_path / "held" / "runs" / "run" / "checkpoints"
+        state = np.load(sorted(checkpoints.glob("algorithm_state_*.npz"))[-1])
+        matrix = state["method_state:taper"]
+        assert matrix.shape == (N_STATE + 2, N_DATA - 2)
+        early = np.arange(N_DATA - 2) < N_DATA // 2
+        np.testing.assert_array_equal(matrix[N_STATE:], np.vstack([early, ~early]).astype(float))
+    finally:
+        model_error_models._factories.pop("test_halves")

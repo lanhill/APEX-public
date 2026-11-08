@@ -239,13 +239,14 @@ def test_the_last_turn_asks_for_the_answer(tmp_path: Path) -> None:
 
 def test_the_oldest_tool_results_are_trimmed_to_fit_the_context(tmp_path: Path) -> None:
     # The context holds the tool definitions and one detailed list_plugins result, not two.
-    # Both are measured (at the loop's 1.5 characters per token): they grow with the plugins,
-    # and the dispatcher truncates a large result, so fixed numbers go stale.
+    # Both are measured (at the loop's 3.0 characters per token for definitions, 1.5 for the
+    # rest): they grow with the plugins, and the dispatcher truncates a large result, so fixed
+    # numbers go stale.
     session = ToolSession(ApexService(tmp_path / "measure"), client="agent-test", model="m")
     result_chars = len(json.dumps(call("list_plugins", {"details": True}, session), default=str))
     probe, _ = _loop(tmp_path / "probe", StubProvider([ANSWER]))
     tools_chars = probe._tools_size
-    one_result = int((tools_chars + 1.5 * result_chars) / 1.5)
+    one_result = int(tools_chars / 3.0 + result_chars)
     max_context = 1_000 + one_result + int(0.25 * result_chars / 1.5)  # room for 1.25 results
     details = ToolCall("c1", "list_plugins", {"details": True})
     again = ToolCall("c2", "list_plugins", {"details": True})
@@ -325,6 +326,25 @@ def test_a_small_older_result_goes_before_the_latest_is_cut(tmp_path: Path) -> N
 
         assert fitted[1].content == TRIMMED
         assert fitted[3] == plan
+
+
+def test_the_instructions_are_not_sized_as_dense_json(tmp_path: Path) -> None:
+    """Coder's follow-up to #293 (2026-11-08): the system message and tool definitions were
+    sized at 1.5 characters a token, like a run's data, though they tokenize at 3.7-4.5; on a
+    32k model the web-UI assistant's own instructions took 25k of the budget (really ~10k), and
+    a plan it had just made was cut with room to spare. They are sized at 3.0 now."""
+    plan = _plan("one seed only", "y")
+    instructions = Message("system", "Plan studies within the budget. " * 1_200)  # 38k chars
+    room = len(plan.content) / 1.5 + len(instructions.content) / 3.0 + 400
+    stub = StubProvider([ANSWER], max_context=1_000 + int(room))
+    loop = AgentLoop(stub, CallRecorder(tmp_path / "run", "advisor"),
+                     settings=LoopSettings(max_tokens=1_000))  # fmt: skip
+    assert loop._tools_size == 0  # no session: no tool definitions take the room
+    assert len(instructions.content) / 1.5 + len(plan.content) / 1.5 > room  # was cut
+
+    fitted = loop._fit([instructions, Message("user", "Plan it."), plan])
+
+    assert fitted[2] == plan
 
 
 def test_a_result_is_shortened_once_and_keeps_what_it_is_told() -> None:

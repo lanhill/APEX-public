@@ -60,6 +60,13 @@ logger = logging.getLogger(__name__)
 #: monitor's requests to Groq (qwen3.8-27b, 2026-09-29), 2.2 and 1.7. 1.5 errs on the side of
 #: fitting; with a large context it only trims a little earlier.
 CHARS_PER_TOKEN = 1.5
+#: Characters per token for what code writes: the system message (the agent's instructions,
+#: lessons and the answer schema) and the tool definitions. They are prose and JSON schemas,
+#: never a run's data (facts travel in the task), and tokenize at 3.7-4.5 characters a token
+#: (o200k_base, measured on the web-UI assistant's plan turn, 2026-11-08); at 1.5 they took
+#: 25k of a 32k model's budget, really 9.6k, so tool results were trimmed with room to spare.
+#: 3.0 stays on the safe side for tokenizers that split more finely.
+DEFINITION_CHARS_PER_TOKEN = 3.0
 
 #: What a trimmed tool result is replaced with.
 TRIMMED = '{"trimmed": "an older tool result, dropped to fit the model\'s context"}'
@@ -338,7 +345,9 @@ class AgentLoop:
         """Return the decision on ``task``: the model's if valid, else the fallback's.
 
         ``history`` holds earlier turns of a conversation (user and assistant messages),
-        placed between the system prompt and ``task``.
+        placed between the system prompt and ``task``. ``system`` holds
+        instructions only (prose, lessons): facts and data go in ``task``, since the context
+        estimate sizes the system message as prose (``DEFINITION_CHARS_PER_TOKEN``).
         """
         native = self.provider.capabilities.tool_calls
         messages = [
@@ -727,11 +736,12 @@ class AgentLoop:
         model has not answered yet) are cut, then dropped, only after every older one.
         """
         budget = self.provider.capabilities.max_context - self.settings.max_tokens
-        chars = sum(len(m.content) + len(str(m.tool_calls)) for m in messages)
-        size = int(chars / CHARS_PER_TOKEN)
+        system = sum(len(m.content) for m in messages if m.role == "system")
+        chars = sum(len(m.content) + len(str(m.tool_calls)) for m in messages if m.role != "system")
+        size = int(chars / CHARS_PER_TOKEN) + int(system / DEFINITION_CHARS_PER_TOKEN)
         if self.provider.capabilities.tool_calls:
             # Native tool definitions travel with every request and take context too.
-            size += int(self._tools_size / CHARS_PER_TOKEN)
+            size += int(self._tools_size / DEFINITION_CHARS_PER_TOKEN)
         fitted = list(messages)
         results = [i for i, m in enumerate(fitted) if _is_result(m)]
         # The latest results: the last group of them, the turn the model is to answer, even

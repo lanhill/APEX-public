@@ -60,6 +60,10 @@ from apex.algorithms.data_assimilation import (
     methods,
     update_strategies,
 )
+from apex.algorithms.data_assimilation.localization import (
+    LocalizedMethod,
+    RestrictableLocalization,
+)
 from apex.algorithms.geophysics import (
     AVOAttribute,
     DisplacementKernel,
@@ -92,6 +96,7 @@ from apex.core.progress import ProgressReporter
 from apex.core.simulation import (
     DataTransform,
     FieldResponses,
+    MaskingModel,
     ModelErrorModel,
     Parameterization,
     PriorGenerator,
@@ -490,6 +495,8 @@ class ForecastStack:
     auxiliary: frozenset[str]
     #: The geophysics model the stack forecasts with, if any (for the transforms' layout).
     geophysics: "GeophysicsModel | None" = None
+    #: The model-error model the stack forecasts with, if any (its parameter mask).
+    model_error: ModelErrorModel | None = None
 
 
 def forecast_stack(
@@ -564,7 +571,73 @@ def forecast_stack(
         auxiliary |= frozenset(geophysics.state_variables)
     if model_error is not None:
         simulator = ModelErrorSimulator(simulator, model_error)
-    return ForecastStack(simulator, tuple(warnings), auxiliary, geophysics)
+    return ForecastStack(simulator, tuple(warnings), auxiliary, geophysics, model_error)
+
+
+def attach_parameter_mask(
+    method: object,
+    layout: StateLayout,
+    model: ModelErrorModel | None,
+    keys: Sequence[DataKey],
+    *,
+    transformed: bool = False,
+) -> None:
+    """Hand a model's parameter mask to the run's localization.
+
+    A :class:`~apex.core.simulation.MaskingModel` declaring ``masks_parameters`` restricts
+    the localization taper of its state variable to the data each parameter can affect.
+    Nothing is done for any other model (plain runs unchanged). The mask is evaluated once
+    on ``keys`` (the observations: what the run assimilates is a subset of them, and a
+    mask's columns depend on their keys alone), so that a wrong one is refused when the run
+    is built (``apex validate``), not after the prior forecast. The localization is the
+    one the method reports (:class:`LocalizedMethod`).
+
+    Raises
+    ------
+    ConfigError
+        If the run transforms its data, has no localization, or has one that cannot apply
+        the mask.
+    """
+    if not isinstance(model, MaskingModel) or not model.masks_parameters:
+        return
+    variable = model.state_variable
+    if transformed:
+        raise ConfigError(
+            f"the model-error model gives which data each of its parameters ({variable}) can "
+            "affect, per datum; [[data_transforms]] mix the data it is given on, so they "
+            "cannot be combined with it"
+        )
+    localization = method.current_localization() if isinstance(method, LocalizedMethod) else None
+    if not isinstance(localization, RestrictableLocalization):
+        found = (
+            "it has none" if localization is None
+            else f"its {type(localization).__name__} cannot apply one"
+        )  # fmt: skip
+        raise ConfigError(
+            f"the model-error model gives which data each of its parameters ({variable}) can "
+            f"affect, which the run's localization must apply, and {found}. Only a taper "
+            "built once and saved with the checkpoint can (adaptive_prior, alias adaptive): "
+            "the distance localizations rebuild theirs from geometry on resume, the "
+            "per-update and projected ones recompute theirs at every update, and CHOP tapers "
+            f'per member. Set [method.localization] name = "adaptive_prior" (with {variable} '
+            "in its unlocalized list for the mask alone)"
+        )
+    start = 0
+    for block in layout.variables:
+        if block.name == variable:
+            try:
+                found_mask = np.asarray(model.parameter_mask(keys))
+            except ValueError as error:
+                raise ConfigError(f"the model-error model's parameter mask: {error}") from None
+            if found_mask.dtype != np.bool_ or found_mask.shape != (block.size, len(keys)):
+                raise ConfigError(
+                    f"the model-error model's parameter mask must be booleans "
+                    f"{(block.size, len(keys))}, got {found_mask.dtype} {found_mask.shape}"
+                )
+            localization.restrict(slice(start, start + block.size), model.parameter_mask)
+            return
+        start += block.size
+    raise ConfigError(f"the model-error model's variable {variable!r} is not in [state]")
 
 
 def check_field_responses(keys: Sequence[DataKey], provided: Mapping[str, int]) -> list[DataKey]:
@@ -638,6 +711,8 @@ def build_run(
         parameterizations = build_parameterizations(config)
         method = _build_method(config, layout, parameterizations)
         transforms = build_transforms(config)
+        attach_parameter_mask(method, layout, stack.model_error, observations.keys,
+                              transformed=bool(transforms))  # fmt: skip
         # ERT runs an ERT case's members in batches, so they go together.
         if (config.simulator.name == "ert") != (config.execution.name == "ert"):
             raise ConfigError(

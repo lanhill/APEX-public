@@ -174,6 +174,10 @@ class Chop:
         self._setup: RunSetup | None = None
         inner_method.hyperparameter_hook = self
 
+    def current_localization(self) -> ChopTaper:
+        """Return the localization the updates apply: CHOP's own per-member taper."""
+        return self.taper
+
     def _hyper_localizer(self, spec: str | Mapping[str, Any]) -> Any:  # noqa: ANN401
         if spec == "same":
             return HyperTaper(self.components)

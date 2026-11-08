@@ -1092,7 +1092,9 @@ class ChatAssistant:
                     "available, tell the user and ask; never substitute another comparison "
                     "(a method named only as background, not compared, leaves the goal)"
                 )
-            comparison = _comparison(cells, _history_matching(study_plan))
+            comparison = _comparison(cells, _history_matching(study_plan),
+                                     spec.study.budget.max_simulator_runs,
+                                     _replicate_cost(service, spec, cells))  # fmt: skip
             if access is not None:
                 for config in [c.config for c in cells]:
                     hidden = access.hidden_plugins(config)
@@ -1194,7 +1196,8 @@ class ChatAssistant:
                         raise ValueError(f"plugins not available: {', '.join(hidden)}")
                     if problems := refused(cell.config):
                         raise ValueError("not available in the UI: " + "; ".join(problems))
-            comparison = _comparison(cells, _optimization_matching(result.spec, case.parent, cells))
+            comparison = _comparison(cells, _optimization_matching(result.spec, case.parent, cells),
+                                     result.spec.study.budget.max_simulator_runs)  # fmt: skip
             space = service.workspace()
             shown, folder = self.drafts(chat_id)
             target = f"{shown}/study_{result.proposal.name}.toml"
@@ -1588,6 +1591,14 @@ class ChatAssistant:
                     f"alternative: plan_study with alternative_to = {draft!r}, a name of "
                     f"its own and {json.dumps(comparison['design_revision'])} (within the "
                     "budget), then propose_action it; say which to launch is the user's choice"
+                )
+            if unfit := comparison.get("design_unfit"):
+                # #293: what the budget cannot hold is stated beside the card, its numbers
+                # quoted; never an alternative it would refuse.
+                result["design_unfit"] = unfit
+                result["next"] = (result.get("next", "") + "; " if result.get("next") else "") + (
+                    "state beside the card what the budget cannot hold (design_unfit, with "
+                    "its numbers) and offer what would fit; the user decides"
                 )
             return result
 
@@ -2280,7 +2291,8 @@ def _over_budget(message: str) -> bool:
 #: last long fields first.
 PLAN_FIRST = (
     "draft", "study", "kind", "alternative_to", "cost", "budget", "within_budget", "cost_line",
-    "design_warnings", "design_revision", "design_warnings_note", "approval", "arm_costs",
+    "design_warnings", "design_revision", "design_unfit", "design_warnings_note", "approval",
+    "arm_costs",
     "unmatched", "matched", "next", "differences", "true_model", "simulator", "replicates",
     "seeds", "seed_rule",
 )  # fmt: skip
@@ -2619,11 +2631,14 @@ def _draft_facts(
 
         cells = expand(service, *optimizing)
         matching = _optimization_matching(optimizing[0], optimizing[1], cells)
-        return _comparison(cells, matching), _approval(service, len(cells), total)
+        budget = optimizing[0].study.budget.max_simulator_runs
+        return _comparison(cells, matching, budget), _approval(service, len(cells), total)
     from apex.services.study import load_study
 
     planned = _study_plan(service, load_study(path, service.workspace()))
-    return (_comparison(planned.cells, _history_matching(planned)),
+    return (_comparison(planned.cells, _history_matching(planned),
+                        planned.spec.study.budget.max_simulator_runs,
+                        _replicate_cost(service, planned.spec, planned.cells)),
             _approval(service, len(planned.cells), planned.max_simulator_runs))  # fmt: skip
 
 
@@ -3114,8 +3129,105 @@ def _design_revision(
     return revision
 
 
-def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> dict[str, Any]:
+#: A replicate's simulator runs (predictions included) under a revision's iterations
+#: (arm label -> max_iterations; none: as planned), or ``None`` when it cannot be told.
+ReplicateCost = Callable[[Mapping[str, int]], "int | None"]
+
+
+def _replicate_cost(service: ApexService, spec: StudySpec, cells: Sequence[Any]) -> ReplicateCost:
+    """Return what one replicate of a history-matching study costs, its iterations revised.
+
+    Each replicate-0 cell is planned again with the revision's ``max_iterations`` (the
+    service's own plan), and its predictions are added as the study's budget gate adds
+    them (#293's review: the iterations and the predictions were left out of the cost).
+    """
+    from apex.services.study import prediction_runs
+
+    first = [c for c in cells if c.replicate == 0]
+
+    def cost(iterations: Mapping[str, int]) -> int | None:
+        total = 0
+        for cell in first:
+            config = cell.config
+            label = " | ".join(p for p in (cell.case, cell.method, cell.variant) if p)
+            if label in iterations:
+                method = config.method.model_copy(update={"max_iterations": iterations[label]})
+                config = config.model_copy(update={"method": method})
+            plan = service.validate(config, engine=cell.engine, check_output=False).plan
+            runs = None if plan is None else plan.max_simulator_runs
+            predictions = None if plan is None else prediction_runs(spec, plan.members)
+            if runs is None or predictions is None:
+                return None
+            total += runs + predictions
+        return total
+
+    return cost
+
+
+def _fit_revision(
+    revision: dict[str, Any], replicates: int, cost: ReplicateCost | None, budget: int | None
+) -> tuple[dict[str, Any], str]:
+    """Return the part of a design revision the budget holds, and what was left out and why.
+
+    #293: the revision asked for 3 replicates at 700 simulator runs each under a cap of
+    1900, so the alternative it named was refused. The revised design is costed as it
+    would run (``cost``: one replicate under the revision's iterations); what does not fit
+    is left out, replicates kept before iterations, and the reason gives the numbers so
+    the assistant can offer a cheaper design. The user decides (the owner's rule of
+    2026-11-08: trade-offs are stated, not made). ``replicates``: the study's now.
+    """
+    if not revision or cost is None or budget is None:
+        return revision, ""
+    iterations: dict[str, int] = dict(revision.get("max_iterations") or {})
+    wanted = revision.get("replicates", replicates)
+    planned, raised = cost({}), cost(iterations) if iterations else None
+    if planned is None or (iterations and raised is None):
+        return revision, ""
+    full = raised if raised is not None else planned
+    if wanted * full <= budget:
+        return revision, ""
+    asks_replicates = "replicates" in revision
+    replicates_fit = asks_replicates and wanted * planned <= budget
+    iterations_fit = bool(iterations) and replicates * full <= budget
+    # Kept: the replicates when they fit, else the iterations; when both fit alone but
+    # not together, the other is said as the user's choice (never decided here).
+    kept: dict[str, Any] = (
+        {"replicates": wanted} if replicates_fit
+        else {"max_iterations": iterations} if iterations_fit else {}
+    )  # fmt: skip
+    asked = ([f"{wanted} replicates"] if asks_replicates else []) + (
+        ["raised iterations"] if iterations else [])  # fmt: skip
+    raised_text = f" ({full} with its iterations)" if iterations and full != planned else ""
+    why = (
+        f"{' and '.join(asked)} would cost {wanted * full} runs, over the budget of {budget}; "
+        f"one replicate costs {planned}{raised_text}, so {budget // planned} fit as planned"
+    )
+    if asks_replicates and not replicates_fit:
+        why += (f"; {wanted} replicates need at most {budget // wanted} each (fewer or "
+                "cheaper arms or iterations; a smaller ensemble only if the user "
+                "agrees)")  # fmt: skip
+    if replicates_fit and iterations_fit:
+        why += (f"; either fits alone, not both: {wanted} replicates ({wanted * planned}) or "
+                f"the iterations at {replicates} replicate(s) ({replicates * full}); "
+                "design_revision has the replicates, offer the other too")  # fmt: skip
+    elif iterations and not iterations_fit:
+        why += (
+            f"; the iterations do not fit even at {replicates} replicate(s) ({replicates * full})"
+        )
+    why += ". State this, offer what fits; the user decides"
+    return kept, why
+
+
+def _comparison(
+    cells: Sequence[Any],
+    matching: "_Matching | None" = None,
+    budget: int | None = None,
+    replicate_cost: ReplicateCost | None = None,
+) -> dict[str, Any]:
     """Return what a study's arms share and how they differ, from its expanded cells.
+
+    ``budget``: the study's cap on simulator runs, which a design revision keeps within,
+    costed by ``replicate_cost`` (by default the arms' own costs, iterations as planned).
 
     The assistant reported settings it had not seen (a reported issue): the case's
     inherited ensemble size and iterations, how seeds pair, options one arm has and another
@@ -3193,7 +3305,21 @@ def _comparison(cells: Sequence[Any], matching: "_Matching | None" = None) -> di
     }
     if warnings := _design_warnings(cells, arms, methods):
         result["design_warnings"] = warnings
-        if revision := _design_revision(cells, arms, methods):
+        if replicate_cost is None:
+            runs = [None if c is None else c.get("simulator_runs") for c in costs.values()]
+            known = (sum(r for r in runs if isinstance(r, int))
+                     if len(runs) == len(arms) and all(isinstance(r, int) for r in runs)
+                     else None)  # fmt: skip
+
+            def replicate_cost(iterations: Mapping[str, int]) -> int | None:
+                return None if iterations else known  # iterations unknown: no cost
+
+        revision, unfit = _fit_revision(_design_revision(cells, arms, methods),
+                                        len({c.replicate for c in cells}), replicate_cost,
+                                        budget)  # fmt: skip
+        if unfit:
+            result["design_unfit"] = unfit
+        if revision:
             result["design_revision"] = revision
             result["design_warnings_note"] = (
                 "state each design warning in the answer (the card shows them too); propose "

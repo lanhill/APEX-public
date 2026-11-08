@@ -265,6 +265,10 @@ class ESMDA(EmitsDiagnostics):
         localization: Localization | None = getattr(self.strategy, "localization", None)
         return localization
 
+    def current_localization(self) -> Localization | None:
+        """Return the localization the updates apply (its strategy's), if any."""
+        return self._localization()
+
     def _inflated(self, step_index: int, data_error: DataErrorCovariance) -> DataErrorCovariance:
         if not 0 <= step_index < self.n_steps:
             raise IndexError(f"step_index must be in [0, {self.n_steps}), got {step_index}")

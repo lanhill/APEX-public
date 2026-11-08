@@ -634,6 +634,10 @@ class GIES(EmitsDiagnostics):
         localization: Localization | None = getattr(self.strategy, "localization", None)
         return localization
 
+    def current_localization(self) -> Localization | None:
+        """Return the localization the updates apply (its strategy's), if any."""
+        return self._localization()
+
     def mean_data_mismatch(
         self,
         predicted: NDArray[np.float64],

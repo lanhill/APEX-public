@@ -429,6 +429,8 @@ class ModelErrorModel(Protocol):
     the reason when it cannot read what the simulator ``name`` writes (composition calls it
     when the model is built, so ``apex validate`` refuses too); without it every simulator
     the effective simulator can wrap is accepted.
+
+    A model whose parameters can affect only some data is a :class:`MaskingModel`.
     """
 
     state_variable: str
@@ -450,6 +452,34 @@ class ModelErrorModel(Protocol):
         self, case: Path, theta: NDArray[np.float64], keys: Sequence[DataKey]
     ) -> NDArray[np.float64]:
         """Return r at ``keys`` (0 where it does not apply) for one simulated member."""
+        ...
+
+
+@runtime_checkable
+class MaskingModel(Protocol):
+    """A model-error model that says which data each of its parameters can affect.
+
+    ``masks_parameters`` declares it (a model may declare it for some
+    configurations only). ``parameter_mask(keys)`` gives ``(n_params, len(keys))``
+    booleans, true where a parameter can affect a datum, for the keys the run
+    **assimilates**: after ``[validation]`` holds its cv and test data out (any subset of
+    the observations' keys, so each column must depend on its key alone), and false for
+    any key the model does not affect. The mask must be exact: false only where the true
+    sensitivity is zero. Composition multiplies the run's localization taper of
+    ``state_variable`` by it, and refuses a run whose localization cannot apply it, that
+    has none, or that transforms its data (``[[data_transforms]]`` mix the keys the mask is
+    defined on).
+    """
+
+    state_variable: str
+
+    @property
+    def masks_parameters(self) -> bool:
+        """Whether the run's localization takes :meth:`parameter_mask`."""
+        ...
+
+    def parameter_mask(self, keys: Sequence[DataKey]) -> NDArray[np.bool_]:
+        """Return which assimilated data each parameter can affect, ``(n_params, n_keys)``."""
         ...
 
 

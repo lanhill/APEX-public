@@ -2448,6 +2448,99 @@ def test_a_weak_comparison_is_warned_on_the_card_not_refused(
     assert [w.split(":")[0] for w in three["design_warnings"]] == ["damping"]
 
 
+def test_a_revision_asks_only_for_what_the_budget_holds(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """#293 (2026-11-08): the revision asked for 3 replicates at 700 runs each under a cap
+    of 1900, so the alternative it named was refused. It now names only what the revised
+    design, costed as it would run, keeps within the budget, and the alternative it names
+    is accepted; what is left out is said with its numbers, beside the card too."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    method = 'name = "gies"\nstrategy = { name = "rlmmac" }\nmax_iterations = 2'
+    linear_case(name="gies2", ensemble_size=20, method=method)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    plan, propose = tools["plan_study"], tools["propose_action"]
+
+    def variants(iterations: int | None = None) -> list[dict[str, Any]]:
+        more = {} if iterations is None else {"max_iterations": iterations}
+        return [
+            {"name": "baseline", "rationale": "as configured", "patch": {"method": {**more}}},
+            {"name": "lm", "rationale": "LM damping",
+             "patch": {"method": {**more, "damping": {"name": "lm"}}}},
+        ]  # fmt: skip
+
+    def planned(
+        name: str,
+        budget: int,
+        replicates: int = 1,
+        iterations: int | None = None,
+        alternative_to: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = plan.handler(plan.arguments(
+            case="gies2/config.toml", goal="LM damping against the case's", budget=budget,
+            name=name, replicates=replicates, variants=variants(iterations),
+            alternative_to=alternative_to))  # fmt: skip
+        return result
+
+    roomy = planned("roomy", 5000)
+    assert roomy["design_revision"]["replicates"] == 3
+    assert "design_unfit" not in roomy
+    one = roomy["cost"]  # one replicate at 2 iterations
+    raised = planned("raised", 5000, iterations=3)["cost"]  # one at 3
+    assert raised > one
+
+    # Room for 2 replicates as planned (and 1 at 3 iterations), not for 3.
+    budget = max(2 * one, raised) + 1
+    tight = planned("tight", budget)
+    revision = tight.get("design_revision", {})
+    assert "replicates" not in revision  # never an alternative the budget refuses
+    assert f"one replicate costs {one} ({raised} with its iterations)" in tight["design_unfit"]
+    # The raised iterations fit at 1 replicate: still offered, and the budget accepts them.
+    assert revision["max_iterations"]
+    assert planned("tight_alt", budget, iterations=3, alternative_to=tight["draft"])["draft"]
+    card = propose.handler(propose.arguments(draft=tight["draft"], summary="As planned."))
+    assert card["design_unfit"] == tight["design_unfit"]
+    assert "design_unfit" in card["next"]
+
+
+def test_fitting_a_revision_to_the_budget() -> None:
+    """#293 and its review: the revised design is costed with its iterations; what fits is
+    kept, replicates first; nothing known, nothing changed."""
+    from apex.agents.chat import _fit_revision
+
+    def cost(planned: int, raised: int) -> Any:  # noqa: ANN401 (a ReplicateCost)
+        return lambda iterations: raised if iterations else planned
+
+    both = {"replicates": 3, "max_iterations": {"a": 3}}
+    assert _fit_revision({"replicates": 3}, 1, cost(600, 600), 1900) == ({"replicates": 3}, "")
+    assert _fit_revision(both, 1, None, 1900) == (both, "")
+    assert _fit_revision(both, 1, cost(600, 850), None) == (both, "")
+    # 3 x 850 does not fit; 3 replicates as planned (1800) do, and so do the raised
+    # iterations at 1 replicate (850): both are said, the user chooses (review).
+    kept, why = _fit_revision(both, 1, cost(600, 850), 1900)
+    assert kept == {"replicates": 3}
+    assert "either fits alone, not both: 3 replicates (1800)" in why
+    assert "the iterations at 1 replicate(s) (850)" in why
+    assert "offer the other too" in why
+    assert "do not fit" not in why
+    # Only iterations revised (3 replicates already): no replicates named.
+    kept, why = _fit_revision({"max_iterations": {"a": 3}}, 3, cost(600, 700), 1900)
+    assert kept == {}
+    assert why.startswith("raised iterations would cost 2100 runs")
+    assert "the iterations do not fit even at 3 replicate(s) (2100)" in why
+    # #293's numbers: 3 x 700 does not fit; the iterations at the 2 replicates planned do.
+    kept, why = _fit_revision(both, 2, cost(700, 900), 1900)
+    assert kept == {"max_iterations": {"a": 3}}
+    assert why.startswith("3 replicates and raised iterations would cost 2700 runs")
+    assert "over the budget of 1900" in why
+    assert "one replicate costs 700 (900 with its iterations), so 2 fit as planned" in why
+    assert "3 replicates need at most 633 each" in why
+    assert why.endswith("the user decides")
+    # Nothing fits: nothing is named.
+    assert _fit_revision(both, 2, cost(700, 1000), 1900)[0] == {}
+
+
 def test_a_warned_plan_offers_an_alternative_beside_its_card(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
