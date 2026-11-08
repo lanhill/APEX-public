@@ -418,6 +418,37 @@ def control_blocks(
     return {name: np.ascontiguousarray(np.ravel(v), dtype=np.float64) for name, v in mapped.items()}
 
 
+def _check_controls_read(simulator: object, name: str, controls: Mapping[str, np.ndarray]) -> None:
+    """Refuse a control scenario the simulator would ignore (release tester H35).
+
+    A simulator that declares the state names it reads (``state_names_read``) must
+    read every control; one that cannot tell is warned about.
+
+    Raises
+    ------
+    ConfigError
+        If the simulator reads none of some controls' names.
+    """
+    read = getattr(simulator, "state_names_read", None)
+    names = read() if callable(read) else None
+    if names is None:
+        logger.warning(
+            "the %s simulator does not say which named values it reads: the control "
+            "scenario (%s) may not reach its forecast",
+            name, ", ".join(sorted(controls)),
+            extra={"event": "controls_unchecked", "simulator": name},
+        )  # fmt: skip
+        return
+    unread = sorted(set(controls) - names)
+    if unread:
+        raise ConfigError(
+            f"[controls] gives {unread}, which the {name} simulator does not read: the "
+            "forecast would be the same without them. A deck template reads a control by "
+            "naming it (e.g. ${" + unread[0] + "[0]}); other simulators read only their "
+            "own state names"
+        )
+
+
 def _predict(
     config: PredictionConfig,
     progress: ProgressReporter | None,
@@ -483,6 +514,8 @@ def _predict(
             f"a prediction with [controls] cannot run on the {simulator_config.name} simulator: "
             "its batches write only their declared parameters, not the controls"
         )
+    if controls and config.surrogate is None:
+        _check_controls_read(base, simulator_config.name, controls)
     surrogate = None
     if config.surrogate is not None:
         # The members (not the truth) by a fitted model, its keys the axis.
@@ -536,6 +569,9 @@ def _predict(
                 }
             }
         )
+        # The scenario every member was given, after its parameterizations (release
+        # tester H35: it was only in config.json).
+        | ({"controls": {k: v.tolist() for k, v in controls.items()}} if controls else {})
         | (
             {}
             if surrogate is None or config.surrogate is None

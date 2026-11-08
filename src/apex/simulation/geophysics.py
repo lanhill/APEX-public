@@ -527,6 +527,11 @@ class GeophysicsSimulator:
         # the case is cleaned: keyed by case, as threads may run members at once.
         self._models: dict[Path, CaseFieldModel] = {}
 
+    def state_names_read(self) -> frozenset[str] | None:
+        """Return the wrapped simulator's (its members' state reaches it unchanged)."""
+        read = getattr(self.inner, "state_names_read", None)
+        return read() if callable(read) else None
+
     @property
     def resources(self) -> Mapping[str, int]:
         """The inner simulator's machine-wide tokens."""

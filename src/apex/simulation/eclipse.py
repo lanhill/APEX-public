@@ -62,6 +62,7 @@ from apex.simulation.deck import (
     stopped_deck,
     tail,
     template_report_dates,
+    templates_names,
 )
 
 #: ``eclrun`` program of each Eclipse version.
@@ -168,6 +169,10 @@ class EclipseSimulator:
     def resources(self) -> dict[str, int]:
         """Machine-wide tokens one run holds: one licence and one core."""
         return {"eclipse": 1, "cpu": 1}
+
+    def state_names_read(self) -> frozenset[str] | None:
+        """Return the names its deck templates read (a control scenario's are checked)."""
+        return templates_names(self.levels.templates())
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Render the deck, run Eclipse and return the summary values at ``keys``."""

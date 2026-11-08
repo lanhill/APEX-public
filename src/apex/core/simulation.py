@@ -255,6 +255,22 @@ class SeriesSimulator(Protocol):
 
 
 @runtime_checkable
+class StateNamesRead(Protocol):
+    """Optional: the names of a member's state a simulator reads.
+
+    A prediction's control scenario is given to every member as named state; a
+    simulator that declares the names it reads lets a scenario it would
+    ignore be refused (release tester H35) rather than forecast as if unchanged. ``None``:
+    the simulator cannot tell (a deck template that reaches its values dynamically). A
+    simulator without this capability is warned about instead.
+    """
+
+    def state_names_read(self) -> frozenset[str] | None:
+        """Return the state names the simulator reads, or ``None`` if it cannot tell."""
+        ...
+
+
+@runtime_checkable
 class SeriesRun(Protocol):
     """A prediction's view of its simulator, run by an executor.
 

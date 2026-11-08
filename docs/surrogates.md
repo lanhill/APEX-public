@@ -341,27 +341,9 @@ outside = "stop"     # members outside the model's domain: "stop" | "simulator"
 
 ### A control scenario
 
-After a history match the wells are often operated differently: they leave history mode for BHP or rate control, and their targets change. A prediction can set those future controls as a **control scenario**: fixed values that every member, and the true model, is given besides its state, and that the deck template reads.
+A prediction's control scenario (future BHP or rate targets every member is given; see [Predictions: a control scenario](predictions.md#a-control-scenario)) needs a surrogate built over the controls:
 
-```toml
-[simulator.options]
-deck_template_file = "../model/deck_forecast.mako"   # e.g.  PROD1 OPEN BHP 5* ${bhp[0]} /
-
-[[controls.variables]]
-name = "bhp"
-values = [130.0, 140.0, 120.0]   # one value per control; optional lower and upper bounds are checked
-
-[[controls.parameterizations]]   # optional: maps the controls only, as an optimization's
-name = "control_schedule"
-options = { variable = "bhp", output = "bhp_steps", knots = [0, 60], n_steps = 122 }
-```
-
-- **The controls are not part of the state.** The history match never sees them, and they are left out of the scores and metrics. They come after the run's own parameterizations. A control named as a state variable or property, or as a name the deck template is given otherwise (`member_id`, `case_dir`, `level`, `coarse`, the simulator's `template_values`), is refused.
-- **When it is checked:** `apex validate` checks the section's form. The names and parameterizations are checked when the prediction starts, before anything is simulated or written.
-- **Simulators:** a deck simulator reads the controls in its template. A batch simulator that writes only its declared parameters (ERT's) is refused.
-- **A scenario is part of the prediction:** another scenario is another prediction, so give it another name. A prediction without `[controls]` is unchanged.
-- **Where they belong in the deck:** only after the history, so that the history check still reproduces the run. Template expressions are rendered in the deck template itself, not in the files it includes, so write the forecast's schedule in the template.
-- **With a surrogate:** the model must be built over the controls, on an optimization-shaped case of the forecast:
+- **How the model is built:** over the controls, on an optimization-shaped case of the forecast:
   - the prediction's deck template and simulator options;
   - its `[[controls.variables]]` with bounds, and their parameterizations;
   - the run's realizations as `[model] realizations_file` (e.g. its posterior);

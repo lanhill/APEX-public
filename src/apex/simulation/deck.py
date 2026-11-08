@@ -80,6 +80,57 @@ def render_deck(
         ) from error
 
 
+#: Mako constructs that give a template names its own parse cannot see: another template's,
+#: or values reached through the context.
+_DYNAMIC_NAMES = re.compile(
+    r"<%\s*(include|namespace|inherit)\b|\bcontext\s*[\[.]|\blocals\(|\bglobals\("
+)
+
+
+def template_names(template_path: Path) -> frozenset[str] | None:
+    """Return the names a deck template reads from its values, or ``None`` if unknown.
+
+    Every identifier its expressions, control lines and code blocks use without defining
+    it (a superset: a loop's own variable may be among them). ``None`` when the template
+    includes or inherits another, reaches its values through ``context``, or cannot be
+    parsed: then which values it reads cannot be told from its text.
+    """
+    from mako.exceptions import MakoException
+    from mako.lexer import Lexer
+
+    try:
+        text = template_path.read_text(errors="replace")
+        if _DYNAMIC_NAMES.search(text):
+            return None
+        root = Lexer(text).parse()
+    except (OSError, MakoException, SyntaxError):  # unreadable or unparsable: unknown
+        return None
+    names: set[str] = set()
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        undeclared = getattr(node, "undeclared_identifiers", None)
+        if callable(undeclared):
+            names |= set(undeclared())
+        pending.extend(getattr(node, "nodes", ()))
+    return frozenset(names)
+
+
+def templates_names(paths: Sequence[Path]) -> frozenset[str] | None:
+    """Return the names any of several deck templates reads, or ``None`` if one is unknown.
+
+    A multilevel deck's levels may render templates of their own (:class:`FidelityLevels`):
+    a value one of them reads is read.
+    """
+    found: set[str] = set()
+    for path in paths:
+        names = template_names(path)
+        if names is None:
+            return None
+        found |= names
+    return frozenset(found)
+
+
 #: A path a deck template names under its case folder: ``${case_dir}/include/Grid``. It
 #: ends at a quote, a space, a comma or a brace: GEOS lists files as
 #: ``"{ ${case_dir}/pvdo.txt, ${case_dir}/pvtw.txt }"``, where they are no part of a name.
@@ -331,6 +382,11 @@ class FidelityLevels:
             if first <= member_id < first + size:
                 return index
         return -1
+
+    def templates(self) -> list[Path]:
+        """Return every deck template the levels render: the default, then levels' own."""
+        own = [Path(str(t)) for t in (lv.get("deck_template_file") for lv in self.levels) if t]
+        return [self.default, *own]
 
     def for_member(self, member: MemberInput) -> tuple[Path, dict[str, object]]:
         """Return the member's deck template and its extra template values."""

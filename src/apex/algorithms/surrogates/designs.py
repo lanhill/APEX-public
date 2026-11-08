@@ -36,9 +36,35 @@ BUILTIN_PLANS = ("prior", "lhs", "file", "run")
 DesignPlan = str
 
 
+# One class per plan, each with its own summary: registered as one class, ``lhs``, ``file``
+# and ``run`` were listed as aliases of ``prior`` (release tester H36).
+class PriorDesign(BuiltinDesign):
+    """Draws from the case's prior generators, so fields keep their geostatistics."""
+
+
+class LatinHypercubeDesign(BuiltinDesign):
+    """A Latin hypercube over the state or an optimization's controls (``[design.box]``)."""
+
+
+class FileDesign(BuiltinDesign):
+    """Columns of a stored ensemble, of the state or of controls (``ensemble_file``)."""
+
+
+class RunDesign(BuiltinDesign):
+    """The forecasts a history-matching run already holds (``run_dir``): no simulator runs."""
+
+
+_BUILTIN_CLASSES: dict[str, type[BuiltinDesign]] = {
+    "prior": PriorDesign,
+    "lhs": LatinHypercubeDesign,
+    "file": FileDesign,
+    "run": RunDesign,
+}
+
+
 def _register_builtins() -> None:
     for name in BUILTIN_PLANS:
-        surrogate_designs.register(name)(BuiltinDesign)
+        surrogate_designs.register(name)(_BUILTIN_CLASSES[name])
 
 
 _register_builtins()

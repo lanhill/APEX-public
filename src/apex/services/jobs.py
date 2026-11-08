@@ -102,6 +102,44 @@ def service_pid(root: Path) -> int | None:
     return pid if alive(pid) else None
 
 
+#: How much of a dead worker's log is read for its last words (its traceback's end).
+WORKER_LOG_TAIL_BYTES = 16_384
+#: The line each spawn writes to the job's (appended) ``worker.log`` before the worker's
+#: output: a cause is looked for after the last one only, never in an earlier attempt's.
+WORKER_START_MARKER = "=== APEX worker started"
+
+
+def worker_cause(log: Path) -> str | None:
+    """Return the exception a dead worker's latest attempt ended with, or ``None``.
+
+    Read after the log's last :data:`WORKER_START_MARKER` (retries append to one log): the
+    exception line of its last traceback, the first unindented line after the traceback's
+    frames (``KeyError: "no job ..."``; a multi-line message's first line, which names the
+    exception). ``None`` when that attempt raised nothing (killed from outside: a signal, out
+    of memory), when the traceback is cut off, or when the log cannot be read.
+    """
+    try:
+        with log.open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - WORKER_LOG_TAIL_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    marker = text.rfind(WORKER_START_MARKER)
+    if marker >= 0:
+        text = text[marker:]
+    start = text.rfind("Traceback (most recent call last)")
+    if start < 0:
+        return None
+    lines = text[start:].splitlines()[1:]
+    frames = [i for i, line in enumerate(lines) if line.startswith("  File ")]
+    after = lines[frames[-1] + 1 :] if frames else lines
+    for line in after:
+        if line.strip() and not line[0].isspace():
+            return line.strip()[:500]
+    return None
+
+
 class LocalJobRunner:
     """Runs jobs in detached worker processes on this machine.
 
@@ -274,8 +312,12 @@ class LocalJobRunner:
             if record["kind"] == "study" or alive(record.get("pid")):
                 continue
             retries = int(record.get("retries", 0))
+            # Its own last words, when it raised: "its worker died" alone hid a KeyError
+            # (release tester H34).
+            cause = worker_cause(self.jobs / record["id"] / "worker.log")
+            said = f": {cause}" if cause else ""
             if retries >= self.settings.service.max_retries:
-                error = f"the worker process died ({retries} automatic resumes used)"
+                error = f"the worker process died ({retries} automatic resumes used){said}"
                 ended.append(
                     self.store.update_job(record["id"], state="failed", finished=now(), error=error)
                 )
@@ -299,10 +341,12 @@ class LocalJobRunner:
                 started=None,
                 retries=retries + 1,
             )
-            self.log_event(record["id"], "job_recovered", retry=retries + 1, as_kind=kind)
+            self.log_event(record["id"], "job_recovered", retry=retries + 1, as_kind=kind,
+                           **({"cause": cause} if cause else {}))  # fmt: skip
             logger.warning(
-                "job %s: its worker died; queued again (retry %d)",
+                "job %s: its worker died%s; queued again (retry %d)",
                 record["id"],
+                said,
                 retries + 1,
                 extra={"event": "job_recovered", "job": record["id"]},
             )
@@ -374,6 +418,8 @@ class LocalJobRunner:
         directory = self.jobs / job_id
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / "worker.log").open("a") as log:
+            log.write(f"{WORKER_START_MARKER} {now()} ===\n")
+            log.flush()
             process = subprocess.Popen(
                 command,
                 env=env,

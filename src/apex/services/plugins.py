@@ -11,6 +11,7 @@ options the composition reads itself before it builds the plugin (:data:`COMPOSE
 """
 
 import inspect
+import json
 import re
 import typing
 from collections.abc import Callable, Mapping
@@ -682,10 +683,24 @@ def _check_model(registry: str, name: str, options: Mapping[str, Any]) -> list[s
         model.model_validate(dict(options))
     except ValidationError as error:
         return [
-            f"{registry} {name!r}: {'.'.join(str(p) for p in e['loc']) or 'options'}: {e['msg']}"
+            f"{registry} {name!r}: {'.'.join(str(p) for p in e['loc']) or 'options'}: "
+            f"{_option_message(e)}"
             for e in error.errors()
         ]
     return []
+
+
+def _option_message(error: Mapping[str, Any]) -> str:
+    """Return a validation error's message in the configuration's terms.
+
+    Pydantic's own words for a string given where a list belongs ("'str' instances are not
+    allowed as a Sequence value", release tester H37) name its internals, not the fix.
+    """
+    if error.get("type") == "sequence_str":
+        value = error.get("input")
+        listed = json.dumps(value, ensure_ascii=False)
+        return f"a list is needed, e.g. [{listed}], not the single string {value!r}"
+    return str(error["msg"])
 
 
 def objective_plugins(config: OptimizationConfig) -> list[tuple[str, PluginSection]]:

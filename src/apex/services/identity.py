@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import apex
+from apex.core.service_files import is_service_file, service_roots
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.optimization import OptimizationConfig
 from apex.storage.provenance import file_hash, git
@@ -44,10 +45,16 @@ OUTPUT_DIRS = frozenset(
 
 
 def _listing(directory: Path) -> tuple[tuple[str, int, int], ...]:
+    # A job service's state inside a model folder (a notebook's ``apex_home`` beside its
+    # deck) is never read: opening and closing its live database here drops this process's
+    # SQLite locks on it and loses its jobs (release tester H34; core/service_files.py).
+    services = service_roots(directory)
     files = []
     for path in sorted(directory.rglob("*")):
         parts = path.relative_to(directory).parts
         if any(p in OUTPUT_DIRS or p.startswith(".") for p in parts) or not path.is_file():
+            continue
+        if is_service_file(path, services):
             continue
         stat = path.stat()
         files.append((str(path.relative_to(directory)), stat.st_size, stat.st_mtime_ns))

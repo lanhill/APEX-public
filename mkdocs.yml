@@ -144,6 +144,7 @@ nav:
   - GMAC and C-GIES: gmac.md
   - CHOP, hyper-parameters estimated as the run goes: chop.md
   - MEC, model error characterization: mec.md
+  - Predictions: predictions.md
   - Optimization: optimization.md
   - Surrogate models: surrogates.md
   - Examples and toy problems: examples.md

@@ -62,6 +62,15 @@ def test_every_plugin_describes_and_checks_its_options() -> None:
     assert unknown.startswith("unknown methods plugin 'nope'; available: ")
     available = set(unknown.split(": ", 1)[1].split(", "))
     assert {"chop", "es", "esmda", "gies", "gn_enrml", "lm_enrml", "multilevel_esmda"} <= available
+    # Core's design plans are four plans, not one with three aliases (release tester H36).
+    designs = {p.name: p.summary for p in infos if p.registry == "surrogate_designs"}
+    assert {"prior", "lhs", "file", "run"} <= set(designs)
+    assert not [n for n, summary in designs.items() if summary.startswith("An alias")]
+    assert "Latin hypercube" in designs["lhs"]
+    # A string where a list belongs is told in the configuration's terms (release tester H37).
+    [single] = check_options("localizations", "adaptive_prior", {"unlocalized": "x"})
+    assert single == ("localizations 'adaptive_prior': unlocalized: a list is needed, "
+                      "e.g. [\"x\"], not the single string 'x'")  # fmt: skip
 
 
 def test_an_unknown_plugin_of_an_empty_registry_says_none_is_installed(

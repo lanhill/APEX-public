@@ -175,6 +175,10 @@ class LinearModel:
                 columns.append(np.zeros((len(rows), size)))
         return values, np.hstack(columns)
 
+    def state_names_read(self) -> frozenset[str]:
+        """Return the state variables stacked into ``x``: the only names the model reads."""
+        return frozenset(self.variables)
+
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Evaluate the model for one member at ``keys``."""
         if member.member_id in self.fail_members:
@@ -244,6 +248,10 @@ class ToyReservoir:
         self.control = control
         self.oil_rate = oil_rate
         self.water_rate = water_rate
+
+    def state_names_read(self) -> frozenset[str]:
+        """Return the controls block and the realization's ``perm``."""
+        return frozenset({self.control, "perm"})
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Return FOPT, FWIT (FGPT and FWPT are zero) or TIME at each key's date."""

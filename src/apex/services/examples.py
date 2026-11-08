@@ -37,6 +37,7 @@ from pydantic import ValidationError
 
 import apex
 from apex.core.errors import ConfigError, validation_problems
+from apex.core.service_files import is_service_file, service_roots
 from apex.domain.examples import ExampleManifest
 from apex.services.settings import ExamplesSection
 
@@ -343,9 +344,14 @@ def example_files(folder: Path) -> Iterator[Path]:
     """Yield the files an example copies: data, not code nor run output, nor nested examples."""
     # A sub-folder with a manifest of its own is another example: not part of this one.
     nested = [m.parent for m in folder.rglob(MANIFEST) if m.parent != folder]
+    # A job service run in the example's folder (its notebook's apex_home) is not copied:
+    # its live database must not be opened here (release tester H34; core/service_files.py).
+    services = service_roots(folder)
     for path in sorted(folder.rglob("*")):
         relative = path.relative_to(folder).parts
         if any(part in SKIPPED_FOLDERS for part in relative) or not path.is_file():
+            continue
+        if is_service_file(path, services):
             continue
         if any(n in path.parents for n in nested):
             continue

@@ -172,3 +172,69 @@ def test_an_unknown_control_parameterization_is_named(finished: object) -> None:
 
     with pytest.raises(ConfigError, match=r"\[\[controls.parameterizations\]\] no_such_map"):
         prediction.predict(path)
+
+
+def test_a_scenario_the_simulator_does_not_read_is_refused(finished: object) -> None:
+    """Release tester H35: the linear model read only ``x``, so a scenario ``u`` was accepted
+    and forecast as if absent; a simulator that declares what it reads refuses it."""
+    path, _ = _prediction(finished, '[[controls.variables]]\nname = "u"\nvalues = [1.5, -0.5]\n')
+    path.write_text(path.read_text().replace('variables = ["x", "u"]', 'variables = ["x"]'))
+
+    with pytest.raises(ConfigError, match=r"gives \['u'\], which the linear simulator does not"):
+        prediction.predict(path)
+
+
+def test_a_deck_templates_names_are_the_values_it_reads(tmp_path: Path) -> None:
+    from apex.simulation.deck import template_names
+
+    template = tmp_path / "case.mako"
+    template.write_text(
+        'WCONINJE\n "INJ" WATER OPEN BHP 2* ${bhp[0]} /\n/\n'
+        "% for value in poro:\n${value}\n% endfor\n"
+        'INCLUDE\n "${case_dir}/grid.inc" /\n'
+    )
+    assert {"bhp", "poro", "case_dir"} <= template_names(template)  # type: ignore[operator]
+    assert "rate" not in template_names(template)  # type: ignore[operator]
+    template.write_text('<%include file="other.mako"/>\n')
+    assert template_names(template) is None  # what another template reads is not seen
+
+
+def test_the_scenario_is_in_the_provenance_and_the_summary(finished: object) -> None:
+    """Release tester H35: the scenario was only in the prediction's config.json."""
+    import json
+
+    from apex.services.summaries import PredictionSummarizer
+
+    path, _ = _prediction(finished, '[[controls.variables]]\nname = "u"\nvalues = [1.5, -0.5]\n')
+    prediction.predict(path)
+    folder = Path(finished.directory) / "runs" / "case" / "predictions" / "scenario"  # type: ignore[attr-defined]
+
+    recorded = json.loads((folder / "provenance.json").read_text())
+    assert recorded["controls"] == {"u": [1.5, -0.5]}
+    summary = PredictionSummarizer().summarize(folder)
+    assert (
+        "control scenario (as given, before its parameterizations): u = [1.5, -0.5]"
+        in summary.notes
+    )
+
+
+def test_every_levels_template_counts_and_an_unknown_one_makes_all_unknown(tmp_path: Path) -> None:
+    """The review: a multilevel deck's coarse level may render a template of its own."""
+    from apex.simulation.deck import FidelityLevels, templates_names
+
+    fine, coarse = tmp_path / "fine.mako", tmp_path / "coarse.mako"
+    fine.write_text("${poro}\n")
+    coarse.write_text("${poro} ${bhp[0]}\n")
+    levels = FidelityLevels([{"first": 0, "size": 2, "deck_template_file": str(coarse)}], fine)
+    assert levels.templates() == [fine, coarse.resolve()]
+    assert {"poro", "bhp"} <= templates_names(levels.templates())  # type: ignore[operator]
+    coarse.write_text("${context['bhp']}\n")
+    assert templates_names(levels.templates()) is None
+
+
+def test_a_simulator_that_cannot_tell_is_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    """The review: no capability, or None, is a warning, never a refusal."""
+    for simulator in (object(), type("Unknown", (), {"state_names_read": lambda self: None})()):
+        caplog.clear()
+        prediction._check_controls_read(simulator, "custom", {"bhp": np.ones(2)})
+        assert [r for r in caplog.records if getattr(r, "event", None) == "controls_unchecked"]

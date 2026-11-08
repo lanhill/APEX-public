@@ -43,6 +43,7 @@ from apex.simulation.deck import (
     stopped_deck,
     tail,
     template_report_dates,
+    templates_names,
 )
 
 __all__ = ["DECK_NAME", "OPMFlowSimulator", "read_summary"]
@@ -133,6 +134,10 @@ class OPMFlowSimulator:
     def resources(self) -> dict[str, int]:
         """Machine-wide tokens one run holds: its cores (``OMP_NUM_THREADS``, default 1)."""
         return {"cpu": max(1, int(os.environ.get("OMP_NUM_THREADS", "1")))}
+
+    def state_names_read(self) -> frozenset[str] | None:
+        """Return the names its deck templates read (a control scenario's are checked)."""
+        return templates_names(self.levels.templates())
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Render the deck, run Flow and return the summary values at ``keys``."""

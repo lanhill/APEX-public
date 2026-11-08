@@ -264,6 +264,11 @@ class PredictionSummarizer:
                 rows.append(_single(score, "all", index, float(np.mean(values))))
         names = list(result.forecasts)
         section = config.prediction
+        if config.controls is not None:
+            # The scenario the forecasts were made under (release tester H35); provenance.json
+            # records it after its parameterizations.
+            given = "; ".join(f"{v.name} = {v.array().tolist()}" for v in config.controls.variables)
+            notes.append(f"control scenario (as given, before its parameterizations): {given}")
         sources = PredictionDirectory(path).read_state().get("member_sources", {})
         if config.surrogate is not None:
             # Which members the surrogate forecast, the rest the simulator's.
