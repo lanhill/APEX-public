@@ -24,7 +24,7 @@ name = "pg_lstm"
 | `initial_schedule_file` | string or null | | Schedule text read before `schedule_file`: the deck's own SCHEDULE keywords before its included history (e.g. a first COMPDAT), if any. |
 | `injector_data` | array | ["WBHP"] | Their data types, e.g. `["WOPR", "WBHP", "WWCT"]` and `["WBHP"]`. |
 | `injectors` | array | | Well names. |
-| `phases` | array | ["oil", "water"] | The deck's phases (oil required): they set the dynamic features, each phase's density and saturation (`feature_names`). |
+| `phases` | array | ["oil", "water"] | The deck's phases, one or more of oil, water and gas: they set the dynamic features, each phase's density and saturation (`feature_names`; without oil, its density and saturation are 0). |
 | `producer_data` | array | ["WOPR", "WBHP", "WWCT"] | Their data types, e.g. `["WOPR", "WBHP", "WWCT"]` and `["WBHP"]`. |
 | `producers` | array | | Well names. |
 | `report_steps` | array | required | 1-based report steps of the network's report times (the observation times). |

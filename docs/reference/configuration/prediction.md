@@ -66,6 +66,7 @@ Where members run; default: the run's [execution].
 | `percentile_convention` | string | percentile | 'percentile': p10 is the 10th percentile; 'exceedance': SPE-PRMS labels (P90 is the value exceeded with 90 % probability, the 10th percentile). |
 | `run_dir` | string | required | The history-matching run to forecast from. |
 | `scores` | array | | Forecast scores against the truth (synthetic cases, with 'truth'). |
+| `truth_is_simulator` | boolean | false | A run with a model-error model: its truth is this simulator's own (the observations came from it, without model error), so 'truth' is forecast by the simulator alone. Without it, 'truth' is refused: a model error means the data came from another model, which the simulator does not reproduce. |
 
 **`PredictionOutputsSection`**: `[prediction.outputs]`: which series to forecast.
 

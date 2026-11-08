@@ -121,6 +121,7 @@ from apex.domain.results import HistoryMatchResult
 from apex.domain.state import StateLayout, StateVariable
 from apex.reporting.summary import run_summary
 from apex.simulation.deck import (
+    DeckContents,
     case_dir_files,
     case_folder,
     deck_contents,
@@ -1508,7 +1509,7 @@ def build_model_error(
 
 
 def check_model_error_summary(config: HistoryMatchConfig, model: ModelErrorModel) -> None:
-    """Refuse, before any member runs, a deck whose SUMMARY lacks what the model reads.
+    """Refuse, before any member runs, a deck without INIT or whose SUMMARY lacks a vector.
 
     ``pg_lstm`` reads every listed well's ``WBHP`` (its ``PRESS_DIFF`` feature) whether or
     not it is observed; a deck without it failed only once each member's run was read,
@@ -1519,11 +1520,33 @@ def check_model_error_summary(config: HistoryMatchConfig, model: ModelErrorModel
     Raises
     ------
     ConfigError
-        If the deck's SUMMARY section certainly lacks a vector the model reads.
+        If the deck's GRID section certainly lacks ``INIT``, or its SUMMARY section a
+        vector the model reads.
     """
     template = config.simulator.options.get("deck_template_file")
+    if not isinstance(template, str):
+        return
+    name = config.model_error.name if config.model_error else ""
+    contents = deck_contents(Path(template), case_folder(config.simulator.options))
+    # Every model error model reads each well block's static features from the INIT file,
+    # which the simulators write only when GRID asks (a CO2STORE deck from the case
+    # converter had none: every member failed after its run, 2026-11-08).
+    if contents.init is False:
+        raise ConfigError(
+            f"[model_error] {name}: the deck's GRID section has no INIT, so the simulator "
+            "writes no INIT file, from which the model reads each well block's static "
+            "features (DX, PERMX, PORO, ...); add INIT to GRID"
+        )
+    if (contents.co2store or contents.gaswat) and config.simulator.name == "eclipse":
+        model_name = "CO2STORE" if contents.co2store else "GASWAT"
+        raise ConfigError(
+            f"[model_error] {name}: Eclipse 300's {model_name} (compositional) names the "
+            "restarts' densities DENW and DENG, not WAT_DEN and GAS_DEN, which the model "
+            "reads: run the deck on opm_flow"
+        )
+    _check_model_error_phases(name, getattr(model, "phases", None), contents)
     vectors = getattr(model, "summary_vectors", None)
-    if not isinstance(template, str) or not vectors:
+    if not vectors:
         return
     by_keyword: dict[str, list[str]] = {}
     for keyword, well in vectors:
@@ -1534,11 +1557,68 @@ def check_model_error_summary(config: HistoryMatchConfig, model: ModelErrorModel
         )
         if missing:
             raise ConfigError(
-                f"[model_error] {config.model_error.name if config.model_error else ''}: "
-                f"the deck's SUMMARY section has no {keyword} of "
+                f"[model_error] {name}: the deck's SUMMARY section has no {keyword} of "
                 f"{', '.join(missing)}, which the model reads for every listed well (observed "
                 f"or not); add, e.g., {keyword} / (every well) to SUMMARY"
             )
+
+
+def _check_model_error_phases(
+    name: str, phases: Sequence[str] | None, contents: DeckContents
+) -> None:
+    """Refuse a model's ``phases`` the deck's own RUNSPEC contradicts (generic phases, 2026-11-08).
+
+    A phase the deck lacks has no density or saturation to read (every member would fail
+    on its first restart); leaving out the deck's oil would make its features 0 (the rule
+    for decks without oil, not a choice of inputs). A CO2STORE deck's phases are those its
+    RUNSPEC names (OPM's gas-water form, or its older oil-gas one, whose brine is the oil),
+    water and gas when it names none (Eclipse 300's form);
+    another compositional deck (``COMPS``) and a RUNSPEC the text cannot tell (Mako, template
+    expressions, or any INCLUDE in it, :class:`~apex.simulation.deck.DeckContents`) are not
+    judged. Leaving out the deck's gas or water is allowed, as before, but not a CO2STORE
+    deck's gas.
+
+    Raises
+    ------
+    ConfigError
+        Naming the phases to set.
+    """
+    if phases is None:
+        return
+    model = {str(p).lower() for p in phases}
+    deck: frozenset[str] | None = contents.phases
+    if contents.co2store:
+        # Eclipse 300's form (COMPS) is water and gas whatever its RUNSPEC names.
+        deck = (
+            frozenset({"water", "gas"})
+            if contents.compositional
+            else deck or frozenset({"water", "gas"})
+        )
+    elif contents.compositional is not False:
+        return
+    if deck is None:
+        return
+    advice = [p for p in ("oil", "water", "gas") if p in deck]
+    kind = ", a CO2STORE deck" if contents.co2store else ""
+    missing = sorted(model - deck)
+    if missing:
+        raise ConfigError(
+            f"[model_error] {name}: phases {sorted(model)} include {missing}, which the deck "
+            f"has not (its phases: {sorted(deck)}{kind}): set phases = {advice} in "
+            "[model_error.options]"
+        )
+    if contents.co2store and "gas" not in model:
+        raise ConfigError(
+            f"[model_error] {name}: a CO2STORE deck's gas (the CO2-rich phase) is left out of "
+            f"phases {sorted(model)}: the CO2's density and saturation, and its injectors' gas "
+            f"rate, are what the model reads; set phases = {advice} in [model_error.options]"
+        )
+    if "oil" in deck and "oil" not in model:
+        raise ConfigError(
+            f"[model_error] {name}: the deck has oil, which phases {sorted(model)} leave out "
+            "(its density and saturation would be read as 0, the rule for decks without oil): "
+            f"set phases = {advice} in [model_error.options]"
+        )
 
 
 def build_metrics(config: HistoryMatchConfig) -> dict[str, PerformanceMetric]:

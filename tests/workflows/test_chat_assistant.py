@@ -534,6 +534,10 @@ def test_a_timed_out_model_is_said_in_plain_words_and_the_draft_still_named(
     assert "no answer in 120 s" in store.turns(chat.id)[-1].data["reason"]
     [shown] = [e for e in store.events(chat.id) if e.kind == "fallback"]
     assert shown.data["reason"] == "the model took too long to answer"
+    # #290: the answer says the provider failed, not the assistant, for clients judging it.
+    [said] = [e for e in store.events(chat.id) if e.kind == "answer"]
+    assert said.data["unavailable"] is True
+    assert said.data["timed_out"] is True
 
 
 def test_the_closing_sentence_names_every_unproposed_draft() -> None:

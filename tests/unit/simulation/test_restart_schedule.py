@@ -527,3 +527,38 @@ def test_schedule_keywords_come_in_deck_order_with_includes_in_place(tmp_path: P
     ]  # END stops the reading and is not returned
     assert keywords[4][1] == ["P OPEN ORAT 100"]
     assert notes == []
+
+
+def _grid(tmp_path: Path, runspec: str, grid: str) -> DeckContents:
+    deck = tmp_path / "deck.mako"
+    deck.write_text(f"RUNSPEC\n{runspec}\nGRID\n{grid}\nSOLUTION\nSUMMARY\nSCHEDULE\nEND\n")
+    return deck_contents(deck, tmp_path)
+
+
+def test_deck_contents_reads_init_and_comps(tmp_path: Path) -> None:
+    """GRID's INIT (the INIT file the model-error models read, 2026-11-08) and RUNSPEC's
+    COMPS: unknown where the text cannot tell."""
+    assert _grid(tmp_path, "OIL\nWATER", "INIT\nDX\n 1*10 /").init is True
+    assert _grid(tmp_path, "OIL\nWATER", "DX\n 1*10 /").init is False
+    assert _grid(tmp_path, "OIL", "% if init:\nINIT\n% endif").init is None  # Mako
+    assert _grid(tmp_path, "OIL", "INCLUDE\n 'missing.inc' /").init is None  # unread
+    # Other spellings (the parser reads keywords upper case, alone): not certainly absent.
+    assert _grid(tmp_path, "OIL", "INIT /").init is None
+    assert _grid(tmp_path, "OIL", "init").init is None
+    (tmp_path / "lower.inc").write_text("  init  -- write it\n")
+    assert _grid(tmp_path, "OIL", "INCLUDE\n 'lower.inc' /").init is None
+    (tmp_path / "outer.inc").write_text("INCLUDE\n  lower.inc /\n")  # nested, unquoted
+    assert _grid(tmp_path, "OIL", "INCLUDE\n 'outer.inc' /").init is None
+    (tmp_path / "inc").mkdir()
+    (tmp_path / "inc" / "aliased.inc").write_text("init /\n")  # through a PATHS alias
+    aliased = "PATHS\n 'GRIDDIR' 'inc' /\n/\nGRID\nINCLUDE\n '$GRIDDIR/aliased.inc' /"
+    deck = tmp_path / "aliased.mako"
+    deck.write_text(f"RUNSPEC\nOIL\n{aliased}\nSOLUTION\nSUMMARY\nSCHEDULE\nEND\n")
+    assert deck_contents(deck, tmp_path).init is None
+    assert _grid(tmp_path, "OIL", "DX\n 1*10 /  -- no INITIAL here").init is False
+    (tmp_path / "grid.inc").write_text("INIT\n")
+    assert _grid(tmp_path, "OIL", "INCLUDE\n 'grid.inc' /").init is True
+    assert _grid(tmp_path, "WATER\nCOMPS\n 3 /", "INIT").compositional is True
+    assert _grid(tmp_path, "OIL\nWATER", "INIT").compositional is False
+    assert _grid(tmp_path, "WATER\nGASWAT\nCOMPS\n 3 /", "INIT").gaswat is True
+    assert _grid(tmp_path, "% if c:\nCOMPS\n 3 /\n% endif", "INIT").compositional is None

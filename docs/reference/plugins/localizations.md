@@ -24,6 +24,7 @@ name = "adaptive"
 | `taper` | string | hard | How correlations are kept: `"hard"` (default) keeps those above the threshold and drops the rest, `"soft"` scales them down smoothly with Gaspari-Cohn, and `"sigmoid"` uses a steep logistic step. |
 | `threshold` | string | universal | `"universal"` (default): a threshold per state variable and datum, estimated from correlations with a shuffled ensemble and growing with the variable's size; `"fixed"`: `cutoff` everywhere. With many cells and few members the universal threshold can keep almost nothing; a fixed one does not. |
 | `threshold_scale` | number | 1.0 | Multiplier of the universal threshold (positive, default 1); larger keeps fewer correlations. Not with `threshold = "fixed"`. |
+| `unlocalized` | array | | State variables updated without localization (their taper rows are 1), e.g. a model-error network's parameters `nn_params`, whose single weights correlate too weakly with the data for the threshold and are all switched off otherwise (5Spots, 2026-11-07: 0.0025% kept). Default none. |
 
 ## `adaptive_per_update`
 
@@ -42,6 +43,7 @@ name = "adaptive_per_update"
 | `taper` | string | hard | `"hard"` (default), `"soft"` or `"sigmoid"` (PET `type`). |
 | `threshold` | string | universal | `"universal"` (default): `threshold_scale * sqrt(2 ln n_block) * sigma` from the shuffled correlations; `"fixed"`: `cutoff` for every datum and cell. The universal threshold grows with the block's size, so with many cells and few members it can keep almost nothing (0.45 for 18,000 cells and 100 members); a fixed one does not. |
 | `threshold_scale` | number | 1.0 | Multiplier of the universal threshold (PET `autoadaloc` value, `nstd`). |
+| `unlocalized` | array | | State variables updated without localization (their taper rows are 1), e.g. a model-error network's parameters `nn_params`, whose single weights correlate too weakly with the data for the threshold and are all switched off otherwise (5Spots, 2026-11-07: 0.0025% kept). Default none. |
 
 ## `adaptive_prior`
 
@@ -60,6 +62,7 @@ name = "adaptive_prior"
 | `taper` | string | hard | How correlations are kept: `"hard"` (default) keeps those above the threshold and drops the rest, `"soft"` scales them down smoothly with Gaspari-Cohn, and `"sigmoid"` uses a steep logistic step. |
 | `threshold` | string | universal | `"universal"` (default): a threshold per state variable and datum, estimated from correlations with a shuffled ensemble and growing with the variable's size; `"fixed"`: `cutoff` everywhere. With many cells and few members the universal threshold can keep almost nothing; a fixed one does not. |
 | `threshold_scale` | number | 1.0 | Multiplier of the universal threshold (positive, default 1); larger keeps fewer correlations. Not with `threshold = "fixed"`. |
+| `unlocalized` | array | | State variables updated without localization (their taper rows are 1), e.g. a model-error network's parameters `nn_params`, whose single weights correlate too weakly with the data for the threshold and are all switched off otherwise (5Spots, 2026-11-07: 0.0025% kept). Default none. |
 
 ## `adaptive_projected`
 

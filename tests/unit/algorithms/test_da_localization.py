@@ -304,3 +304,145 @@ def test_three_over_root_n_needs_ten_members() -> None:
     loc = PriorAdaptiveLocalization([4], threshold="fixed")
     with pytest.raises(ValueError, match="keeps nothing with 9 members"):
         loc._fixed_cutoff(9)
+
+
+@pytest.mark.parametrize("cls", [PriorAdaptiveLocalization, AdaptiveLocalization])
+@pytest.mark.parametrize("threshold", ["universal", "fixed"])
+def test_unlocalized_variables_get_rows_of_ones_and_the_rest_is_unchanged(
+    cls: type[PriorAdaptiveLocalization] | type[AdaptiveLocalization], threshold: str
+) -> None:
+    """The 5Spots MEC run (2026-11-07): the taper kept 0.0025% of the network's weights.
+    ``unlocalized`` leaves a named variable's rows at 1; the other rows, and the run's
+    localization stream, are those of the plain localization."""
+    rng = np.random.default_rng(6)
+    a, b = rng.standard_normal((12, 30)), rng.standard_normal((5, 30))
+    sizes, names = [4, 6, 2], ["poro", "nn_params", "permx"]
+    plain = cls(sizes, threshold=threshold)  # type: ignore[arg-type]
+    exempt = cls(sizes, threshold=threshold, unlocalized=["nn_params"],  # type: ignore[arg-type]
+                 variable_names=names)  # fmt: skip
+    first, second = np.random.default_rng(1), np.random.default_rng(1)
+
+    reference = plain._taper(a, b, first)
+    taper = exempt._taper(a, b, second)
+
+    assert first.random() == second.random()
+    np.testing.assert_array_equal(taper[4:10], 1.0)
+    np.testing.assert_array_equal(np.delete(taper, slice(4, 10), axis=0),
+                                  np.delete(reference, slice(4, 10), axis=0))  # fmt: skip
+    assert not np.all(reference[4:10] == 1.0)  # the exemption changed something
+
+
+def test_an_unlocalized_variable_takes_the_unlocalized_rlmmac_step() -> None:
+    """With every variable unlocalized the prior-taper step is the plain RLM-MAC step."""
+    rng = np.random.default_rng(3)
+    state = rng.standard_normal((6, 20))
+    predicted = rng.standard_normal((4, 20))
+    perturbed = rng.standard_normal((4, 20))
+    reference = predicted.mean(axis=-1) + 0.1
+    error = DataErrorCovariance.diagonal(np.ones(4))
+    localization = PriorAdaptiveLocalization([2, 4], unlocalized=["a", "b"],
+                                             variable_names=["a", "b"])  # fmt: skip
+    localization.prepare(state, predicted, [], rng)
+
+    plain = RLMMACUpdate(energy=1.0).step(
+        state, predicted, perturbed, error, damping=0.5, reference_prediction=reference
+    )
+    localized = RLMMACUpdate(energy=1.0, localization=localization).step(
+        state, predicted, perturbed, error, damping=0.5, reference_prediction=reference
+    )
+
+    np.testing.assert_allclose(localized, plain, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"unlocalized": ["c"], "variable_names": ["a", "b"]}, r"\['c'\], which are not state"),
+        ({"unlocalized": ["a"]}, "needs the variables' names"),
+        ({"unlocalized": "a", "variable_names": ["a", "b"]}, "must be a list"),
+    ],
+)
+def test_unlocalized_names_are_checked(options: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        PriorAdaptiveLocalization([2, 3], **options)  # type: ignore[arg-type]
+
+
+def _steps(loc: PriorAdaptiveLocalization | AdaptiveLocalization, path: str) -> tuple:  # type: ignore[type-arg]
+    """``(localized, unlocalized)`` steps of one entry point on a non-square case."""
+    rng = np.random.default_rng(8)
+    n_state, n, n_data = 13, 17, 7
+    dx = rng.standard_normal((n_state, n))
+    gain = rng.standard_normal((n, n_data))
+    r = rng.standard_normal((n_data, n))
+    gains = [rng.standard_normal((n, n_data)) for _ in range(n)]
+    sources = [rng.standard_normal((n, n)) for _ in range(2)]
+    if isinstance(loc, PriorAdaptiveLocalization):
+        loc.prepare(dx, rng.standard_normal((n_data, n)), [], rng)
+    stream = np.random.default_rng(0)
+    if path == "step":
+        return loc.localized_step(dx, gain, r, stream), dx @ gain @ r
+    if path == "members":
+        plain = np.stack([dx @ g @ r[:, j] for j, g in enumerate(gains)], axis=-1)
+        return loc.localized_member_steps(dx, iter(gains), r, stream), plain
+    assert isinstance(loc, AdaptiveLocalization)
+    return loc.localized_source_steps(dx, sources, stream), sum(dx @ p for p in sources)
+
+
+@pytest.mark.parametrize(
+    ("cls", "path"),
+    [(PriorAdaptiveLocalization, "step"), (PriorAdaptiveLocalization, "members"),
+     (AdaptiveLocalization, "step"), (AdaptiveLocalization, "members"),
+     (AdaptiveLocalization, "sources")],
+)  # fmt: skip
+def test_unlocalized_rows_take_the_unlocalized_step_in_every_entry_point(
+    cls: type[PriorAdaptiveLocalization] | type[AdaptiveLocalization], path: str
+) -> None:
+    """The numerics review: a mixed case (the middle block exempt) through each entry point
+    (the gain, GIES's per-member gains, C-GIES's sources); the other rows stay tapered."""
+    loc = cls([4, 5, 4], unlocalized=["b"], variable_names=["a", "b", "c"])
+    localized, plain = _steps(loc, path)
+    np.testing.assert_allclose(localized[4:9], plain[4:9], rtol=1e-12, atol=1e-12)
+    assert not np.allclose(np.delete(localized, slice(4, 9), axis=0),
+                           np.delete(plain, slice(4, 9), axis=0))  # fmt: skip
+
+
+def test_an_unlocalized_block_is_not_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    """The numerics review: no "updates are zeroed" warning about a block left unlocalized."""
+    corr = np.full((3, 2), 0.1)
+    shuffled = np.full((3, 2), 0.9)  # cutoff >= 1 in every block
+    taper = adaptive_taper(corr, shuffled, [2, 1], 1.0, "hard", exempt=(False, True))
+    np.testing.assert_array_equal(taper, [[0, 0], [0, 0], [1, 1]])
+    assert caplog.text.count("block of 2") == 1
+    taper = adaptive_taper(corr, shuffled, [1, 2], 1.0, "hard", exempt=(False, True))
+    np.testing.assert_array_equal(taper[1:], 1.0)
+    assert caplog.text.count("block of 2") == 1  # not warned again: exempt
+
+
+def test_every_variable_unlocalized_is_warned(caplog: pytest.LogCaptureFixture) -> None:
+    PriorAdaptiveLocalization([2, 3], unlocalized=["a", "b"], variable_names=["a", "b"])
+    assert "every state variable is unlocalized" in caplog.text
+
+
+@pytest.mark.parametrize("threshold", ["universal", "fixed"])
+def test_exempt_rows_are_not_correlated_and_the_rest_is_tapered_as_before(threshold: str) -> None:
+    """The coder's review: the exempt rows' correlations are skipped (a network's would be two
+    dense temporaries); the other rows' taper is the one over every row, and the stream is
+    unchanged."""
+    from apex.algorithms.data_assimilation.localization import correlation as corr
+
+    rng = np.random.default_rng(9)
+    a, b = rng.standard_normal((40, 25)), rng.standard_normal((6, 25))
+    sizes, names = [10, 22, 8], ["poro", "nn_params", "permx"]
+    loc = PriorAdaptiveLocalization(sizes, threshold=threshold,  # type: ignore[arg-type]
+                                    unlocalized=["NN_PARAMS"], variable_names=names)  # fmt: skip
+    first, second = np.random.default_rng(2), np.random.default_rng(2)
+    taper = loc._taper(a, b, first)
+    order = derangement(second, 25)
+    fixed = 3 / np.sqrt(25) if threshold == "fixed" else None
+    reference = adaptive_taper(
+        corr(a, b), None if fixed else corr(a[:, order], b), sizes, 1.0, "hard",
+        fixed=fixed, exempt=(False, True, False),
+    )  # fmt: skip
+    assert first.random() == second.random()
+    np.testing.assert_array_equal(taper[10:32], 1.0)  # matched in any case
+    np.testing.assert_allclose(taper, reference, rtol=0, atol=0)

@@ -16,6 +16,7 @@ from apex.simulation.model_error import (
     ModelErrorSimulator,
     feature_names,
     read_schedule,
+    well_features,
     well_schedules,
 )
 
@@ -110,8 +111,56 @@ def test_features_follow_the_phases_in_pet_forks_order() -> None:
     assert feature_names(["oil", "water", "gas"])[7:] == (
         "OIL_DEN", "WAT_DEN", "SWAT", "GAS_DEN", "SGAS", "SOIL", "PRESS_DIFF",
     )  # fmt: skip
-    with pytest.raises(ValueError, match="must include oil"):
-        feature_names(["water", "gas"])
+    # Without oil (the user, 2026-11-07) the layout keeps OIL_DEN and SOIL (0 in the inputs).
+    assert feature_names(["water", "gas"]) == feature_names(["oil", "water", "gas"])
+    assert feature_names(["gas"])[7:] == ("OIL_DEN", "GAS_DEN", "SGAS", "SOIL", "PRESS_DIFF")
+    for bad in ([], ["water", "water"], ["brine"]):
+        with pytest.raises(ValueError, match="one or more of"):
+            feature_names(bad)
+
+
+class _CaseFiles:
+    """Restarts of a gas-water deck: no OIL_DEN; SOIL computed as 1 - SWAT - SGAS."""
+
+    def __init__(self) -> None:
+        self.case = Path("CASE")
+
+    def static(self, name: str) -> NDArray[np.float64]:
+        return np.arange(1.0, 51.0) * (1 + len(name))
+
+    def restart(self, step: int) -> dict[str, NDArray[np.float64]]:
+        cells = np.arange(50.0)
+        swat = 0.7 + 0.001 * cells
+        sgas = 0.3 - 0.001 * cells
+        return {"PRESSURE": 100 + cells + step, "SWAT": swat, "SGAS": sgas,
+                "WAT_DEN": 1030 + cells, "GAS_DEN": 690 + cells,
+                "SOIL": 1.0 - swat - sgas}  # fmt: skip
+
+    def wbhp(self, well: str, step: int) -> float:
+        return 200.0 + step
+
+    def active(self, block: tuple[int, int, int]) -> int:
+        i, j, k = block
+        return (i - 1) + 5 * (j - 1) + 25 * (k - 1)
+
+
+def test_a_deck_without_oil_has_zero_oil_features(schedule: Path) -> None:
+    """A gas-water (CO2 storage) deck: OIL_DEN, which it lacks, and SOIL are 0; the rest are
+    read, as with oil."""
+    wells = well_schedules(schedule, [3, 4], WELLS)
+    files = _CaseFiles()
+    names = feature_names(["water", "gas"])
+    x = well_features(files, wells, [3, 4], ["water", "gas"])  # type: ignore[arg-type]
+    per_block = x[1].reshape(2, len(names), -1)  # I1: one block, (5, 5, 1)
+    values = dict(zip(names, per_block[0, :, 0], strict=True))
+    assert values["OIL_DEN"] == 0.0
+    assert values["SOIL"] == 0.0
+    cell = files.active((5, 5, 1))
+    assert values["WAT_DEN"] == 1030 + cell
+    assert values["GAS_DEN"] == 690 + cell
+    assert values["PRESS_DIFF"] == 203.0 - (100 + cell + 3)
+    with pytest.raises(SimulationError, match="no OIL_DEN"):  # with oil, OIL_DEN is read
+        well_features(files, wells, [3, 4], ["oil", "water", "gas"])  # type: ignore[arg-type]
 
 
 def test_missing_steps_and_wells_are_refused(schedule: Path) -> None:

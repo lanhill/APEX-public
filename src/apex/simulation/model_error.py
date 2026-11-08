@@ -65,22 +65,30 @@ def feature_names(phases: Sequence[str]) -> tuple[str, ...]:
     The static ones, then each phase's density and saturation (oil, water, gas), with the
     oil saturation, which the simulators do not write, after the others, then PRESS_DIFF
     (the well's WBHP minus the block pressure). Oil-water: ``OIL_DEN WAT_DEN SWAT SOIL
-    PRESS_DIFF``; with gas: ``OIL_DEN WAT_DEN SWAT GAS_DEN SGAS SOIL PRESS_DIFF``.
+    PRESS_DIFF``; with gas: ``OIL_DEN WAT_DEN SWAT GAS_DEN SGAS SOIL PRESS_DIFF``. The oil's
+    ``OIL_DEN`` and ``SOIL`` are always in the layout: a deck without oil (a gas-water or
+    CO2 storage deck) has them as 0 (:func:`well_features`; the user, 2026-11-07).
 
     Raises
     ------
     ValueError
-        If ``phases`` lacks oil, repeats a phase or names an unknown one.
+        If ``phases`` is empty, repeats a phase or names an unknown one.
     """
     names = [p.lower() for p in phases]
     unknown = sorted(set(names) - set(PHASES))
-    if unknown or "oil" not in names or len(set(names)) != len(names):
-        raise ValueError(f"phases must include oil, among {sorted(PHASES)}, got {list(phases)}")
+    if not names or unknown or len(set(names)) != len(names):
+        raise ValueError(
+            f"phases must be one or more of {sorted(PHASES)}, each once, got {list(phases)}"
+        )
     dynamic = ["OIL_DEN"]
     for phase in ("water", "gas"):
         if phase in names:
             dynamic += list(PHASES[phase])
     return (*STATIC, *dynamic, "SOIL", "PRESS_DIFF")
+
+
+#: The features that are 0 without oil: :func:`feature_names` keeps them in the layout.
+OIL_FEATURES = frozenset(PHASES["oil"])
 
 
 #: Datatype prefix of the residual keys an effective simulator also answers.
@@ -370,6 +378,7 @@ def well_features(
     Feature-major, then block (PET-fork's order): every feature of
     :func:`feature_names` at every block of :attr:`WellSchedule.blocks`; a block the well
     does not perforate at a report time (or an inactive one) is 0, PET-fork's padding.
+    Without oil in ``phases``, OIL_DEN and SOIL are 0.
 
     Raises
     ------
@@ -377,10 +386,13 @@ def well_features(
         If a file lacks a feature (restarts need ``RPTRST BASIC=2 DEN``).
     """
     names = feature_names(phases)
+    # Without oil its density and saturation are 0, whatever the restarts hold (a SOIL
+    # computed as 1 - SWAT - SGAS would be rounding noise).
+    absent = OIL_FEATURES if "oil" not in [p.lower() for p in phases] else frozenset()
     static = {name: files.static(name) for name in STATIC}
     restarts = [files.restart(step) for step in report_steps]
     for step, arrays in zip(report_steps, restarts, strict=True):
-        missing = [n for n in names[len(STATIC) : -1] if n not in arrays]
+        missing = [n for n in names[len(STATIC) : -1] if n not in arrays and n not in absent]
         if missing:
             raise SimulationError(
                 f"{files.case.name}: no {', '.join(missing)} at report step {step} (the deck "
@@ -398,7 +410,7 @@ def well_features(
                     continue
                 x[t, :, b] = [
                     *(static[n][cell] for n in STATIC),
-                    *(dyn[n][cell] for n in names[len(STATIC) : -1]),
+                    *(0.0 if n in absent else dyn[n][cell] for n in names[len(STATIC) : -1]),
                     bhp - dyn["PRESSURE"][cell],
                 ]
         sequences.append(x.reshape(len(report_steps), -1))

@@ -767,3 +767,48 @@ def test_es_approaches_the_kalman_posterior(linear_case: CaseFactory) -> None:
     np.testing.assert_allclose(np.cov(result.posterior), covariance, atol=0.01)
     assert [r.iteration for r in result.history] == [0, 1]  # prior and one update
     assert result.complete
+
+
+def test_an_unlocalized_variable_is_updated_as_without_localization(
+    linear_case: CaseFactory,
+) -> None:
+    """``unlocalized`` (the MEC network's parameters on 5Spots, 2026-11-07): GIES with
+    adaptive_prior leaving the only variable unlocalized follows GIES without localization;
+    its name reaches the localization from [state]."""
+    gies = (
+        'name = "gies"\nmax_iterations = 3\n'
+        'strategy = { name = "rlmmac", options = { energy = 0.99 } }\n'
+    )
+    plain = linear_case(name="plain", ensemble_size=30, method=gies)
+    exempt = linear_case(
+        name="exempt",
+        ensemble_size=30,
+        method=gies
+        + ('localization = { name = "adaptive_prior", options = { unlocalized = ["x"] } }'),
+    )
+    localized = linear_case(
+        name="localized",
+        ensemble_size=30,
+        method=gies + ('localization = { name = "adaptive_prior" }'),
+    )
+
+    reference = composition.start(plain.config)
+    result = composition.start(exempt.config)
+    tapered = composition.start(localized.config)
+
+    np.testing.assert_allclose(result.posterior, reference.posterior, rtol=1e-10, atol=1e-12)
+    assert not np.allclose(tapered.posterior, reference.posterior)
+
+
+def test_an_unknown_unlocalized_variable_is_refused(linear_case: CaseFactory) -> None:
+    case = linear_case(
+        name="unknown",
+        ensemble_size=30,
+        method=(
+            'name = "gies"\nmax_iterations = 1\n'
+            'strategy = { name = "rlmmac", options = { energy = 0.99 } }\n'
+            'localization = { name = "adaptive_prior", options = { unlocalized = ["nn_params"] } }'
+        ),
+    )
+    with pytest.raises((ConfigError, ValueError), match="not state variables"):
+        composition.start(case.config)

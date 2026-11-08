@@ -2193,6 +2193,11 @@ class ChatAssistant:
             data["unproposed"] = unproposed
         if outcome.fell_back:
             data["reason"] = outcome.reason
+            if outcome.unavailable:
+                # The provider failed (unreachable, a timeout), not the assistant: a client
+                # judging the answer (a tester, #290) tells the two apart by this.
+                data["unavailable"] = True
+                data["timed_out"] = outcome.timed_out
             # The activity line is the user's: a timeout in plain words (issue #239); the
             # provider's error stays in the turn's data and the decision's trace.
             shown = "the model took too long to answer" if outcome.timed_out else outcome.reason

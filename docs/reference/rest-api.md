@@ -5,13 +5,13 @@ generated: reference
 
 # The REST API: reference
 
-Every one of these 56 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 56 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use. Each route's request body, field by field, and its response where it is typed, are in the service's OpenAPI document, `GET /openapi.json`.
 
 ## `DELETE /v1/chats/{chat_id}`
 
 Delete Chat
 
-
+Delete one of the user's chats and its history.
 
 ## `DELETE /v1/files/content`
 
@@ -41,7 +41,7 @@ Return how a run's figure drawing stands: none, drawing, done or failed.
 
 Chats
 
-
+List the user's own chats, without their messages.
 
 ## `GET /v1/chats/models`
 
@@ -56,13 +56,16 @@ Return the models this user's assistant may answer with.
 
 Chat
 
-
+Return a chat with its `messages` and the action cards it proposed.
 
 ## `GET /v1/chats/{chat_id}/events`
 
 Chat Events
 
+Return the chat's events from `since`: the answer's text, tool calls, proposals.
 
+JSON (`events`, `next_since`, `busy`) to poll, or a server-sent event stream with
+`Accept: text/event-stream` (resumed from `Last-Event-ID`).
 
 ## `GET /v1/deletions`
 
@@ -266,19 +269,27 @@ Return the narrative report of a run or a study (Markdown; numbers checked).
 
 Create Chat
 
+Start a chat with the assistant; it is the user's own. Body: `title`, `context`.
 
+Returns the chat (`id`, `title`, `owner`, ...); send it messages with ``POST
+/v1/chats/{id}/messages`. Request and response schemas: `GET /openapi.json``.
 
 ## `POST /v1/chats/{chat_id}/messages`
 
 Message
 
+Send the assistant a message; it answers in the background (202).
 
+Body: `text`; `context`, the page it was sent from; `model`, one of ``GET
+/v1/chats/models`` (the owner's choice). Returns the chat's id and its events' URL:
+read the answer from `GET /v1/chats/{id}/events`. 409 while it is still answering,
+400 when the chat is closed.
 
 ## `POST /v1/chats/{chat_id}/proposals/{n}:discard`
 
 Discard
 
-
+Discard a pending proposal (an action card) of the chat; nothing is submitted.
 
 ## `POST /v1/chats/{chat_id}/proposals/{n}:launched`
 

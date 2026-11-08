@@ -72,8 +72,9 @@ class PGLSTMModel:
         Schedule text read before ``schedule_file``: the deck's own SCHEDULE keywords
         before its included history (e.g. a first COMPDAT), if any.
     phases
-        The deck's phases (oil required): they set the dynamic features, each phase's
-        density and saturation (:func:`~apex.simulation.model_error.feature_names`).
+        The deck's phases, one or more of oil, water and gas: they set the dynamic features,
+        each phase's density and saturation (:func:`~apex.simulation.model_error.feature_names`;
+        without oil, its density and saturation are 0).
 
     Raises
     ------

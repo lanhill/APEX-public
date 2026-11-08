@@ -20,6 +20,7 @@ WATER
 DIMENS
  2 2 1 /
 GRID
+INIT
 SUMMARY
 FOPR
 {summary}

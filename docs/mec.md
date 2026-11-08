@@ -50,12 +50,29 @@ shut_wells = "zero"               # or "ignore" (the published runs)
 
 The rest of the configuration is unchanged. MEC works with any method and localization. It needs the following:
 
-- **A deck simulator** (`opm_flow` or `eclipse`): the residuals are read from each run's files.
+- **A deck simulator** (`opm_flow` or `eclipse`): the residuals are read from each run's files. Eclipse 300's CO2STORE and GASWAT decks are refused on `eclipse`: their restarts name the densities `DENW` and `DENG`.
 - **Restarts with densities at the report steps.** Put `RPTRST BASIC=2 DEN /` in the deck's SCHEDULE section.
+- **The INIT file.** The static features (`DX`, `PERMX`, `PORO`, ...) are read from it, and the simulators write it only when the GRID section has `INIT`. `apex validate` refuses a deck whose GRID section certainly lacks it.
+- **`phases` that fit the deck.** `apex validate` refuses a phase the deck's RUNSPEC lacks, and a deck's oil left out of `phases`. A CO2STORE deck has the phases its RUNSPEC names (water and gas when it names none). A RUNSPEC with an include, Mako lines or template expressions (`${...}`), and a compositional deck (`COMPS`), are not checked.
 - **The bottom-hole pressure of every listed well in the summary.** Each network's inputs include the well's `WBHP` minus the pressure of its perforated blocks, so the deck's SUMMARY section must request `WBHP` for every well in `producers` and `injectors`, whether or not `WBHP` is observed. `WBHP` followed by `/` on its own line requests it for every well. `apex validate` reads the SUMMARY section and refuses a deck that lacks it, before anything is simulated.
 - **One report time per observation time.** `report_steps` are the observation times' report steps, 1-based. The network has one output layer per report time.
 
 Leave the model-error variable out of the truth file of a synthetic case: it has no true value. RMSE, SSIM and model change score the reservoir properties only.
+
+An adaptive localization (`adaptive_prior`, `adaptive_per_update`) can switch the network's parameters off. Their single weights correlate weakly with the data, and the variable is large, so the universal threshold keeps almost none of them. In one test run it kept 0.0025 % of the entries, and the parameters never moved. To update them without localization while the reservoir properties stay localized, name them in the localization's `unlocalized` option. A localization needs an explicit `[method.strategy]`, such as GIES's `rlmmac`:
+
+```toml
+[method.strategy]
+name = "rlmmac"
+
+[method.localization]
+name = "adaptive_prior"
+
+[method.localization.options]
+unlocalized = ["nn_params"]
+```
+
+CHOP takes no `[method.localization]`, so it cannot leave the network's parameters out this way.
 
 ## Options
 
@@ -63,7 +80,7 @@ Leave the model-error variable out of the truth file of a synthetic case: it has
 |---|---|---|
 | `schedule_file` | required | The schedule the wells' perforations and status are read from. Report steps are counted from TSTEP and DATES; COMPDAT adds connections, as in Eclipse (shut ones count); a well's status is its last WCONHIST, WCONPROD, WCONINJH, WCONINJE or well-level WELOPEN record. |
 | `initial_schedule_file` | none | Schedule text read first: the deck's own SCHEDULE keywords before its included history (e.g. a first COMPDAT). |
-| `phases` | `oil, water` | The deck's phases: with gas, GAS_DEN and SGAS are features too. |
+| `phases` | `oil, water` | The deck's phases, one or more of `oil`, `water` and `gas`: with gas, GAS_DEN and SGAS are features too. Without oil (a gas-water or CO2 storage deck), OIL_DEN and SOIL stay in the inputs as 0. |
 | `report_steps` | required | 1-based report steps of the network's report times. |
 | `producers`, `injectors` | none | Well names; at least one well. |
 | `producer_data`, `injector_data` | `WOPR, WBHP, WWCT`; `WBHP` | Their data types; each must be observed. |

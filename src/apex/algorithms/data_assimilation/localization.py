@@ -54,7 +54,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from apex.algorithms.data_assimilation.registries import localizations
 from apex.core.diagnostics import EmitsDiagnostics
-from apex.core.options import TEXT
+from apex.core.options import TEXT, TextList
 from apex.domain.observations import DataKey
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,7 @@ def adaptive_taper(
     threshold_scale: float,
     taper: Taper,
     fixed: float | None = None,
+    exempt: Sequence[bool] = (),
 ) -> NDArray[np.float64]:
     """Taper correlations against their noise level, per state block and column.
 
@@ -215,14 +216,21 @@ def adaptive_taper(
     ``adaptive_rows``). ``hard`` keeps correlations above it; ``soft`` applies
     Gaspari-Cohn to ``(1 - |rho|) / (1 - threshold)``; ``sigmoid`` is PET's
     ``expit(50 (|rho| - (1 - threshold_scale)))``, which does not use the universal
-    threshold (with ``fixed``: ``expit(50 (|rho| - fixed))``).
+    threshold (with ``fixed``: ``expit(50 (|rho| - fixed))``). The blocks flagged in
+    ``exempt`` (one flag per block, or none) are not localized: their rows are 1.
     """
     if sum(block_sizes) != corr.shape[0]:
         raise ValueError(f"block sizes {list(block_sizes)} do not add up to {corr.shape[0]} rows")
+    if exempt and len(exempt) != len(block_sizes):
+        raise ValueError(f"{len(exempt)} exemption flags for {len(block_sizes)} blocks")
     result = np.empty_like(corr)
     start = 0
-    for size in block_sizes:
+    for index, size in enumerate(block_sizes):
         rows = slice(start, start + size)
+        if exempt and exempt[index]:
+            result[rows] = 1.0  # no threshold, and no warning about one
+            start += size
+            continue
         magnitude = np.abs(corr[rows])
         if fixed is not None:
             cutoff = np.full(corr.shape[1], float(fixed))
@@ -361,6 +369,39 @@ def threshold_taper(
 # ---------------------------------------------------------------------- methods
 
 
+def _unlocalized_blocks(
+    unlocalized: Sequence[str], variable_names: Sequence[str] | None, block_sizes: Sequence[int]
+) -> tuple[bool, ...]:
+    """Return per state block whether it is named in ``unlocalized`` (``()`` for none).
+
+    Raises
+    ------
+    ValueError
+        If a name is not a state variable, or the variables' names are not known.
+    """
+    if isinstance(unlocalized, str):
+        raise ValueError(f"unlocalized must be a list of state variables, got {unlocalized!r}")
+    if not unlocalized:
+        return ()
+    if variable_names is None or len(variable_names) != len(block_sizes):
+        raise ValueError(
+            "unlocalized needs the variables' names, which only a history-matching "
+            "[method.localization] supplies (from [state])"
+        )
+    # Matched in any case, as distance_entries' parameters (entry_localization).
+    lowered = {name.lower() for name in unlocalized}
+    unknown = sorted(n for n in unlocalized if n.lower() not in {v.lower() for v in variable_names})
+    if unknown:
+        raise ValueError(
+            f"unlocalized names {unknown}, which are not state variables ({list(variable_names)})"
+        )
+    flags = tuple(name.lower() in lowered for name in variable_names)
+    if all(flags):
+        logger.warning("every state variable is unlocalized (%s): the localization changes "
+                       "nothing; leave it out instead", ", ".join(variable_names))  # fmt: skip
+    return flags
+
+
 class _AdaptiveBase(EmitsDiagnostics):
     def __init__(
         self,
@@ -369,11 +410,14 @@ class _AdaptiveBase(EmitsDiagnostics):
         taper: Taper = "hard",
         threshold: Literal["universal", "fixed"] = "universal",
         cutoff: float | None = None,
+        unlocalized: TextList = (),
+        variable_names: Sequence[str] | None = None,
     ) -> None:
         if not block_sizes or any(size < 1 for size in block_sizes):
             raise ValueError(
                 f"block_sizes must be positive state-variable sizes, got {block_sizes}"
             )
+        self._exempt = _unlocalized_blocks(unlocalized, variable_names, block_sizes)
         if threshold_scale <= 0:
             raise ValueError(f"threshold_scale must be positive, got {threshold_scale}")
         if taper not in ("hard", "soft", "sigmoid"):
@@ -401,18 +445,41 @@ class _AdaptiveBase(EmitsDiagnostics):
         # The shuffle is drawn either way, so the localization stream is the same (the
         # fixed threshold does not need the shuffled copy itself).
         order = derangement(rng, a.shape[-1])
+        # Unlocalized variables (``exempt``) keep their whole step (rows of ones): their
+        # correlations with the data may be real but weak per entry (a network's weights),
+        # and are not computed (a large network's would be two dense (n_rows, n_columns)
+        # temporaries). Without exemptions the path is the plain one, bit for bit.
+        if any(self._exempt):
+            keep = np.repeat(~np.asarray(self._exempt), self.block_sizes)
+            sizes = [n for n, e in zip(self.block_sizes, self._exempt, strict=True) if not e]
+            taper = np.ones((a.shape[0], b.shape[0]))
+            if sizes:
+                taper[keep] = self._tapered(a[keep], b, order, sizes)
+            return taper
+        return self._tapered(a, b, order, self.block_sizes)
+
+    def _tapered(
+        self,
+        a: NDArray[np.float64],
+        b: NDArray[np.float64],
+        order: NDArray[np.int64],
+        sizes: Sequence[int],
+    ) -> NDArray[np.float64]:
+        """Return the taper of ``a``'s rows (blocks ``sizes``) against ``b``'s."""
         if self.threshold == "fixed":
-            return adaptive_taper(
-                correlation(a, b), None, self.block_sizes, 1.0, self.taper,
+            taper = adaptive_taper(
+                correlation(a, b), None, sizes, 1.0, self.taper,
                 fixed=self._fixed_cutoff(a.shape[-1]),
             )  # fmt: skip
-        return adaptive_taper(
-            correlation(a, b),
-            correlation(a[:, order], b),
-            self.block_sizes,
-            self.threshold_scale,
-            self.taper,
-        )
+        else:
+            taper = adaptive_taper(
+                correlation(a, b),
+                correlation(a[:, order], b),
+                sizes,
+                self.threshold_scale,
+                self.taper,
+            )
+        return taper
 
     def check_members(self, n: int) -> None:
         """Refuse an ensemble of ``n`` members a fixed ``3/sqrt(N)`` threshold keeps nothing with.
@@ -476,6 +543,13 @@ class AdaptiveLocalization(_AdaptiveBase):
         takes no ``threshold_scale``. The ``hard`` taper keeps exactly ``|rho| > cutoff``;
         ``soft`` (Gaspari-Cohn of ``(1 - |rho|) / (1 - cutoff)``) reaches 0 only at
         ``|rho| = 2 cutoff - 1``, so below 0.5 it keeps a little of every correlation.
+    unlocalized
+        State variables updated without localization (their taper rows are 1), e.g. a
+        model-error network's parameters ``nn_params``, whose single weights correlate too
+        weakly with the data for the threshold and are all switched off otherwise (5Spots,
+        2026-11-07: 0.0025% kept). Default none.
+    variable_names
+        Names of the state variables (set from the state layout).
 
     Differences from PET: the shuffle comes from the run's ``localization`` stream (a
     true derangement); thresholds are per state variable of the layout (PET: per
@@ -668,6 +742,13 @@ class PriorAdaptiveLocalization(_AdaptiveBase, _GainTaper):
         The fixed threshold on ``|correlation|``, in ``(0, 1)``; by default ``3/sqrt(N)``
         for ``N`` members (0.3 at 100), three standard deviations of a sample correlation
         where there is none. Only with ``threshold = "fixed"``.
+    unlocalized
+        State variables updated without localization (their taper rows are 1), e.g. a
+        model-error network's parameters ``nn_params``, whose single weights correlate too
+        weakly with the data for the threshold and are all switched off otherwise (5Spots,
+        2026-11-07: 0.0025% kept). Default none.
+    variable_names
+        Names of the state variables (set from the state layout).
 
     Differences from PET: PET-fork's ``ini_only`` branch multiplies the taper with gain
     built from state anomalies divided by the prior standard deviation and never scales

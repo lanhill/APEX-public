@@ -1239,6 +1239,17 @@ class DeckContents:
     co2store
         RUNSPEC's ``CO2STORE`` (OPM Flow's CO₂-brine model), or ``None`` when RUNSPEC is
         templated. With ``OIL`` and ``GAS`` (its older form) the brine is the oil phase.
+    gaswat
+        RUNSPEC's ``GASWAT`` (Eclipse 300's gas-water model), or ``None`` when RUNSPEC is
+        templated.
+    compositional
+        RUNSPEC's ``COMPS`` (Eclipse 300's compositional model, whose oil and gas come
+        from the components: its RUNSPEC often names ``WATER`` only), or ``None`` when
+        RUNSPEC is templated.
+    init
+        GRID's ``INIT``, which asks for the INIT file (the deck simulators write
+        it only then): ``None`` when the text cannot tell (``INIT`` only inside a
+        Mako block, or a part of the deck unread).
     """
 
     phases: frozenset[str] | None
@@ -1253,6 +1264,45 @@ class DeckContents:
     co2store: bool | None = False
     temperature_tables: tuple[tuple[tuple[float, float], ...], ...] | None = None
     thermal: bool = False
+    init: bool | None = None
+    compositional: bool | None = False
+    gaswat: bool | None = False
+
+
+#: An ``INIT`` line in any case, with or without a record's ``/`` (keywords are read in
+#: upper case alone on their line): not certainly absent.
+_INIT_LINE = re.compile(r"^\s*INIT\s*(/\s*)?(--.*)?$", re.IGNORECASE | re.MULTILINE)
+
+
+def _init_spelled(template_path: Path, case_dir: Path | None) -> bool:
+    """Whether the template or a file it includes has an ``INIT`` line of another spelling.
+
+    Includes are followed at any depth, as the deck reader follows them (``PATHS`` aliases
+    and ``${case_dir}`` included); unreadable files and template expressions are skipped.
+    """
+    root = (case_dir or template_path.resolve().parent).resolve()
+    pending: list[Path] = [template_path.resolve()]
+    seen: set[Path] = set()
+    aliases: dict[str, str] = {}
+    while pending:
+        path = pending.pop()
+        if path in seen or len(seen) > 200:
+            continue
+        seen.add(path)
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if _INIT_LINE.search(text):
+            return True
+        for keyword, records in _keyword_records(text):
+            if keyword == "PATHS":
+                aliases.update(_path_aliases(records, template_path, root))
+            elif keyword == "INCLUDE" and records:
+                target = _include_target(records[0], path, root, aliases)
+                if isinstance(target, Path) and target.is_file():
+                    pending.append(target.resolve())
+    return False
 
 
 def _free_expressions(lines: Sequence[str]) -> bool:
@@ -1350,6 +1400,7 @@ def deck_contents(template_path: Path, case_dir: Path | None = None) -> DeckCont
     rtemp: dict[str, float | None] = {"RTEMP": None, "RTEMPVD": None}
     templated_temperature = {"RTEMP": False, "RTEMPVD": False}
     field_units = co2store = thermal = lab_units = False
+    init = init_templated = compositional = gaswat = False
     # The last RTEMPVD/TEMPVD's tables in the deck's units, or None when one is unreadable.
     raw_tables: list[list[tuple[float, float]]] | None = None
     for keyword, records, mako in events:
@@ -1357,6 +1408,11 @@ def deck_contents(template_path: Path, case_dir: Path | None = None) -> DeckCont
             section = keyword
             continue
         record = " ".join(records)
+        if section == "GRID" and keyword == "INIT":
+            if keyword in in_mako_blocks:
+                init_templated = True
+            else:
+                init = True
         if keyword == "TEMPI" or (section == "RUNSPEC" and keyword in ("THERMAL", "TEMP")):
             varies = thermal = True
         elif keyword in ("RTEMPVD", "TEMPVD") and records:
@@ -1387,6 +1443,8 @@ def deck_contents(template_path: Path, case_dir: Path | None = None) -> DeckCont
             field_units = field_units or keyword == "FIELD"
             lab_units = lab_units or keyword == "LAB"
             co2store = co2store or keyword == "CO2STORE"
+            compositional = compositional or keyword == "COMPS"
+            gaswat = gaswat or keyword == "GASWAT"
             if keyword in ("OIL", "WATER", "GAS"):
                 phases.add(keyword.lower())
             unified = unified or keyword == "UNIFOUT"
@@ -1457,6 +1515,13 @@ def deck_contents(template_path: Path, case_dir: Path | None = None) -> DeckCont
             for table in raw_tables
         ),
         thermal=thermal,
+        init=True
+        if init
+        else (
+            None if init_templated or unread or _init_spelled(template_path, case_dir) else False
+        ),
+        compositional=None if templated else compositional,
+        gaswat=None if templated else gaswat,
     )
 
 
