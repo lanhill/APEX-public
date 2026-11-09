@@ -590,7 +590,7 @@ def _ui_prediction(who: Guard, loaded: PredictionConfig, *, run_must_exist: bool
     from apex.services.prediction import as_predicted
     from apex.storage.run_directory import RunDirectory
 
-    who.prediction(loaded.prediction.run_dir)
+    who.prediction(loaded.prediction.run_dir, what="run")
     who.names(loaded)
     if run_must_exist or (loaded.prediction.run_dir / "config.json").is_file():
         who.config(as_predicted(loaded, snapshot_config(RunDirectory(loaded.prediction.run_dir))))

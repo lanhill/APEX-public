@@ -254,10 +254,14 @@ class Guard:
         if self.filtered and not self.view.study(name):
             raise Denied(404, f"no study {name!r}")
 
-    def prediction(self, path: Path) -> None:
-        """Refuse a prediction that is not under a visible run."""
+    def prediction(self, path: Path, *, what: str = "prediction") -> None:
+        """Refuse a prediction that is not under a visible run.
+
+        ``what`` names ``path`` in the refusal: ``"run"`` when it is the run a prediction
+        forecasts (its ``run_dir``), not a prediction's own folder.
+        """
         if self.filtered and not self.view.run_dir(path, self.service.store.entries()):
-            raise Denied(404, f"no prediction at {path}")
+            raise Denied(404, f"no {what} at {path}")
 
     def optimization(self, path: Path) -> None:
         """Refuse an optimization that is not one of this request's visible jobs."""

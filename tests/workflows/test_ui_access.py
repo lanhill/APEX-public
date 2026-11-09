@@ -1654,6 +1654,7 @@ def test_a_prediction_validates_as_a_prediction_and_as_its_submission_would(
         "{controls}", ""))  # fmt: skip
     hidden = http.post("/v1/configs:validate", headers=alice, json={"config_file": theirs})
     assert hidden.status_code in (403, 404), hidden.text
+    assert "no run at" in hidden.text  # its run, not a prediction (release tester H40)
     # A run that does not exist: a guest is refused as their submission would be, whether
     # the folder is visible to them or another user's (validation tells them no more than
     # submitting would: the review); the owner's API token gets its form checked, and a note.
@@ -1667,6 +1668,12 @@ def test_a_prediction_validates_as_a_prediction_and_as_its_submission_would(
     noted = http.post("/v1/configs:validate", headers=svc.owner, json={"config_file": later})
     assert noted.json()["valid"], noted.json()
     assert "holds no run yet" in noted.json()["notes"][0]
+    # Its submission is refused before anything is made (release tester H40): no job, and no
+    # empty predictions/ folder that would look like a run.
+    refused = http.post("/v1/predictions", headers=svc.owner, json={"prediction_file": later})
+    assert refused.status_code == 422, refused.text
+    assert "no run at" in refused.text
+    assert not owners.parent.joinpath("no").exists()
     # A prediction file whose first table is not [prediction] is still a prediction.
     first = text.replace("{controls}", "").split("[simulator]")
     reordered = svc.file("reordered.toml", "[simulator]" + first[1] + "\n" + first[0])

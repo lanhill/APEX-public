@@ -344,6 +344,25 @@ def predict(config_path: Path, progress: ProgressReporter | None = None) -> Pred
     return predict_config(load_prediction_config(config_path), progress)
 
 
+def refuse_missing_run(config: PredictionConfig) -> None:
+    """Refuse a prediction whose run does not exist (no ``config.json`` in ``run_dir``).
+
+    Before anything is made: a prediction of a mistyped run left an empty
+    ``<run_dir>/predictions/`` behind, which looked like a run (release tester H40).
+
+    Raises
+    ------
+    ConfigError
+        Naming the run's folder.
+    """
+    run_dir = Path(config.prediction.run_dir)
+    if not (run_dir / "config.json").is_file():
+        raise ConfigError(
+            f"no run at {run_dir}: run it first (a prediction forecasts a run that has "
+            "started), or check [prediction] run_dir"
+        )
+
+
 def predict_config(
     config: PredictionConfig,
     progress: ProgressReporter | None = None,
@@ -361,6 +380,7 @@ def predict_config(
         If another process is writing the same prediction.
     """
     assert config.prediction.output_dir is not None
+    refuse_missing_run(config)  # before its folder is made (release tester H40)
     folder = config.prediction.output_dir
     # Whether this call made the folder comes from the lock's own mkdir: an exists() taken
     # before the lock could let a process that lost the race remove the winner's files.

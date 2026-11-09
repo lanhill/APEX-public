@@ -159,14 +159,14 @@ def register(app: typer.Typer) -> None:
         root: Root = None,
     ) -> None:
         """Validate a configuration and plan its cost; nothing is simulated."""
-        from apex.services.prediction import check_prediction, load_prediction_config
-
         service = ApexService(root)
         try:
             document = tomllib.loads(config.read_text())
         except (OSError, tomllib.TOMLDecodeError) as error:
             raise _fail(ApexError(f"cannot read {config}: {error}")) from error
         kind = next(iter(document), "")
+        if "prediction" in document:  # wherever its table is, as the REST API reads it
+            kind = "prediction"
         if "optimization" in document and "optimizer" in document:
             kind = "optimization"  # as the REST API tells them
         if "surrogate" in document and "design" in document:
@@ -180,9 +180,11 @@ def register(app: typer.Typer) -> None:
             elif kind == "study":
                 result = service.validate_study(config)
             elif kind == "prediction":
-                check_prediction(load_prediction_config(config))
-                typer.echo(f"{config}: a valid prediction configuration")
-                return
+                # As its submission would check it, with the REST API's note when its run
+                # does not exist yet (release tester H40).
+                result = service.validate_prediction(config)
+                if result.valid and not as_json:
+                    typer.echo(f"{config}: a valid prediction configuration")
             else:
                 result = service.validate(config, check_output=True)  # as `apex submit` would
         except ApexError as error:

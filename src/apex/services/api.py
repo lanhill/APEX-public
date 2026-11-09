@@ -744,6 +744,10 @@ class ApexService:
         ``code`` is the code it runs (:meth:`pin_code`): ``"frozen"`` is the run's own.
         """
         resolved, run_config = self._checked_prediction(config)
+        if run_config is None and not after:
+            # Only a study's prediction may wait for its run, after the job that makes it
+            # (release tester H40: a mistyped run failed only when the job started).
+            prediction.refuse_missing_run(resolved)
         assert resolved.prediction.output_dir is not None
         reservation: dict[str, int] = {}
         if run_config is not None:
@@ -825,8 +829,9 @@ class ApexService:
         if run_config is not None:
             return Validation(valid=True)
         note = (
-            f"{resolved.prediction.run_dir} holds no run yet: the prediction's names, controls "
-            "and model are checked when it starts"
+            f"{resolved.prediction.run_dir} holds no run yet: submit the prediction once the "
+            "run has started (a submission is refused before); its names, controls and model "
+            "are checked then"
         )
         return Validation(valid=True, notes=[note])
 

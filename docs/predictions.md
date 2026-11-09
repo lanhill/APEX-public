@@ -28,6 +28,7 @@ options = { deck_template_file = "deck_forecast.mako" }
 ```
 
 - **The ensembles:** `posterior` is the run's selected iterate (the minimum-CV one with cross validation, else the last), `prior` its prior, `iteration:<k>` any accepted iterate, and `truth` the true model of a synthetic case.
+- **Its run must exist:** a prediction of a `run_dir` that holds no run (no `config.json`; a typo, or a run not started yet) is refused before anything is made. `apex validate` accepts its form and says in a note that the run is missing; a study's predictions wait for their runs.
 - **The history check:** a prediction fails unless it reproduces the run's stored forecasts over the history (`check_history`, on by default), so the forecast deck must keep the run's schedule up to the last observation.
 - **Percentiles:** `p10` is the 10th percentile, unless `percentile_convention = "exceedance"` (the SPE-PRMS labels).
 - **Scores:** against the truth, over the times after the last observation (`coverage_p10_p90`, `crps`, `mean_error`, `spread`).

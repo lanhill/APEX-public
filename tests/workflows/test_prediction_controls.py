@@ -267,3 +267,28 @@ def test_validation_refuses_a_scenario_the_start_would(finished: object) -> None
     service = ApexService(Path(finished.directory) / "service")  # type: ignore[attr-defined]
     with pytest.raises(ConfigError, match="does not read"):
         service.submit_prediction(unread)
+
+
+def test_a_prediction_of_no_run_is_refused_before_anything_is_made(
+    finished: object, tmp_path: Path
+) -> None:
+    """Release tester H40: a mistyped run_dir failed only after the prediction had made
+    ``<run_dir>/predictions/``, an empty folder that looked like a run, with an unclear
+    "no readable configuration snapshot" error; `apex validate` said nothing about it."""
+    from typer.testing import CliRunner
+
+    from apex.cli.main import app
+
+    path, _ = _prediction(finished, "")
+    path.write_text(path.read_text().replace('run_dir = "runs/case"', 'run_dir = "runs/nope"'))
+    missing = Path(finished.directory) / "runs" / "nope"  # type: ignore[attr-defined]
+
+    with pytest.raises(ConfigError, match=r"no run at .*nope: run it first"):
+        prediction.predict(path)
+    assert not missing.exists()
+
+    validated = CliRunner().invoke(app, ["validate", str(path), "--root", str(tmp_path / "s")])
+    assert validated.exit_code == 0, validated.output
+    assert "a valid prediction configuration" in validated.output
+    assert "holds no run yet" in validated.output
+    assert not missing.exists()
