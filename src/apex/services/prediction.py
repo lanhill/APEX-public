@@ -510,74 +510,74 @@ def _predict(
         run_config, model_error, forecast = _prepare_extrapolation(
             config, run_config, simulator_config, layout, results, model_error
         )
-    try:
-        base = simulators.create(simulator_config.name, **simulator_config.options)
-        # the run's parameterizations map each member's state, as in the run.
-        property_map = PropertyMap(composition.build_parameterizations(run_config), layout)
-        simulator = parameterized(base, property_map)
-        if model_error is not None:
-            # The run's forecasts were g + r, and so are the
-            # prediction's (a model-error run has no parameterizations: refused).
-            simulator = ModelErrorSimulator(simulator, model_error)
-        executor = executors.create(execution.name, **execution.options)
-        composition.check_executor(executor, simulator)
-        # an executor running members whole on other hosts rebuilds the
-        # prediction's simulator there: the run's configuration with the prediction's
-        # simulator, and nothing that wraps the run's (no geophysics, model error or
-        # transforms: a prediction forecasts series).
-        assert section.output_dir is not None
-        composition.prepare_remote(
-            executor, simulator,
-            remote_config(run_config, simulator_config, section.output_dir,
-                          model_error=model_error is not None),
-        )  # fmt: skip
-        scores: dict[str, ForecastScore] = {
-            name: forecast_scores.create(name) for name in section.scores
-        }
-    except (TypeError, ValueError, PluginError) as error:
-        raise ConfigError(f"invalid prediction plugin configuration: {error}") from error
-    ensembles, truth = _ensembles(config, run_config, results)
-    assert section.output_dir is not None
-    times = section.outputs.times
-    request = SeriesRequest(
-        tuple(section.outputs.vectors), None if times == "report" else tuple(times)
-    )
-    controls = (
-        {}
-        if config.controls is None
-        else control_blocks(
-            config.controls, property_map, layout,
-            dict(simulator_config.options.get("template_values") or {}),
-        )
-    )  # fmt: skip
-    if controls and getattr(base, "ert_batches", False):
-        # ERT's batches write only the parameters they declare (simulation/ert.py
-        # write_parameters): the scenario would never reach the forward model (the review).
-        raise ConfigError(
-            f"a prediction with [controls] cannot run on the {simulator_config.name} simulator: "
-            "its batches write only their declared parameters, not the controls"
-        )
-    if controls and config.surrogate is None:
-        _check_controls_read(base, simulator_config.name, controls)
-    surrogate = None
-    if config.surrogate is not None:
-        # The members (not the truth) by a fitted model, its keys the axis.
-        from apex.services import surrogates
-
-        try:
-            surrogate, request = surrogates.prediction_surrogate(
-                config.surrogate,
-                remote_config(run_config, simulator_config, section.output_dir),
-                base, executor, property_map, request, execution.name,
-                layout=layout, controls=controls,
-            )  # fmt: skip
-        except (TypeError, ValueError, PluginError) as error:
-            raise ConfigError(f"invalid prediction [surrogate]: {error}") from error
-    directory = PredictionDirectory(section.output_dir)
     state = forecast.get("forecast_state")
     state_file = str(state["file"]) if isinstance(state, dict) else None
-    fitted = isinstance(state, dict) and state.get("fitted") is True
+    fitted = isinstance(state, dict) and state.get("fitted_by_this_start") is True
     try:
+        try:
+            base = simulators.create(simulator_config.name, **simulator_config.options)
+            # the run's parameterizations map each member's state, as in the run.
+            property_map = PropertyMap(composition.build_parameterizations(run_config), layout)
+            simulator = parameterized(base, property_map)
+            if model_error is not None:
+                # The run's forecasts were g + r, and so are the
+                # prediction's (a model-error run has no parameterizations: refused).
+                simulator = ModelErrorSimulator(simulator, model_error)
+            executor = executors.create(execution.name, **execution.options)
+            composition.check_executor(executor, simulator)
+            # an executor running members whole on other hosts rebuilds the
+            # prediction's simulator there: the run's configuration with the prediction's
+            # simulator, and nothing that wraps the run's (no geophysics, model error or
+            # transforms: a prediction forecasts series).
+            assert section.output_dir is not None
+            composition.prepare_remote(
+                executor, simulator,
+                remote_config(run_config, simulator_config, section.output_dir,
+                              model_error=model_error is not None),
+            )  # fmt: skip
+            scores: dict[str, ForecastScore] = {
+                name: forecast_scores.create(name) for name in section.scores
+            }
+        except (TypeError, ValueError, PluginError) as error:
+            raise ConfigError(f"invalid prediction plugin configuration: {error}") from error
+        ensembles, truth = _ensembles(config, run_config, results)
+        assert section.output_dir is not None
+        times = section.outputs.times
+        request = SeriesRequest(
+            tuple(section.outputs.vectors), None if times == "report" else tuple(times)
+        )
+        controls = (
+            {}
+            if config.controls is None
+            else control_blocks(
+                config.controls, property_map, layout,
+                dict(simulator_config.options.get("template_values") or {}),
+            )
+        )  # fmt: skip
+        if controls and getattr(base, "ert_batches", False):
+            # ERT's batches write only the parameters they declare (simulation/ert.py
+            # write_parameters): the scenario would never reach the forward model (the review).
+            raise ConfigError(
+                f"a prediction with [controls] cannot run on the {simulator_config.name} "
+                "simulator: its batches write only their declared parameters, not the controls"
+            )
+        if controls and config.surrogate is None:
+            _check_controls_read(base, simulator_config.name, controls)
+        surrogate = None
+        if config.surrogate is not None:
+            # The members (not the truth) by a fitted model, its keys the axis.
+            from apex.services import surrogates
+
+            try:
+                surrogate, request = surrogates.prediction_surrogate(
+                    config.surrogate,
+                    remote_config(run_config, simulator_config, section.output_dir),
+                    base, executor, property_map, request, execution.name,
+                    layout=layout, controls=controls,
+                )  # fmt: skip
+            except (TypeError, ValueError, PluginError) as error:
+                raise ConfigError(f"invalid prediction [surrogate]: {error}") from error
+        directory = PredictionDirectory(section.output_dir)
         directory.open(
             forecast_state=state_file,
             config_text=config.model_dump_json(indent=2),
@@ -589,10 +589,13 @@ def _predict(
                 None if model_error is None else _model_error_files(run_config),
             ),
         )
-    except ConfigError:
-        # Refused as another prediction's folder: a state file this call fitted into it is
-        # its own (derived, named by its inputs) and is not left there.
-        if state_file is not None and fitted:
+    except Exception:
+        # Refused or failed between the fit and the folder's opening (another prediction's
+        # folder, an invalid [surrogate], an unknown simulator, ...): a state file this start
+        # fitted is its own (derived, named by its inputs) and is not left behind.
+        # Safe: _predict runs only inside predict_config's lock on this folder (the fit
+        # included), so no other start can be using a file this one found missing.
+        if state_file is not None and fitted and section.output_dir is not None:
             (section.output_dir / state_file).unlink(missing_ok=True)
         raise
     if stopped is not None and stopped():
@@ -932,7 +935,7 @@ def _prepare_extrapolation(
     record: dict[str, object] = {
         "forecast_state": {"file": path.name, "sha256": provenance.file_hash(path),
                            "posterior_iteration": int(results.posterior_iteration),
-                           "members": int(common.size), "fitted": fitted},
+                           "members": int(common.size), "fitted_by_this_start": fitted},
         "seed": {"entropy": str(seed.entropy), "spawn_key": list(seed.spawn_key),
                  "given": section.seed is not None},
     }  # fmt: skip

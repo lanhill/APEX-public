@@ -1158,3 +1158,65 @@ def test_a_folder_without_a_prediction_keeps_only_the_state_in_use(tmp_path: Pat
     )
     assert _state_files(folder) == ["forecast_state-fedcba9876543210.npz"]
     assert (folder / "notes.txt").exists()
+
+
+def test_a_start_refused_before_opening_its_folder_leaves_no_state_there(
+    tmp_path: Path, steps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal after the fit but before the folder is opened (here a check of the
+    ensembles; an invalid [surrogate], controls or executor alike) removes the state file
+    this start fitted from a folder it did not make; the folder's own files stay."""
+    from apex.services import prediction as service
+
+    composition.start(_steps_case(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "notes.txt").write_text("mine\n")
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise ConfigError("refused after the fit")
+
+    monkeypatch.setattr(service, "_ensembles", refused)
+    with pytest.raises(ConfigError, match="refused after the fit"):
+        service.predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 1'))
+    assert _state_files(out) == []
+    assert (out / "notes.txt").exists()
+
+
+def test_the_provenance_says_whether_this_start_fitted_the_state(
+    tmp_path: Path, steps: None
+) -> None:
+    """The first start fits the state file; a resume reuses it, and says so."""
+    from apex.services.prediction import predict
+
+    composition.start(_steps_case(tmp_path))
+    config = _future(tmp_path, "p", 'output_dir = "out"\nseed = 1')
+
+    def fitted() -> bool:
+        record = json.loads((tmp_path / "out" / "provenance.json").read_text())
+        return bool(record["model_error"]["forecast_state"]["fitted_by_this_start"])
+
+    predict(config)
+    assert fitted() is True
+    predict(config)
+    assert fitted() is False
+
+
+def test_the_fit_and_its_clean_up_run_only_under_the_folders_lock(
+    tmp_path: Path, steps: None
+) -> None:
+    """Another start holding the folder (here: this process's own lock) refuses this one
+    before its fit: no state file is fitted, and the holder's is not removed by a failure
+    of this start's."""
+    from apex.services.prediction import predict
+    from apex.storage.locks import DirectoryLocked, exclusive
+
+    composition.start(_steps_case(tmp_path))
+    out = tmp_path / "out"
+    with exclusive(out, "prediction"):
+        held = out / "forecast_state-0123456789abcdef.npz"
+        held.write_bytes(b"the holder's")
+        with pytest.raises(DirectoryLocked):
+            predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 1'))
+        assert _state_files(out) == [held.name]
+        assert held.read_bytes() == b"the holder's"

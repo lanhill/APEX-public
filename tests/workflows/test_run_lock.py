@@ -12,7 +12,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import pytest
@@ -157,6 +157,29 @@ def test_a_lock_file_removed_while_being_taken_is_taken_again(
         monkeypatch.undo()
         with pytest.raises(DirectoryLocked), exclusive(folder, "prediction"):
             pass  # the file the folder names is the one held
+
+
+def test_a_folder_removed_before_its_lock_file_is_opened_is_made_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A holder removing its folder between this call's mkdir and its opening of the lock
+    file: the open fails, and the folder is made again (this call made it) and locked."""
+    folder = tmp_path / "p"
+    folder.mkdir()
+    real_open = Path.open
+    opened: list[Path] = []
+
+    def open_after_removal(self: Path, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if self.name == LOCK_FILE and not opened:
+            opened.append(self)
+            self.parent.rmdir()  # the holder's clean-up, just before this open
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_after_removal)
+    with exclusive(folder, "prediction") as made:
+        assert opened == [folder / LOCK_FILE]
+        assert made is True  # the first attempt found the folder; the second made it
+        assert json.loads((folder / LOCK_FILE).read_text())["pid"] == os.getpid()
 
 
 def test_a_lock_file_removed_every_time_is_refused(
