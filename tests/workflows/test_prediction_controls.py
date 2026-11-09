@@ -241,3 +241,29 @@ def test_a_simulator_that_cannot_tell_is_warned_about(caplog: pytest.LogCaptureF
         caplog.clear()
         prediction._check_controls_read(simulator, "custom", {"bhp": np.ones(2)})
         assert [r for r in caplog.records if getattr(r, "event", None) == "controls_unchecked"]
+
+
+def test_validation_refuses_a_scenario_the_start_would(finished: object) -> None:
+    """Release tester (H35 re-check): `apex validate` accepted a scenario that `apex predict`
+    then refused at its start; the scenario's checks now run before submission too."""
+    from apex.services.api import ApexService
+
+    unread, _ = _prediction(finished, '[[controls.variables]]\nname = "u"\nvalues = [1.5, -0.5]\n')
+    unread.write_text(unread.read_text().replace('variables = ["x", "u"]', 'variables = ["x"]'))
+    with pytest.raises(ConfigError, match=r"gives \['u'\], which the linear simulator does not"):
+        prediction.check_prediction(prediction.load_prediction_config(unread))
+
+    named, _ = _prediction(finished, '[[controls.variables]]\nname = "x"\nvalues = [1.0]\n',
+                           name="clash")  # fmt: skip
+    with pytest.raises(ConfigError, match=r"names \['x'\]"):
+        prediction.check_prediction(prediction.load_prediction_config(named))
+
+    # One the simulator reads passes, and nothing is written by the check.
+    read, _ = _prediction(finished, '[[controls.variables]]\nname = "u"\nvalues = [1.5, -0.5]\n',
+                          name="fine")  # fmt: skip
+    prediction.check_prediction(prediction.load_prediction_config(read))
+    assert not (Path(finished.directory) / "runs" / "case" / "predictions").exists()  # type: ignore[attr-defined]
+    # Submission runs the same check (the REST API, the client and the tools).
+    service = ApexService(Path(finished.directory) / "service")  # type: ignore[attr-defined]
+    with pytest.raises(ConfigError, match="does not read"):
+        service.submit_prediction(unread)

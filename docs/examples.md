@@ -91,7 +91,7 @@ If you want a data file to be editable, the deck must reach it through `${case_d
 
 ### Predictions of the example's runs
 
-A prediction's `run_dir` names the run it forecasts. When it names one of the example's own runs as `"runs/<name>"`, a copy made from the web UI points it at the folder where the web UI places that run, `UI/<user>/runs/<name>` (with the copy's run name, if it was suffixed). A copy for the command line keeps `"runs/<name>"`, beside the copy, where `apex run` puts the run.
+A prediction's `run_dir` names the run it forecasts. When it names one of the example's own runs as `"runs/<name>"`, a copy made from the web UI points it at the folder where the web UI places that run, `UI/<user>/runs/<name>` (with the copy's run name, if it was suffixed). The copy's run gets that folder as its `output_dir` too (unless it sets one), so it lands there however it is started: from the web UI, through the REST API, or with `apex run` on the copy. That folder is fixed: an edited copy submitted again is refused as the web UI refuses it (its folder holds another run), so give its run another name or copy the example again. A copy's run started with `apex run` has no job, so the web UI does not offer to delete it. A copy for the command line keeps `"runs/<name>"`, beside the copy, where `apex run` puts the run.
 
 ### Trust and access
 

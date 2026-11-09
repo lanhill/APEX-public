@@ -60,7 +60,7 @@ The right column names the Python calls, `ApexService`'s and the clients' (`Clie
 | Method and path | Service and client call |
 |---|---|
 | `GET /v1/plugins`, `GET /v1/schemas/{kind}` | `plugins()`, `schema(kind)` |
-| `POST /v1/configs:validate` | `validate`, `validate_study` or `validate_optimization` |
+| `POST /v1/configs:validate` | `validate`, `validate_study`, `validate_optimization` or `validate_prediction` |
 | `POST /v1/runs`, `/v1/studies`, `/v1/predictions` | `submit_run`, `submit_study`, `submit_prediction`: `202 Accepted`, with `Location: /v1/jobs/{id}` |
 | `POST /v1/optimizations` | `submit_optimization`: `optimization_file`, or `config` with `base_dir`; `max_iterations`, `annotations`, `priority`, `client`, `approval_token`. `202`, with the job |
 | `GET /v1/jobs` (`?state=`, cursor), `GET /v1/jobs/{id}` | the queue, `status` |
@@ -70,7 +70,7 @@ The right column names the Python calls, `ApexService`'s and the clients' (`Clie
 | `GET /v1/predictions/summary?path=` | `prediction_summary` |
 | `GET /v1/optimizations`, `GET /v1/optimizations/summary?path=` | the caller's optimization jobs, `optimization_summary` |
 
-**Which kind of configuration.** For `POST /v1/configs:validate`, give one of: `config_file` (a path on the service's machine), `config` with `base_dir`, or `config_text` (TOML, not saved) with `base_dir`. A study file is recognised by its `[study]` table, an optimization by its `[optimization]` and `[optimizer]` tables.
+**Which kind of configuration.** For `POST /v1/configs:validate`, give one of: `config_file` (a path on the service's machine), `config` with `base_dir`, or `config_text` (TOML, not saved) with `base_dir`. A study file is recognised by its `[study]` table, an optimization by its `[optimization]` and `[optimizer]` tables, a prediction by its `[prediction]` table. A prediction is checked as its submission would be: its form, the service's policy and, once its run exists, everything its start would refuse (its control scenario included); before the run exists, a note says the rest is checked when it starts.
 
 **Paths** are the service's. `config_file`, `study_file`, `prediction_file`, `optimization_file`, `base_dir` and `path` (and an agent route's `optimization`) all name files on the machine where the service runs: absolute, or relative to the workspace (see step 8; `..` is refused). **A relative path is always read as a workspace path**, never against the service's working directory: send absolute paths for files elsewhere. The Python client (`Client.connect`) resolves the `Path`s it is given where it runs and sends them absolute. A configuration sent as a document (`config`) resolves its relative paths against `base_dir`.
 

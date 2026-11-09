@@ -12,8 +12,12 @@ from typing import Any
 import numpy as np
 import pytest
 
+from apex.algorithms.data_assimilation.chop.method import Chop
+from apex.algorithms.data_assimilation.chop.taper import ChopTaper
 from apex.algorithms.data_assimilation.localization import (
     DistanceLocalization,
+    Localization,
+    LocalizedMethod,
     PriorAdaptiveLocalization,
     RestrictableLocalization,
 )
@@ -119,8 +123,8 @@ def test_composition_refuses_a_run_that_cannot_apply_the_mask(
     )  # fmt: skip
     with pytest.raises(ConfigError, match=match):
         attach_parameter_mask(_method(found), LAYOUT, MODEL, KEYS)
-    with pytest.raises(ConfigError, match="it has none"):  # a method that cannot say
-        attach_parameter_mask(object(), LAYOUT, MODEL, KEYS)
+    with pytest.raises(ConfigError, match=r"object cannot report its localization\. Use a method"):
+        attach_parameter_mask(object(), LAYOUT, MODEL, KEYS)  # a method that cannot say
     with pytest.raises(ConfigError, match="data_transforms"):
         attach_parameter_mask(_method(PriorAdaptiveLocalization([6, 4])), LAYOUT, MODEL, KEYS,
                               transformed=True)  # fmt: skip
@@ -164,3 +168,50 @@ def test_a_wrong_or_empty_mask_is_refused() -> None:
     loc.restrict(slice(6, None), _mask)
     with pytest.raises(ValueError, match="keeps no assimilated datum"):
         loc.prepare(state, forecast[:3], KEYS[:3], np.random.default_rng(1))
+
+
+def test_a_mask_whose_columns_depend_on_other_keys_is_refused() -> None:
+    """Each column must follow from its own key: the run assimilates a subset of the
+    observations (held-out data left out), on which the mask is evaluated again."""
+
+    def by_position(keys: Any) -> np.ndarray:  # noqa: ANN401
+        first = np.arange(len(keys)) < len(keys) // 2  # the first half of whatever is given
+        return np.array([first] * 4)
+
+    model: Any = SimpleNamespace(state_variable="nn", masks_parameters=True,
+                                 parameter_mask=by_position)  # fmt: skip
+    with pytest.raises(ConfigError, match="from its key alone"):
+        attach_parameter_mask(_method(PriorAdaptiveLocalization([6, 4])), LAYOUT, model, KEYS)
+
+    def numbers_on_subsets(keys: Any) -> Any:  # noqa: ANN401
+        found = _mask(keys)
+        return found if len(keys) == len(KEYS) else found.astype(float)
+
+    def only_all_keys(keys: Any) -> np.ndarray:  # noqa: ANN401
+        if len(keys) != len(KEYS):
+            raise KeyError("a key it was not built on")
+        return _mask(keys)
+
+    for mask, match in ((numbers_on_subsets, "from its key alone"),
+                        (only_all_keys, "fails on a subset of the keys \\(KeyError")):  # fmt: skip
+        odd: Any = SimpleNamespace(state_variable="nn", masks_parameters=True,
+                                   parameter_mask=mask)  # fmt: skip
+        with pytest.raises(ConfigError, match=match):
+            attach_parameter_mask(_method(PriorAdaptiveLocalization([6, 4])), LAYOUT, odd, KEYS)
+    attach_parameter_mask(_method(PriorAdaptiveLocalization([6, 4])), LAYOUT, MODEL, KEYS)
+
+
+def _chop_taper_is_a_localization(taper: ChopTaper) -> Localization:
+    return taper  # checked by mypy: CHOP's taper satisfies the protocol it reports under
+
+
+def _chop_reports_its_localization(method: Chop) -> LocalizedMethod:
+    return method  # checked by mypy
+
+
+def test_the_methods_report_a_localization_protocol() -> None:
+    """``LocalizedMethod.current_localization`` returns ``Localization | None``; CHOP's
+    ChopTaper is one (the functions above are type-checked), which it cannot restrict."""
+    taper = ChopTaper([])
+    assert _chop_taper_is_a_localization(taper) is taper
+    assert not isinstance(taper, RestrictableLocalization)

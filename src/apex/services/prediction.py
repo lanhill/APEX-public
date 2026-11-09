@@ -455,6 +455,43 @@ def control_blocks(
     return {name: np.ascontiguousarray(np.ravel(v), dtype=np.float64) for name, v in mapped.items()}
 
 
+def _scenario(
+    config: PredictionConfig,
+    base: object,
+    simulator_config: PluginSection,
+    property_map: PropertyMap,
+    layout: StateLayout,
+) -> dict[str, np.ndarray]:
+    """Return the prediction's control scenario's blocks, refusing one that cannot run.
+
+    ``{}`` without ``[controls]``. ``base`` is the prediction's simulator before any
+    wrapper. Used at the start (:func:`_predict`) and before submission
+    (:func:`check_prediction`), so that ``apex validate`` refuses what the start would.
+
+    Raises
+    ------
+    ConfigError
+        As :func:`control_blocks` and :func:`_check_controls_read`, and on a batch
+        simulator that writes only its declared parameters (ERT's).
+    """
+    if config.controls is None:
+        return {}
+    controls = control_blocks(
+        config.controls, property_map, layout,
+        dict(simulator_config.options.get("template_values") or {}),
+    )  # fmt: skip
+    if controls and getattr(base, "ert_batches", False):
+        # ERT's batches write only the parameters they declare (simulation/ert.py
+        # write_parameters): the scenario would never reach the forward model (the review).
+        raise ConfigError(
+            f"a prediction with [controls] cannot run on the {simulator_config.name} "
+            "simulator: its batches write only their declared parameters, not the controls"
+        )
+    if controls and config.surrogate is None:
+        _check_controls_read(base, simulator_config.name, controls)
+    return controls
+
+
 def _check_controls_read(simulator: object, name: str, controls: Mapping[str, np.ndarray]) -> None:
     """Refuse a control scenario the simulator would ignore (release tester H35).
 
@@ -546,23 +583,7 @@ def _predict(
         request = SeriesRequest(
             tuple(section.outputs.vectors), None if times == "report" else tuple(times)
         )
-        controls = (
-            {}
-            if config.controls is None
-            else control_blocks(
-                config.controls, property_map, layout,
-                dict(simulator_config.options.get("template_values") or {}),
-            )
-        )  # fmt: skip
-        if controls and getattr(base, "ert_batches", False):
-            # ERT's batches write only the parameters they declare (simulation/ert.py
-            # write_parameters): the scenario would never reach the forward model (the review).
-            raise ConfigError(
-                f"a prediction with [controls] cannot run on the {simulator_config.name} "
-                "simulator: its batches write only their declared parameters, not the controls"
-            )
-        if controls and config.surrogate is None:
-            _check_controls_read(base, simulator_config.name, controls)
+        controls = _scenario(config, base, simulator_config, property_map, layout)
         surrogate = None
         if config.surrogate is not None:
             # The members (not the truth) by a fitted model, its keys the axis.
@@ -729,13 +750,14 @@ def check_prediction(config: PredictionConfig) -> None:
     ``apex validate``, the tools' validation and :meth:`ApexService.submit_prediction` call
     it; :func:`_predict` applies the same refusals. A run that does not exist yet (a
     study's prediction waits for it) is not checked here. The model-error model, if any,
-    is built (its files read, no simulation) to know whether it extrapolates.
+    is built (its files read, no simulation) to know whether it extrapolates, and with a
+    control scenario the simulator is built (nothing simulated) to know whether it reads it.
 
     Raises
     ------
     ConfigError
-        As :func:`_with_forecast_options`, :func:`_forecasting_model_error` and
-        :func:`_refuse_for_model`.
+        As :func:`_with_forecast_options`, :func:`_forecasting_model_error`,
+        :func:`_refuse_for_model` and :func:`_scenario`.
     """
     if not (Path(config.prediction.run_dir) / "config.json").is_file():
         return
@@ -743,11 +765,19 @@ def check_prediction(config: PredictionConfig) -> None:
         config, composition.snapshot_config(RunDirectory(config.prediction.run_dir))
     )
     layout = composition.build_layout(run)
+    simulator_config = simulator_section(config, run)
     try:
-        model = _forecasting_model_error(config, run, simulator_section(config, run), layout)
+        model = _forecasting_model_error(config, run, simulator_config, layout)
     except OSError as error:
         raise ConfigError(f"cannot build the run's model-error model: {error}") from error
     _refuse_for_model(config, run, model)
+    if config.controls is not None:
+        try:
+            base = simulators.create(simulator_config.name, **simulator_config.options)
+            property_map = PropertyMap(composition.build_parameterizations(run), layout)
+        except (OSError, TypeError, ValueError, PluginError) as error:
+            raise ConfigError(f"invalid prediction plugin configuration: {error}") from error
+        _scenario(config, base, simulator_config, property_map, layout)
 
 
 def _refuse_for_model(

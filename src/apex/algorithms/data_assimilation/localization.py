@@ -125,7 +125,7 @@ class LocalizedMethod(Protocol):
     model's parameter mask.
     """
 
-    def current_localization(self) -> object | None:
+    def current_localization(self) -> Localization | None:
         """Return the localization the method's updates apply, if any."""
         ...
 

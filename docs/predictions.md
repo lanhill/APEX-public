@@ -51,7 +51,7 @@ options = { variable = "bhp", output = "bhp_steps", knots = [0, 60], n_steps = 1
 ```
 
 - **The controls are not part of the state.** The history match never sees them, and they are left out of the scores and metrics. They come after the run's own parameterizations. A control named as a state variable or property, or as a name the deck template is given otherwise (`member_id`, `case_dir`, `level`, `coarse`, the simulator's `template_values`), is refused.
-- **When it is checked:** `apex validate` checks the section's form. The names and parameterizations are checked when the prediction starts, before anything is simulated or written.
+- **When it is checked:** once the run exists, `apex validate` and a submission check it all: the form, the names, the parameterizations and whether the simulator reads the controls (the simulator is built, nothing is simulated). The prediction's start checks them again, before anything is simulated or written. A prediction of a run that does not exist yet (a study's) is checked at its start.
 - **The simulator must read them.** A simulator that declares the names it reads refuses a scenario it would ignore, before anything is simulated:
   - a deck simulator (`opm_flow`, `eclipse`) reads a control when its template names it, e.g. `${bhp[0]}` (a template that includes another template, or reaches its values through `context`, cannot be checked: a warning says so);
   - the analytic simulators read only their own state names (`linear` its `variables`, `toy_reservoir` its controls block);

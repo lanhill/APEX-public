@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from apex.algorithms.data_assimilation.localization import LocalizedMethod
 from apex.core.errors import ConfigError, SimulationError
 from apex.core.options import InputFile
 from apex.core.plugins import model_error_models, simulators
@@ -627,6 +628,34 @@ def test_a_parameter_mask_with_local_analysis_and_held_out_data(tmp_path: Path) 
         assert matrix.shape == (N_STATE + 2, N_DATA - 2)
         early = np.arange(N_DATA - 2) < N_DATA // 2
         np.testing.assert_array_equal(matrix[N_STATE:], np.vstack([early, ~early]).astype(float))
+    finally:
+        model_error_models._factories.pop("test_halves")
+
+
+def test_multilevel_es_mda_never_drops_a_parameter_mask_silently(tmp_path: Path) -> None:
+    """No multilevel run carries a mask: a model-error model with fidelity levels is refused
+    (its networks read the fine grid's blocks), and multilevel ES-MDA's hybrid update takes
+    no localization. Its method reports none, so were the first refusal lifted, the mask
+    would be refused by name ("it has none"), not dropped."""
+    model_error_models.register("test_halves")(Halves)
+    try:
+        config = _halves_case(tmp_path, None)
+        text = config.read_text()
+        config.write_text(
+            text[: text.index("[method]")] + '[method]\nname = "multilevel_esmda"\n'
+            "options = { inflation = [2, 2], levels = [{ members = 30, weight = 0.5 }, "
+            "{ members = 30, weight = 0.5 }] }\n"
+        )
+        loaded = composition.load_config(config)
+        with pytest.raises(ConfigError, match="cannot be combined with fidelity levels"):
+            composition.build_run(loaded)
+        layout = composition.build_layout(loaded)
+        method = composition._build_method(loaded, layout)
+        assert isinstance(method, LocalizedMethod)
+        assert method.current_localization() is None
+        keys = read_observation_section(loaded.observations).keys
+        with pytest.raises(ConfigError, match="it has none"):
+            composition.attach_parameter_mask(method, layout, Halves("nn_params"), keys)
     finally:
         model_error_models._factories.pop("test_halves")
 

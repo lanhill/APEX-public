@@ -1605,3 +1605,70 @@ def test_an_identical_queued_job_is_no_output_conflict(
     assert svc.service.output_conflict(config) is not None  # another run there
     monkeypatch.setattr(svc.service, "_live_job", lambda identity: {"id": "queued"})
     assert svc.service.output_conflict(config) is None  # submit would return that job
+
+
+def test_a_prediction_validates_as_a_prediction_and_as_its_submission_would(
+    svc: Service,
+) -> None:
+    """The release tester's H35 re-check: /v1/configs:validate judged a prediction file as
+    a run's configuration ("truth_file" missing), so the Editor could not validate one. It
+    now gets the prediction's own checks, those of its submission, as a file, a document
+    or text, and a guest's is held to what they may run."""
+    (svc.root / "ui_access.toml").write_text(ACCESS)
+    http, alice = svc.http, svc.guest("alice")
+    run = http.post("/v1/runs", headers=alice, json={"config_file": svc.variant("theta", 13)})
+    svc.wait(run.json()["id"])
+    run_dir = svc.tmp / "UI/guests/alice/runs/theta"
+    outputs = ", ".join(f'["t{i}", "y"]' for i in range(8))
+    text = (
+        f'[prediction]\nname = "p"\nrun_dir = "{run_dir}"\nensembles = ["posterior"]\n\n'
+        '[prediction.outputs]\nvectors = ["y"]\n\n'
+        f'[simulator]\noptions = {{ forward_file = "forward.npz", outputs = [{outputs}] }}\n'
+        "{controls}"
+    )
+    file = svc.file("predict.toml", text.replace("{controls}", ""))
+    for headers in (alice, svc.owner):
+        checked = http.post("/v1/configs:validate", headers=headers, json={"config_file": file})
+        assert checked.status_code == 200, checked.text
+        assert checked.json()["valid"], checked.json()
+    # A scenario the linear model does not read: refused here, as its submission would be.
+    unread = svc.file("unread.toml", text.replace(
+        "{controls}", '\n[[controls.variables]]\nname = "u"\nvalues = [1.0]\n'))  # fmt: skip
+    refused = http.post("/v1/configs:validate", headers=alice, json={"config_file": unread})
+    assert not refused.json()["valid"]
+    assert "does not read" in refused.json()["errors"][0]
+    assert "truth_file" not in refused.text
+    as_text = http.post("/v1/configs:validate", headers=alice, json={
+        "config_text": Path(unread).read_text(), "base_dir": "alpha"})  # fmt: skip
+    assert not as_text.json()["valid"]
+    assert "does not read" in as_text.json()["errors"][0]
+    import tomllib
+
+    document = tomllib.loads(Path(file).read_text())
+    as_document = http.post("/v1/configs:validate", headers=svc.owner, json={
+        "config": document, "base_dir": str(svc.tmp / "alpha")})  # fmt: skip
+    assert as_document.json()["valid"], as_document.json()
+    # A guest validating a prediction of a run that is not theirs: refused as its submission.
+    owners = next((svc.tmp / "beta").rglob("runs/*/config.json")).parent
+    theirs = svc.file("theirs.toml", text.replace(str(run_dir), str(owners)).replace(
+        "{controls}", ""))  # fmt: skip
+    hidden = http.post("/v1/configs:validate", headers=alice, json={"config_file": theirs})
+    assert hidden.status_code in (403, 404), hidden.text
+    # A run that does not exist: a guest is refused as their submission would be, whether
+    # the folder is visible to them or another user's (validation tells them no more than
+    # submitting would: the review); the owner's API token gets its form checked, and a note.
+    for missing in (svc.tmp / "alpha/runs/no", owners.parent / "no"):
+        later = svc.file("later.toml", text.replace(str(run_dir), str(missing))
+                         .replace("{controls}", ""))  # fmt: skip
+        as_guest = http.post("/v1/configs:validate", headers=alice, json={"config_file": later})
+        submitted = http.post("/v1/predictions", headers=alice, json={"prediction_file": later})
+        assert as_guest.status_code == submitted.status_code, (as_guest.text, submitted.text)
+        assert as_guest.status_code in (403, 404), as_guest.text
+    noted = http.post("/v1/configs:validate", headers=svc.owner, json={"config_file": later})
+    assert noted.json()["valid"], noted.json()
+    assert "holds no run yet" in noted.json()["notes"][0]
+    # A prediction file whose first table is not [prediction] is still a prediction.
+    first = text.replace("{controls}", "").split("[simulator]")
+    reordered = svc.file("reordered.toml", "[simulator]" + first[1] + "\n" + first[0])
+    found = http.post("/v1/configs:validate", headers=alice, json={"config_file": reordered})
+    assert found.json()["valid"], found.json()

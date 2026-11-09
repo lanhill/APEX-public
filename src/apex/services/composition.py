@@ -607,12 +607,22 @@ def attach_parameter_mask(
             "affect, per datum; [[data_transforms]] mix the data it is given on, so they "
             "cannot be combined with it"
         )
-    localization = method.current_localization() if isinstance(method, LocalizedMethod) else None
+    reports = isinstance(method, LocalizedMethod)
+    localization = method.current_localization() if reports else None
     if not isinstance(localization, RestrictableLocalization):
-        found = (
-            "it has none" if localization is None
-            else f"its {type(localization).__name__} cannot apply one"
-        )  # fmt: skip
+        if not reports:
+            raise ConfigError(
+                f"the model-error model gives which data each of its parameters ({variable}) "
+                f"can affect, which the run's localization must apply, and the method "
+                f"{type(method).__name__} cannot report its localization. Use a method that "
+                "can (es, esmda, gies, lm_enrml, gn_enrml) with [method.localization] name = "
+                '"adaptive_prior"; a new method must implement LocalizedMethod '
+                "(current_localization) first"
+            )
+        if localization is None:
+            found = "it has none"
+        else:
+            found = f"its {type(localization).__name__} cannot apply one"
         raise ConfigError(
             f"the model-error model gives which data each of its parameters ({variable}) can "
             f"affect, which the run's localization must apply, and {found}. Only a taper "
@@ -634,10 +644,55 @@ def attach_parameter_mask(
                     f"the model-error model's parameter mask must be booleans "
                     f"{(block.size, len(keys))}, got {found_mask.dtype} {found_mask.shape}"
                 )
+            _check_mask_per_key(model, keys, found_mask)
             localization.restrict(slice(start, start + block.size), model.parameter_mask)
             return
         start += block.size
     raise ConfigError(f"the model-error model's variable {variable!r} is not in [state]")
+
+
+def _check_mask_per_key(
+    model: MaskingModel, keys: Sequence[DataKey], mask: NDArray[np.bool_]
+) -> None:
+    """Refuse a mask whose columns depend on more than their own key.
+
+    The mask is built on the observations' keys, the run assimilates a subset of them
+    (``[validation]`` holds some out), and the localization evaluates it again on those:
+    so a column must be a function of its key alone (:class:`MaskingModel`). Checked on
+    one subset, every other key in reverse order (another count and order).
+
+    Raises
+    ------
+    ConfigError
+        If the mask on the subset differs from the full mask's columns.
+    """
+    if len(keys) < 2:
+        return
+    chosen = list(range(len(keys) - 1, -1, -2))
+    try:
+        subset = np.asarray(model.parameter_mask([keys[i] for i in chosen]))
+    except (ValueError, TypeError, IndexError, KeyError) as error:
+        raise ConfigError(
+            f"the model-error model {type(model).__name__}'s parameter mask fails on a subset "
+            f"of the keys ({type(error).__name__}: {error}); it must take any subset of the "
+            "observations' keys (held-out data are left out)"
+        ) from None
+    # Compared in column chunks: a fancy-indexed copy of the full mask's columns would add
+    # half the mask again to the build's peak (about 0.25 GB on 5Spots' per-step layout).
+    same = (
+        subset.dtype == np.bool_
+        and subset.shape == (mask.shape[0], len(chosen))
+        and all(
+            np.array_equal(subset[:, c : c + 4096], mask[:, chosen[c : c + 4096]])
+            for c in range(0, len(chosen), 4096)
+        )
+    )
+    if not same:
+        raise ConfigError(
+            "the model-error model's parameter mask must give each datum's column from its "
+            "key alone (the run assimilates a subset of the observations, held-out data left "
+            "out): on a subset of the keys it differs from the full mask's columns"
+        )
 
 
 def check_field_responses(keys: Sequence[DataKey], provided: Mapping[str, int]) -> list[DataKey]:

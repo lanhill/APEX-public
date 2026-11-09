@@ -249,10 +249,19 @@ def test_a_copys_prediction_names_where_the_web_ui_places_its_run(tmp_path: Path
         path = copied.folder / name
         run_dir = tomllib.loads(path.read_text("utf-8"))["prediction"]["run_dir"]
         assert (path.parent / run_dir).resolve() == (runs / "control_scenario_esmda-2").resolve()
+    # Release tester H39: the run itself goes there however it is started, not only from
+    # the web UI (which places it there whatever the file says): REST with the API token,
+    # `apex run`. Its comments and the rest of the file are kept.
+    config = copied.folder / "config_esmda.toml"
+    resolved = ApexService(tmp_path / "service").resolve(config)
+    assert resolved.run.output_dir == (runs / "control_scenario_esmda-2").resolve()
+    assert "# where the web UI places this run" in config.read_text("utf-8")
     # Without a runs folder (a copy for `apex run`), the run is beside the copy as written.
     plain = copy_example(example, tmp_path / "plain")
     text = (plain.folder / "predict_bhp.toml").read_text("utf-8")
     assert tomllib.loads(text)["prediction"]["run_dir"] == "runs/control_scenario_esmda"
+    run = tomllib.loads((plain.folder / "config_esmda.toml").read_text("utf-8"))["run"]
+    assert "output_dir" not in run
 
 
 def test_copies_made_before_either_ran_get_names_of_their_own(tmp_path: Path) -> None:
@@ -395,3 +404,32 @@ def test_eclipse_examples_cap_by_licences_not_workers(config: Path) -> None:
     data = tomllib.loads(config.read_text("utf-8"))
     licenses = data["simulator"]["options"]["licenses"]
     assert data["execution"]["options"]["workers"] > licenses
+
+
+def test_a_copys_run_keeps_its_own_output_dir_and_an_inline_run_is_warned_about(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A web-UI copy's run gets the runs folder as its output_dir (release tester H39) only
+    when it sets none, and only from a ``[run]`` table: otherwise it is left, with a warning."""
+    from apex.services.examples import _place_run
+
+    runs = tmp_path / "UI" / "owner" / "runs"
+    own = tmp_path / "own.toml"
+    own.write_text('[run]\nname = "a"\noutput_dir = "elsewhere"\n')
+    _place_run(own, runs)
+    assert tomllib.loads(own.read_text())["run"]["output_dir"] == "elsewhere"
+
+    inline = tmp_path / "inline.toml"
+    inline.write_text('run = { name = "b" }\n')
+    with caplog.at_level("WARNING"):
+        _place_run(inline, runs)
+    assert "output_dir" not in tomllib.loads(inline.read_text())["run"]
+    assert "not placed" in caplog.text
+
+    table = tmp_path / "table.toml"
+    table.write_text('# a comment\n[run]   # the run\nname = "c"\n\n[prior]\nensemble_size = 2\n')
+    _place_run(table, runs)
+    placed = tomllib.loads(table.read_text())
+    assert (tmp_path / placed["run"]["output_dir"]).resolve() == (runs / "c").resolve()
+    assert placed["prior"] == {"ensemble_size": 2}
+    assert table.read_text().startswith("# a comment\n[run]   # the run\noutput_dir")

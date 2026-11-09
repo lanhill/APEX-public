@@ -166,7 +166,9 @@ def copy_example(
     ``runs_dir`` is the folder its runs would go to (the web UI's ``UI/<user>/runs``): a run
     name that a run there already has is suffixed too, past every taken one, and a
     prediction's ``run_dir`` naming one of the example's runs (``"runs/<name>"``) names that
-    run's folder in ``runs_dir`` instead, where the run will be.
+    run's folder in ``runs_dir`` instead. Each run gets that folder as its ``output_dir``
+    too, unless it sets one: the web UI places it there whatever the file says, and so then
+    do the REST API and ``apex run``, so its predictions find it however it is started.
 
     Raises
     ------
@@ -211,12 +213,41 @@ def copy_example(
         names = _run_names(target)
         for path in sorted(target.rglob("*.toml")):
             if path.name != MANIFEST:
+                _place_run(path, runs_dir)
                 _place_prediction_runs(path, names, runs_dir)
     configs = [(entry.workflow, entry.title, target / entry.config)
                for entry in example.manifest.example.entries]  # fmt: skip
     created = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     (target / COPY_MARKER).write_text(json.dumps({"id": example.id, "created": created}) + "\n")
     return CopiedExample(target, configs)
+
+
+def _place_run(path: Path, runs_dir: Path) -> None:
+    """Give ``path``'s run the folder ``runs_dir/<name>`` as its ``output_dir``, if it has none.
+
+    The web UI places a run there whatever the file says; a run started otherwise (the
+    REST API, ``apex run``) would go beside the copy, where the predictions that
+    :func:`_place_prediction_runs` points at ``runs_dir`` would not find it (release tester
+    H39). The line goes right after the ``[run]`` header; checked by parsing the result.
+    """
+    try:
+        text = path.read_text("utf-8")
+        table = tomllib.loads(text).get("run")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return
+    name = table.get("name") if isinstance(table, dict) else None
+    if not isinstance(name, str) or "output_dir" in table:  # type: ignore[operator]
+        return
+    placed = Path(os.path.relpath(runs_dir.resolve() / name, path.parent)).as_posix()
+    header = re.compile(r"(?m)^[ \t]*\[[ \t]*run[ \t]*\][ \t]*(#.*)?$")
+    match = header.search(text)
+    if match is not None:
+        line = f"output_dir = {json.dumps(placed)}   # where the web UI places this run"
+        changed = f"{text[: match.end()]}\n{line}{text[match.end() :]}"
+        if tomllib.loads(changed)["run"].get("output_dir") == placed:
+            path.write_text(changed, "utf-8")
+            return
+    logger.warning("%s: its run is not placed in %s", path.name, runs_dir)
 
 
 def _place_prediction_runs(path: Path, names: set[str], runs_dir: Path) -> None:

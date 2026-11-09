@@ -743,24 +743,11 @@ class ApexService:
 
         ``code`` is the code it runs (:meth:`pin_code`): ``"frozen"`` is the run's own.
         """
-        rules = self.jobs.settings.policy
-        if isinstance(config, Path):
-            policy.check_file(config, rules, self.root)  # before it is opened
-        resolved = prediction.load_prediction_config(config) if isinstance(config, Path) else config
-        policy.check(resolved, rules, self.root)  # run_dir must be a run the service wrote
+        resolved, run_config = self._checked_prediction(config)
         assert resolved.prediction.output_dir is not None
         reservation: dict[str, int] = {}
-        try:
-            run_config = composition.snapshot_config(RunDirectory(resolved.prediction.run_dir))
-        except ConfigError:
-            run_config = None  # the run does not exist yet (a study's prediction waits for it)
         if run_config is not None:
             simulator = prediction.simulator_section(resolved, run_config)
-            # What will actually run: the run's snapshot with the prediction's override.
-            policy.check(run_config.model_copy(update={"simulator": simulator}), rules, self.root)
-            # Refused now, not when the job starts; after the policy, as it reads the run's
-            # files (the review).
-            prediction.check_prediction(resolved)
             execution = resolved.execution or run_config.execution
             workers = execution.options.get("workers")
             reservation = self.reservation(
@@ -780,6 +767,68 @@ class ApexService:
             code=self.pin_code(code, resolved.prediction.run_dir),
         )
         return JobHandle(id=job, kind="prediction")
+
+    def _checked_prediction(
+        self, config: PredictionConfig | Path
+    ) -> tuple[PredictionConfig, HistoryMatchConfig | None]:
+        """Return a prediction's configuration and its run's, as a submission checks them.
+
+        The run's is ``None`` when the run does not exist yet (a study's prediction waits for
+        it): then only the prediction's own form and policy are checked.
+
+        Raises
+        ------
+        ConfigError
+            If it is invalid, the ``[policy]`` refuses it, or it would be refused at its
+            start (:func:`prediction.check_prediction`).
+        """
+        rules = self.jobs.settings.policy
+        if isinstance(config, Path):
+            policy.check_file(config, rules, self.root)  # before it is opened
+        resolved = prediction.load_prediction_config(config) if isinstance(config, Path) else config
+        policy.check(resolved, rules, self.root)  # run_dir must be a run the service wrote
+        try:
+            run_config = composition.snapshot_config(RunDirectory(resolved.prediction.run_dir))
+        except ConfigError:
+            return resolved, None  # the run does not exist yet
+        simulator = prediction.simulator_section(resolved, run_config)
+        # What will actually run: the run's snapshot with the prediction's override.
+        policy.check(run_config.model_copy(update={"simulator": simulator}), rules, self.root)
+        # Refused now, not when the job starts; after the policy, as it reads the run's
+        # files (the review).
+        prediction.check_prediction(resolved)
+        return resolved, run_config
+
+    def validate_prediction(
+        self,
+        config: PredictionConfig | Mapping[str, Any] | Path,
+        base_dir: Path | None = None,
+    ) -> Validation:
+        """Validate a prediction's configuration as its submission would; nothing is run.
+
+        A mapping's relative paths resolve against ``base_dir`` (default: this process's
+        working directory, as :meth:`submit_prediction`'s; a remote caller gives it). A
+        prediction of a run that does not exist yet is checked in its form and policy only;
+        a note says that the rest is checked when it starts.
+        """
+        try:
+            if isinstance(config, Mapping):
+                base = (base_dir or Path.cwd()).resolve()
+                config = prediction.resolve_prediction_config(
+                    PredictionConfig.model_validate(dict(config)), base
+                )
+            resolved, run_config = self._checked_prediction(config)
+        except ValidationError as error:
+            return Validation(valid=False, errors=[validation_problems(error)])
+        except ApexError as error:
+            return Validation(valid=False, errors=[str(error)])
+        if run_config is not None:
+            return Validation(valid=True)
+        note = (
+            f"{resolved.prediction.run_dir} holds no run yet: the prediction's names, controls "
+            "and model are checked when it starts"
+        )
+        return Validation(valid=True, notes=[note])
 
     def status(self, job: str) -> JobStatus:
         """Return where a job is."""
@@ -1332,7 +1381,7 @@ class ApexService:
         place_in: Path | None = None,
         annotations: Annotations | None = None,
     ) -> Validation:
-        """Validate a configuration given as TOML text (a run's or a study's).
+        """Validate a configuration given as TOML text (a run's, a study's or a prediction's).
 
         Relative paths resolve against ``base_dir``; nothing is saved or simulated. The
         keywords are :meth:`validate`'s, for a run's configuration.
@@ -1343,6 +1392,8 @@ class ApexService:
             document = tomllib.loads(text)
         except tomllib.TOMLDecodeError as error:
             return Validation(valid=False, errors=[f"TOML: {error}"])
+        if "prediction" in document:  # a run's configuration has no [prediction]
+            return self.validate_prediction(document, base_dir)
         if "study" in document:
             from apex.domain.optimization_study import OptimizationStudySpec
             from apex.domain.study import StudySpec

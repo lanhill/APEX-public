@@ -384,6 +384,15 @@ class RemoteClient:
             self._call("GET", "/predictions/summary", params={"path": _absolute(path)})
         )
 
+    def validate_prediction(
+        self, config: PredictionConfig | Mapping[str, Any] | Path, base_dir: Path | None = None
+    ) -> Validation:
+        """Validate a prediction's configuration as its submission would; nothing is run."""
+        body = self._config(config, "config") | (
+            {"base_dir": _absolute(base_dir)} if base_dir is not None else {}
+        )
+        return Validation.model_validate(self._call("POST", "/configs:validate", body=body))
+
     def validate_optimization(
         self, config: OptimizationConfig | Mapping[str, Any] | Path, base_dir: Path | None = None
     ) -> Validation:

@@ -281,8 +281,10 @@ def _kind(path: Path) -> str:
         raise _Problem(422, "Unreadable configuration", str(error)) from error
     if "optimization" in document and "optimizer" in document:
         return "optimization"
+    if "prediction" in document:  # wherever its table is: a run's configuration has none
+        return "prediction"
     first = next(iter(document), "")
-    return {"study": "study", "prediction": "prediction"}.get(first, "history_match")
+    return {"study": "study"}.get(first, "history_match")
 
 
 _log = logging.getLogger("apex.service")
@@ -545,6 +547,55 @@ def _as_submitted(who: Guard) -> "dict[str, Any]":
     return {"check_output": True, "place_in": folder, "annotations": who.annotations({})}
 
 
+def _validated_prediction(
+    who: Guard, service: ApexService, source: Path | dict[str, Any], base: Path | None
+) -> Validation:
+    """Validate a prediction (a file, or a parsed document with its folder) as submitted.
+
+    A web-UI user's is held to what they may run first (:func:`_ui_prediction`): a run
+    they may see, names and files they may use, as its submission is.
+    """
+    from apex.services.prediction import load_prediction_config, resolve_prediction_config
+
+    if who.ui:
+        try:
+            loaded = (
+                load_prediction_config(source) if isinstance(source, Path)
+                else resolve_prediction_config(
+                    PredictionConfig.model_validate(source), base or Path.cwd()
+                )
+            )  # fmt: skip
+        except (ApexError, ValidationError):
+            loaded = None  # invalid: the validation says why
+        if loaded is not None:
+            _ui_prediction(who, loaded, run_must_exist=False)
+    return service.validate_prediction(source, base)
+
+
+def _ui_prediction(who: Guard, loaded: PredictionConfig, *, run_must_exist: bool = True) -> None:
+    """Refuse a web-UI user's prediction they may not run, as its submission does.
+
+    Its run must be theirs to see, its names and files theirs to use (as for runs), and what
+    runs (the run's saved configuration with the prediction's simulator and executor, which
+    may replace the run's; work from before a rule too) within their plugins. That last
+    check needs the run's saved configuration: without ``run_must_exist`` (a validation)
+    it is left out while the run does not exist, the others never are.
+
+    Raises
+    ------
+    Denied
+        If any of them is not theirs.
+    """
+    from apex.services.composition import snapshot_config
+    from apex.services.prediction import as_predicted
+    from apex.storage.run_directory import RunDirectory
+
+    who.prediction(loaded.prediction.run_dir)
+    who.names(loaded)
+    if run_must_exist or (loaded.prediction.run_dir / "config.json").is_file():
+        who.config(as_predicted(loaded, snapshot_config(RunDirectory(loaded.prediction.run_dir))))
+
+
 def _file_configs(service: ApexService, path: Path) -> list[HistoryMatchConfig]:
     """Return the configurations a run or study file makes (a study: every cell)."""
     if _kind(path) == "study":
@@ -729,6 +780,10 @@ def create_app(
             base_dir = who.server_path(body.base_dir)
             who.folder(base_dir)
             document = _toml_or_none(body.config_text)
+            if document is not None and "prediction" in document:
+                return _scrubbed(who, service, _validated_prediction(
+                    who, service, document, base_dir
+                ))  # fmt: skip
             if document is not None:
                 _check_cases(who, service, document, base_dir)
             text_validation = service.validate_text(body.config_text, base_dir, **as_submitted)
@@ -749,6 +804,8 @@ def create_app(
             if not isinstance(source, Path):
                 raise Denied(403, "UI users validate files of the workspace (config_file)")
             who.file(source)
+            if _kind(source) == "prediction":
+                return _scrubbed(who, service, _validated_prediction(who, service, source, None))
             if _kind(source) == "optimization":
                 from apex.services.optimization import load_optimization_config
 
@@ -774,6 +831,8 @@ def create_app(
         if isinstance(source, Path):
             # Before the file is opened to see what it holds.
             policy.check_file(source, service.jobs.settings.policy, service.root)
+            if _kind(source) == "prediction":
+                return service.validate_prediction(source)
             if _kind(source) == "study":
                 return service.validate_study(source)
             if _kind(source) == "optimization":
@@ -791,6 +850,8 @@ def create_app(
             return service.validate_study(given, base_dir=base)
         if "optimization" in source and "optimizer" in source:
             return service.validate_optimization(source, base_dir=base)
+        if "prediction" in source:  # a run's configuration has no [prediction]
+            return service.validate_prediction(source, base)
         return service.validate(source, base_dir=base, **as_submitted)
 
     # ------------------------------------------------------------------ submissions
@@ -913,17 +974,7 @@ def create_app(
                 raise Denied(403, "UI users submit files of the workspace (prediction_file)")
             who.file(config)
             loaded = load_prediction_config(config)
-            who.prediction(loaded.prediction.run_dir)
-            who.names(loaded)  # its simulator's overrides and files, as for runs
-            # What runs: the run's saved configuration (work from before a rule too) with the
-            # prediction's simulator and executor, which may replace the run's.
-            from apex.services.composition import snapshot_config
-            from apex.services.prediction import as_predicted
-            from apex.storage.run_directory import RunDirectory
-
-            who.config(
-                as_predicted(loaded, snapshot_config(RunDirectory(loaded.prediction.run_dir)))
-            )
+            _ui_prediction(who, loaded)
             config = loaded  # what was checked is what is submitted
             # A guest's prediction writes only in their own web-UI folder: in
             # their run's folder, or, for a run they reused, in UI/guests/<name>/predictions.
