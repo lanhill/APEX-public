@@ -182,6 +182,9 @@ def test_a_scenario_the_simulator_does_not_read_is_refused(finished: object) -> 
 
     with pytest.raises(ConfigError, match=r"gives \['u'\], which the linear simulator does not"):
         prediction.predict(path)
+    # Refused before anything is written: no folder (nor its lock) is left behind.
+    folder = Path(finished.directory) / "runs" / "case" / "predictions" / "scenario"  # type: ignore[attr-defined]
+    assert not folder.exists()
 
 
 def test_a_deck_templates_names_are_the_values_it_reads(tmp_path: Path) -> None:

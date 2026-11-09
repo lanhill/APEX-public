@@ -98,17 +98,27 @@ class PredictionSection(_Strict):
         "simulator alone. Without it, 'truth' is refused: a model error means the data came "
         "from another model, which the simulator does not reproduce.",
     )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        description="The seed of the prediction's own draws: a model-error model that "
+        "extrapolates its parameters past the history. Default: "
+        "derived from the run's seed and the prediction's name. Refused when nothing in the "
+        "prediction draws.",
+    )
 
     @model_serializer(mode="wrap")
     def _without_unset_truth_rule(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Leave ``truth_is_simulator`` out of the dump when it is false.
+        """Leave ``truth_is_simulator`` and ``seed`` out of the dump when unset.
 
         A plain prediction's ``config.json`` and fingerprint stay those of predictions made
-        before the option existed, so their folders resume.
+        before the options existed, so their folders resume.
         """
         data: dict[str, Any] = handler(self)
         if not data.get("truth_is_simulator"):
             data.pop("truth_is_simulator", None)
+        if data.get("seed") is None:
+            data.pop("seed", None)
         return data
 
     @model_validator(mode="after")
@@ -218,9 +228,20 @@ class PredictionControlsSection(_Strict):
         return self
 
 
+class PredictionModelErrorSection(_Strict):
+    """``[model_error]`` of a prediction: the forecast's own options.
+
+    Merged into the run's model-error options. Only the options the model declares in
+    ``forecast_options`` (how its parameters past the history are built) may be set: the
+    others shape the history, which the prediction reproduces.
+    """
+
+    options: dict[str, Any] = Field(min_length=1)
+
+
 #: Optional sections left out of a prediction's dump when unset, so that a prediction
 #: without them keeps the configuration and fingerprint of one made before they existed.
-_DROPPED_WHEN_UNSET = ("surrogate", "controls")
+_DROPPED_WHEN_UNSET = ("surrogate", "controls", "model_error")
 
 
 class PredictionConfig(_Strict):
@@ -237,10 +258,15 @@ class PredictionConfig(_Strict):
     controls: PredictionControlsSection | None = Field(
         default=None, description="A control scenario every member is given."
     )
+    model_error: PredictionModelErrorSection | None = Field(
+        default=None,
+        description="Options of the run's model-error model for the forecast past the history "
+        "(only those the model declares in forecast_options).",
+    )
 
     @model_serializer(mode="wrap")
     def _without_unset_sections(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Leave ``surrogate`` and ``controls`` out of the dump when they are unset.
+        """Leave ``surrogate``, ``controls`` and ``model_error`` out of the dump when unset.
 
         A plain prediction's ``config.json`` and its fingerprint then stay those of
         predictions made before the sections existed, so their folders resume (the coder's

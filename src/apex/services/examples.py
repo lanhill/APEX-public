@@ -164,7 +164,9 @@ def copy_example(
     """Copy an example into ``destination/<id>`` (``-2``, ``-3``, ... if taken); see above.
 
     ``runs_dir`` is the folder its runs would go to (the web UI's ``UI/<user>/runs``): a run
-    name that a run there already has is suffixed too, past every taken one.
+    name that a run there already has is suffixed too, past every taken one, and a
+    prediction's ``run_dir`` naming one of the example's runs (``"runs/<name>"``) names that
+    run's folder in ``runs_dir`` instead, where the run will be.
 
     Raises
     ------
@@ -205,11 +207,44 @@ def copy_example(
             text = _suffixed_names(text, suffix, example, config)
             text = _renamed_references(text, renamed, suffix, example, config)
         path.write_text(text, "utf-8")
+    if runs_dir is not None:
+        names = _run_names(target)
+        for path in sorted(target.rglob("*.toml")):
+            if path.name != MANIFEST:
+                _place_prediction_runs(path, names, runs_dir)
     configs = [(entry.workflow, entry.title, target / entry.config)
                for entry in example.manifest.example.entries]  # fmt: skip
     created = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     (target / COPY_MARKER).write_text(json.dumps({"id": example.id, "created": created}) + "\n")
     return CopiedExample(target, configs)
+
+
+def _place_prediction_runs(path: Path, names: set[str], runs_dir: Path) -> None:
+    """Point ``path``'s prediction at its run's folder in ``runs_dir``, if it names one.
+
+    A copied example's run is placed in ``runs_dir/<name>`` (the web UI's runs go to its
+    user's folder whatever the file says), not beside the copy, so a prediction's
+    ``run_dir = "runs/<name>"`` would name a folder that never exists.
+    """
+    try:
+        text = path.read_text("utf-8")
+        table = tomllib.loads(text).get("prediction")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return
+    run_dir = table.get("run_dir") if isinstance(table, dict) else None
+    if not isinstance(run_dir, str):
+        return
+    match = re.fullmatch(r"(?:\./)?runs/([^/]+)/?", run_dir)
+    if match is None or match.group(1) not in names:
+        return
+    placed = Path(os.path.relpath(runs_dir.resolve() / match.group(1), path.parent)).as_posix()
+    line = re.compile(rf"""(?m)^([ \t]*run_dir[ \t]*=[ \t]*)(["']){re.escape(run_dir)}\2""")
+    changed, count = line.subn(lambda m: f"{m.group(1)}{json.dumps(placed)}", text, count=1)
+    if count == 1 and tomllib.loads(changed)["prediction"]["run_dir"] == placed:
+        path.write_text(changed, "utf-8")
+    else:
+        logger.warning("%s: its prediction's run_dir %r is not placed in %s",
+                       path.name, run_dir, runs_dir)  # fmt: skip
 
 
 def _run_names(folder: Path) -> set[str]:

@@ -71,11 +71,16 @@ class PredictionDirectory:
             return False
         return "prediction_fingerprint" in json.loads(state.read_text())
 
-    def open(self, *, config_text: str, fingerprint: str) -> bool:
+    def open(
+        self, *, config_text: str, fingerprint: str, forecast_state: str | None = None
+    ) -> bool:
         """Create the directory, or check that an existing one is this prediction.
 
         Returns whether it existed (the prediction is resumed). A prediction with another
         configuration is replaced when it holds no finished member and nothing else.
+        ``forecast_state`` names the model-error forecast state this configuration uses
+        (``forecast_state-<digest>.npz``, already written or reused), the only one a
+        replacement keeps.
 
         Raises
         ------
@@ -85,6 +90,13 @@ class PredictionDirectory:
         state_path = self.path / "state.json"
         # A stop asked before (it ended a job, or was ignored) is not one for this start.
         (self.path / "stop_requested").unlink(missing_ok=True)
+        if not state_path.exists():
+            # No prediction here yet: a forecast state other than this configuration's is
+            # left from a start that ended before this point (derived, fitted again if
+            # wanted), as are crash leftovers of the files.
+            for entry in self.path.glob(f"{FORECAST_STATE_PREFIX}*"):
+                if entry.name != forecast_state and _layout_entry(entry.name):
+                    entry.unlink()
         if state_path.exists():
             state = json.loads(state_path.read_text())
             if state.get("prediction_fingerprint") != fingerprint:
@@ -92,7 +104,7 @@ class PredictionDirectory:
                 # history check (their forecasts may still be wanted): only a folder with
                 # none is replaced.
                 finished = self.finished_members()
-                if finished or not self._clear_unfinished():
+                if finished or not self._clear_unfinished(forecast_state):
                     held = f"{len(finished)} finished member(s)" if finished else "other files"
                     if state.get("history_check") == "failed":
                         held += " (its history check failed)"
@@ -117,19 +129,25 @@ class PredictionDirectory:
         """Return the files of the members that finished (``members/*.npz``)."""
         return sorted(self.members.glob("*.npz")) if self.members.is_dir() else []
 
-    def _clear_unfinished(self) -> bool:
+    def _clear_unfinished(self, forecast_state: str | None = None) -> bool:
         """Remove a prediction's files when no member finished; return whether it could.
 
         A prediction that failed before its first member has nothing worth keeping, so a
         corrected configuration replaces it instead of being refused (the release tester,
         2026-10-19). Only this
         layout's own entries are removed, and the lock (``run.lock``, held by this process)
-        stays; a folder with anything else in it is left alone.
+        stays; a folder with anything else in it is left alone. Of the model-error forecast
+        states (``forecast_state-<digest>.npz``) only
+        ``forecast_state``, the one the new configuration has just written or reused,
+        stays: the others were the replaced configurations' (derived files, fitted again
+        if wanted).
         """
         entries = [e for e in self.path.iterdir() if e.name != LOCK_FILE]
         if any(not _layout_entry(e.name) for e in entries):
             return False
         for entry in entries:
+            if entry.name == forecast_state:
+                continue
             if entry.is_dir() and not entry.is_symlink():
                 shutil.rmtree(entry)
             else:
@@ -240,6 +258,10 @@ _LAYOUT_FILES = frozenset({
     "config.json", "provenance.json", "state.json", "truth.npz", "statistics.csv",
     "scores.json", "scores.csv", "events.jsonl", "stop_requested", "members", "simulations",
 })  # fmt: skip
+
+
+#: A model-error model's forecast state, kept when an unfinished prediction is replaced.
+FORECAST_STATE_PREFIX = "forecast_state-"
 
 
 def _layout_entry(name: str) -> bool:

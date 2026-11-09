@@ -758,6 +758,9 @@ class ApexService:
             simulator = prediction.simulator_section(resolved, run_config)
             # What will actually run: the run's snapshot with the prediction's override.
             policy.check(run_config.model_copy(update={"simulator": simulator}), rules, self.root)
+            # Refused now, not when the job starts; after the policy, as it reads the run's
+            # files (the review).
+            prediction.check_prediction(resolved)
             execution = resolved.execution or run_config.execution
             workers = execution.options.get("workers")
             reservation = self.reservation(

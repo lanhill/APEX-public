@@ -46,6 +46,12 @@ class MemberInput:
         for no key after it. Executors refuse a member with a stop date for a simulator
         without the capability (:func:`refuse_unsupported_stop`): it would run the whole
         schedule silently.
+    stream_key
+        Non-negative integers naming the member among a prediction's draws (a hash
+        of its ensemble's name, then ``member_id + 2``), set by a
+        prediction for an
+        :class:`ExtrapolatingModel`; empty elsewhere, as always. Executors that rebuild a
+        member elsewhere carry it.
     """
 
     member_id: int
@@ -53,6 +59,7 @@ class MemberInput:
     work_dir: Path | None = None
     runner: "CommandRunner | None" = None
     stop_at: str | None = None
+    stream_key: tuple[int, ...] = ()
 
 
 class CommandRunner(Protocol):
@@ -497,6 +504,74 @@ class MaskingModel(Protocol):
     def parameter_mask(self, keys: Sequence[DataKey]) -> NDArray[np.bool_]:
         """Return which assimilated data each parameter can affect, ``(n_params, n_keys)``."""
         ...
+
+
+#: The option an :class:`ExtrapolatingModel` reads its forecast state.
+FORECAST_STATE_OPTION = "forecast_state_file"
+#: The forecast-state file's arrays holding the prediction's seed: the entropy's decimal
+#: digits (a 0-d string) and the spawn key (int64).
+SEED_ENTROPY = "seed.entropy"
+SEED_SPAWN_KEY = "seed.spawn_key"
+
+
+@runtime_checkable
+class ExtrapolatingModel(Protocol):
+    """A model-error model whose parameters past the history are built per member.
+
+    ``extrapolates`` declares it (a model may for some configurations
+    only). A prediction then:
+
+    1. calls :meth:`forecast_state` once with the run's prior and posterior ensembles of
+       ``state_variable`` (``(n_params, N)``, their common members paired by id, in the
+       same columns) and the keys the run assimilated (held-out data left out): what the
+       model fits from them (pooled over the members), as named arrays;
+    2. writes those arrays and the prediction's seed (:data:`SEED_ENTROPY`,
+       :data:`SEED_SPAWN_KEY`) to a file in its folder, and builds the model with that file
+       as its option :data:`FORECAST_STATE_OPTION`, wherever it is built (here, in workers,
+       on remote hosts, which mirror the model's input files). The file is named by a
+       digest of the fit's inputs, and an existing one is reused: a resume never fits
+       again (another environment may round the fit differently);
+    3. gives every member a ``stream_key`` and calls :meth:`member_residuals`, whose draws
+       come from that seed and key alone (bit-identical across resume, the pilot member,
+       member order and dropped members).
+
+    :meth:`residuals` (no key: history matching) answers the history only.
+
+    A model class may also declare ``forecast_options``, the names of its options a
+    prediction may set in its own ``[model_error] options`` (how the parameters past the
+    history are built; not what shapes the history). Without it a prediction sets none.
+    """
+
+    state_variable: str
+
+    @property
+    def extrapolates(self) -> bool:
+        """Whether a prediction must prepare the model and key its members."""
+        ...
+
+    def forecast_state(
+        self,
+        prior: NDArray[np.floating],
+        posterior: NDArray[np.floating],
+        keys: Sequence[DataKey],
+    ) -> dict[str, NDArray[np.generic]]:
+        """Return what the model fits from the run's ensembles, as named arrays."""
+        ...
+
+    def member_residuals(
+        self,
+        case: Path,
+        theta: NDArray[np.float64],
+        keys: Sequence[DataKey],
+        member: Sequence[int],
+    ) -> NDArray[np.float64]:
+        """Return r at ``keys`` for the member keyed ``member``, past the history too."""
+        ...
+
+
+def extrapolates(model: object) -> bool:
+    """Whether ``model`` is an :class:`ExtrapolatingModel` that declares it."""
+    return isinstance(model, ExtrapolatingModel) and bool(model.extrapolates)
 
 
 class CaseFieldModel(Protocol):

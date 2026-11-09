@@ -56,6 +56,7 @@ title = "NSGA-II"         # optional: what this entry shows, when there are seve
 | `optimization` | optimization | Rosenbrock with EnOpt and with trust region (PET's popt) |
 | `optimization/3well` | optimization | PET's popt tutorial: NPV on OPM Flow |
 | `3dbox_production` | history matching | The 3dBox case on OPM Flow: ES-MDA and GIES, with and without adaptive localization, on the wells' rates, the log-permeability and porosity uncertain (hours) |
+| `prediction_controls` | history matching, prediction | A small box on OPM Flow: ES-MDA, then predictions under two control scenarios, the producers' bottom-hole pressures after the history (minutes) |
 | `3dbox_production_avo` | history matching | The 3dBox AVO case on OPM Flow: ES-MDA and GIES, with and without adaptive localization, on the wells' rates and wavelet-compressed RMS maps of two angle stacks at two vintages, the log-permeability and porosity uncertain (hours) |
 
 ## Copying an example
@@ -87,6 +88,10 @@ So two kinds of include behave differently:
 - Any other include in the template is read beside the template, in the **examples root**. Your copy of such a file is not read by the deck.
 
 If you want a data file to be editable, the deck must reach it through `${case_dir}`.
+
+### Predictions of the example's runs
+
+A prediction's `run_dir` names the run it forecasts. When it names one of the example's own runs as `"runs/<name>"`, a copy made from the web UI points it at the folder where the web UI places that run, `UI/<user>/runs/<name>` (with the copy's run name, if it was suffixed). A copy for the command line keeps `"runs/<name>"`, beside the copy, where `apex run` puts the run.
 
 ### Trust and access
 

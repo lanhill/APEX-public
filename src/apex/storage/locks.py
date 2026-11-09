@@ -25,6 +25,8 @@ from pathlib import Path
 from apex.core.errors import WorkflowError
 
 LOCK_FILE = "run.lock"
+#: Tries to take a lock whose file is removed meanwhile (one removal is a holder cleaning up).
+_ATTEMPTS = 5
 
 
 class DirectoryLocked(WorkflowError):
@@ -32,28 +34,57 @@ class DirectoryLocked(WorkflowError):
 
 
 @contextmanager
-def exclusive(directory: Path, what: str = "run") -> Iterator[None]:
-    """Hold the directory's lock for the ``with`` block.
+def exclusive(directory: Path, what: str = "run") -> Iterator[bool]:
+    """Hold the directory's lock for the ``with`` block; yield whether this call made it.
+
+    The directory is made here if missing: of several processes racing to start in a new
+    directory, exactly one is told it made it (``mkdir`` is atomic), so a caller can remove
+    what it made on failure without judging from an ``exists()`` taken before the lock.
+
+    A holder may remove the directory with its lock file (a refused prediction's own new
+    folder): a process that opened the file before then would lock an unlinked file, and a
+    later one a new file, both "holding" the directory. So the lock counts only on the file
+    the directory names when it is taken; otherwise it is taken again, the directory made
+    again if it is gone.
 
     Raises
     ------
     DirectoryLocked
         If another process holds it; the message names that process.
+    WorkflowError
+        If the path exists and is not a directory, or the lock file keeps changing.
     """
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / LOCK_FILE
-    handle = path.open("a+")
-    try:
+    for _ in range(_ATTEMPTS):
+        created = _make(directory)
+        path = directory / LOCK_FILE
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            handle.seek(0)
-            holder = _holder(handle.read())
-            raise DirectoryLocked(
-                f"the {what} in {directory} is in use by {holder}; wait for it to end, or "
-                "stop it (apex stop) before resuming it"
-            ) from None
+            handle = path.open("a+")
+        except FileNotFoundError:
+            continue  # the directory was removed after it was made: make it again
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.seek(0)
+                holder = _holder(handle.read())
+                raise DirectoryLocked(
+                    f"the {what} in {directory} is in use by {holder}; wait for it to end, "
+                    "or stop it (apex stop) before resuming it"
+                ) from None
+            held = _same_file(handle.fileno(), path)
+        except BaseException:
+            handle.close()
+            raise
+        if held:
+            break
+        handle.close()  # a removed file's lock: take the directory's own
+    else:
+        raise WorkflowError(
+            f"the lock file {directory / LOCK_FILE} was removed {_ATTEMPTS} times while being "
+            "taken: another program is deleting the folder"
+        )
+    try:
         handle.seek(0)
         handle.truncate()
         handle.write(json.dumps({
@@ -62,9 +93,31 @@ def exclusive(directory: Path, what: str = "run") -> Iterator[None]:
             "since": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         }))  # fmt: skip
         handle.flush()
-        yield
+        yield created
     finally:
         handle.close()  # closing releases the lock
+
+
+def _make(directory: Path) -> bool:
+    """Make ``directory`` if missing; return whether this call made it (``mkdir`` is atomic)."""
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        if not directory.is_dir():
+            raise WorkflowError(f"{directory} exists and is not a directory") from None
+        return False
+    return True
+
+
+def _same_file(descriptor: int, path: Path) -> bool:
+    """Whether the open file ``descriptor`` is the one ``path`` names now."""
+    try:
+        named = os.stat(path)
+    except FileNotFoundError:
+        return False
+    held = os.fstat(descriptor)
+    return (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
 
 
 @contextmanager

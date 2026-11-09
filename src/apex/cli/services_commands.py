@@ -159,7 +159,7 @@ def register(app: typer.Typer) -> None:
         root: Root = None,
     ) -> None:
         """Validate a configuration and plan its cost; nothing is simulated."""
-        from apex.services.prediction import load_prediction_config
+        from apex.services.prediction import check_prediction, load_prediction_config
 
         service = ApexService(root)
         try:
@@ -180,7 +180,7 @@ def register(app: typer.Typer) -> None:
             elif kind == "study":
                 result = service.validate_study(config)
             elif kind == "prediction":
-                load_prediction_config(config)
+                check_prediction(load_prediction_config(config))
                 typer.echo(f"{config}: a valid prediction configuration")
                 return
             else:

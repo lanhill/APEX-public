@@ -7,6 +7,7 @@ case-study runner and notebooks may too.
 import hashlib
 import json
 import logging
+import os
 import tomllib
 from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
@@ -27,7 +28,13 @@ from apex.core.plugins import (
     simulators,
 )
 from apex.core.progress import ProgressReporter
-from apex.core.simulation import ModelErrorModel, SeriesRequest
+from apex.core.simulation import (
+    FORECAST_STATE_OPTION,
+    ExtrapolatingModel,
+    ModelErrorModel,
+    SeriesRequest,
+    extrapolates,
+)
 from apex.domain.config import HistoryMatchConfig, PluginSection
 from apex.domain.observations import ObservationSet
 from apex.domain.prediction import PredictionConfig, PredictionControlsSection, PredictionResult
@@ -35,9 +42,10 @@ from apex.domain.state import StateLayout, StateVariable
 from apex.services import composition
 from apex.simulation.model_error import RESIDUAL_PREFIX, ModelErrorSimulator
 from apex.storage import provenance
+from apex.storage.forecast_state import write_forecast_state
 from apex.storage.inputs import read_observation_section
-from apex.storage.locks import exclusive
-from apex.storage.prediction_directory import PredictionDirectory
+from apex.storage.locks import LOCK_FILE, exclusive
+from apex.storage.prediction_directory import FORECAST_STATE_PREFIX, PredictionDirectory
 from apex.storage.run_directory import SURROGATE, RunDirectory
 from apex.storage.run_results import RunResults
 from apex.workflows.parameterization import PropertyMap, parameterized
@@ -353,8 +361,37 @@ def predict_config(
         If another process is writing the same prediction.
     """
     assert config.prediction.output_dir is not None
-    with exclusive(config.prediction.output_dir, "prediction"):
-        return _predict(config, progress, stopped)
+    folder = config.prediction.output_dir
+    # Whether this call made the folder comes from the lock's own mkdir: an exists() taken
+    # before the lock could let a process that lost the race remove the winner's files.
+    with exclusive(folder, "prediction") as new:
+        try:
+            return _predict(config, progress, stopped)
+        except ConfigError:
+            if new:
+                _remove_if_only_lock(folder)
+            raise
+
+
+def _remove_if_only_lock(folder: Path) -> None:
+    """Remove a refused prediction's new folder if it holds nothing but its lock.
+
+    A prediction refused before anything was written left its folder and lock behind
+    (release tester). Called while the lock is still held, so no other process can hold
+    it yet; ``os.rmdir`` removes only an empty folder, so nothing else is ever deleted.
+    The folder is new, so a model-error forecast state in it (``forecast_state-*.npz``,
+    written before the refusal) is this call's own and goes too.
+    """
+    try:
+        names = {p.name for p in folder.iterdir()}
+        states = {n for n in names if n.startswith(FORECAST_STATE_PREFIX) and n.endswith(".npz")}
+        if names - states <= {LOCK_FILE}:
+            for name in sorted(states):
+                (folder / name).unlink()
+            (folder / LOCK_FILE).unlink(missing_ok=True)
+            os.rmdir(folder)
+    except OSError:
+        pass  # something else is there now: keep the folder
 
 
 #: Names a deck template is given besides the member's blocks (simulation/deck.py
@@ -456,7 +493,7 @@ def _predict(
 ) -> PredictionResult:
     section = config.prediction
     run_dir = RunDirectory(section.run_dir)
-    run_config = composition.snapshot_config(run_dir)
+    run_config = _with_forecast_options(config, composition.snapshot_config(run_dir))
     layout = composition.build_layout(run_config)
     try:
         results = RunResults(section.run_dir, layout)
@@ -465,8 +502,14 @@ def _predict(
     simulator_config = simulator_section(config, run_config)
     execution = config.execution or run_config.execution
     model_error = _forecasting_model_error(config, run_config, simulator_config, layout)
-    if model_error is not None:
-        _refuse_model_error_requests(config)
+    _refuse_for_model(config, run_config, model_error)
+    forecast: dict[str, object] = {}
+    if model_error is not None and extrapolates(model_error):
+        # The model's parameters past the history, fitted once here
+        # and read from a file wherever the model is built (workers, remote hosts).
+        run_config, model_error, forecast = _prepare_extrapolation(
+            config, run_config, simulator_config, layout, results, model_error
+        )
     try:
         base = simulators.create(simulator_config.name, **simulator_config.options)
         # the run's parameterizations map each member's state, as in the run.
@@ -531,16 +574,27 @@ def _predict(
         except (TypeError, ValueError, PluginError) as error:
             raise ConfigError(f"invalid prediction [surrogate]: {error}") from error
     directory = PredictionDirectory(section.output_dir)
-    directory.open(
-        config_text=config.model_dump_json(indent=2),
-        fingerprint=_fingerprint(
-            config,
-            run_dir,
-            simulator_config,
-            "" if surrogate is None else surrogate.identity,
-            None if model_error is None else _model_error_files(run_config),
-        ),
-    )
+    state = forecast.get("forecast_state")
+    state_file = str(state["file"]) if isinstance(state, dict) else None
+    fitted = isinstance(state, dict) and state.get("fitted") is True
+    try:
+        directory.open(
+            forecast_state=state_file,
+            config_text=config.model_dump_json(indent=2),
+            fingerprint=_fingerprint(
+                config,
+                run_dir,
+                simulator_config,
+                "" if surrogate is None else surrogate.identity,
+                None if model_error is None else _model_error_files(run_config),
+            ),
+        )
+    except ConfigError:
+        # Refused as another prediction's folder: a state file this call fitted into it is
+        # its own (derived, named by its inputs) and is not left there.
+        if state_file is not None and fitted:
+            (section.output_dir / state_file).unlink(missing_ok=True)
+        raise
     if stopped is not None and stopped():
         (directory.path / "stop_requested").write_text("stop at the next checkpoint\n")
     composition.configure_logging(directory.path)
@@ -567,6 +621,7 @@ def _predict(
                     "name": run_config.model_error.name,
                     "truth_is_simulator": section.truth_is_simulator,
                 }
+                | forecast
             }
         )
         # The scenario every member was given, after its parameterizations (release
@@ -645,7 +700,16 @@ def _forecasting_model_error(
         )
     observations = read_observation_section(run.observations)
     as_run = run.model_copy(update={"simulator": simulator})
-    model = composition.build_model_error(as_run, layout, observations)
+    try:
+        model = composition.build_model_error(as_run, layout, observations)
+    except (ValueError, TypeError) as error:
+        # The model's constructor refusing its options: since a prediction may set its
+        # forecast options, these are a client's (the coder's re-review), reported as a
+        # configuration error (validation invalid, the new folder removed).
+        raise ConfigError(
+            f"[model_error] {section.name} cannot be built with its options (the run's, and "
+            f"a prediction's [model_error] options): {type(error).__name__}: {error}"
+        ) from error
     assert model is not None
     if config.surrogate is not None:
         raise ConfigError(
@@ -654,6 +718,229 @@ def _forecasting_model_error(
         )
     composition.check_model_error_summary(as_run, model)
     return model
+
+
+def check_prediction(config: PredictionConfig) -> None:
+    """Refuse, before submission, what a prediction cannot run and needs no forecast to know.
+
+    ``apex validate``, the tools' validation and :meth:`ApexService.submit_prediction` call
+    it; :func:`_predict` applies the same refusals. A run that does not exist yet (a
+    study's prediction waits for it) is not checked here. The model-error model, if any,
+    is built (its files read, no simulation) to know whether it extrapolates.
+
+    Raises
+    ------
+    ConfigError
+        As :func:`_with_forecast_options`, :func:`_forecasting_model_error` and
+        :func:`_refuse_for_model`.
+    """
+    if not (Path(config.prediction.run_dir) / "config.json").is_file():
+        return
+    run = _with_forecast_options(
+        config, composition.snapshot_config(RunDirectory(config.prediction.run_dir))
+    )
+    layout = composition.build_layout(run)
+    try:
+        model = _forecasting_model_error(config, run, simulator_section(config, run), layout)
+    except OSError as error:
+        raise ConfigError(f"cannot build the run's model-error model: {error}") from error
+    _refuse_for_model(config, run, model)
+
+
+def _refuse_for_model(
+    config: PredictionConfig, run: HistoryMatchConfig, model: ModelErrorModel | None
+) -> None:
+    """Refuse what the run's model-error model, or its absence, makes impossible.
+
+    Raises
+    ------
+    ConfigError
+        The truth or ``MEC:`` vectors of a model-error run (:func:`_refuse_model_error_
+        requests`); with a model that extrapolates its parameters,
+        the truth (its parameters are not stored: an auxiliary variable's are zero, which
+        no posterior sequence extrapolates) and ``[[data_transforms]]`` (they replace the
+        assimilated keys the fit reads); without one, a ``seed`` or ``[model_error]
+        options`` (they would change nothing).
+    """
+    section = config.prediction
+    if model is not None:
+        _refuse_model_error_requests(config)
+    if model is not None and extrapolates(model):
+        if "truth" in section.ensembles:
+            raise ConfigError(
+                "a prediction of a run whose model-error model extrapolates its parameters "
+                "past the history cannot forecast 'truth': the truth has no stored "
+                "model-error parameters (an auxiliary variable), so there is no sequence to "
+                "extrapolate"
+            )
+        if run.data_transforms:
+            raise ConfigError(
+                "a model-error model that extrapolates its parameters needs the keys the run "
+                "assimilated, which [[data_transforms]] replace; not supported"
+            )
+        return
+    if section.seed is not None:
+        raise ConfigError(
+            "[prediction] seed is given, but nothing in this prediction draws (only a "
+            "model-error model that extrapolates its parameters past the history does, ADR "
+            "0058 revision 4); remove it"
+        )
+    if config.model_error is not None:
+        raise ConfigError(
+            "[model_error] options are given, but the run's model-error model does not "
+            "extrapolate its parameters past the history in this configuration, so they "
+            "would change nothing; remove them"
+        )
+
+
+def _with_forecast_options(config: PredictionConfig, run: HistoryMatchConfig) -> HistoryMatchConfig:
+    """Return the run's configuration with the prediction's ``[model_error] options``.
+
+    Only the options the run's model declares in ``forecast_options``
+    (how its parameters past the history are built). The merged configuration is what the
+    model, the fingerprint, the provenance and remote hosts see.
+
+    Raises
+    ------
+    ConfigError
+        If the run has no model-error model, or an option is not one of its forecast
+        options.
+    """
+    if config.model_error is None:
+        return run
+    if run.model_error is None:
+        raise ConfigError(
+            f"[model_error] options are given, but {config.prediction.run_dir} ran without a "
+            "model-error model"
+        )
+    try:
+        factory = model_error_models.factory(run.model_error.name)
+    except PluginError as error:
+        raise ConfigError(f"[model_error]: {error}") from error
+    allowed = frozenset(getattr(factory, "forecast_options", frozenset()))
+    other = sorted(set(config.model_error.options) - allowed)
+    if other:
+        raise ConfigError(
+            f"a prediction's [model_error] options may set only the model's forecast options "
+            f"({', '.join(sorted(allowed)) or 'none'} for {run.model_error.name}), not "
+            f"{', '.join(other)}: the others shape the history the prediction reproduces"
+        )
+    options = {**run.model_error.options, **config.model_error.options}
+    return run.model_copy(
+        update={"model_error": run.model_error.model_copy(update={"options": options})}
+    )
+
+
+def _prediction_seed(config: PredictionConfig, run: HistoryMatchConfig) -> np.random.SeedSequence:
+    """Return the prediction's seed sequence.
+
+    ``[prediction] seed`` if given; else the run's seed with a spawn key from the
+    prediction's name (the first 31 bits of its SHA-256), so two predictions of one run
+    draw differently and a resume draws the same.
+    """
+    section = config.prediction
+    if section.seed is not None:
+        return np.random.SeedSequence(section.seed)
+    name = int.from_bytes(hashlib.sha256(section.name.encode()).digest()[:4], "big") >> 1
+    return np.random.SeedSequence(run.run.seed, spawn_key=(name,))
+
+
+def _prepare_extrapolation(
+    config: PredictionConfig,
+    run: HistoryMatchConfig,
+    simulator: PluginSection,
+    layout: StateLayout,
+    results: RunResults,
+    model: ModelErrorModel,
+) -> tuple[HistoryMatchConfig, ModelErrorModel, dict[str, object]]:
+    """Fit an extrapolating model's forecast state; return the run as predicted with it.
+
+    The model's :meth:`forecast_state` from the run's prior (iterate
+    0) and posterior (the CV-selected or last iterate) of its state variable, their common
+    members paired by id, and the keys the run assimilated; written with the prediction's
+    seed to a file in the prediction's folder named by a digest of those inputs (so a
+    resume, or a configuration replacing an unfinished one, reuses it instead of fitting
+    again: a refit in another environment may round differently); the run's
+    configuration with that file as the model's option ``forecast_state_file`` (so the
+    fingerprint, the provenance and remote hosts have it), and the model rebuilt from it.
+    Every ensemble's members then extrapolate from their own parameters with what was
+    fitted on the prior-to-posterior update.
+
+    Raises
+    ------
+    ConfigError
+        If the prediction asks for the truth (its parameters are not stored: an auxiliary
+        variable's are zero, which no posterior sequence extrapolates), the run transforms
+        its data, the two iterates share fewer than 2 members, or the model refuses them.
+    """
+    section = config.prediction
+    assert run.model_error is not None
+    assert section.output_dir is not None
+    assert isinstance(model, ExtrapolatingModel)
+    variable = model.state_variable
+    prior = results.iterate(0)
+    posterior = results.iterate(results.posterior_iteration)
+    # Members that failed are dropped from later iterates: pair the two by their ids.
+    common, in_prior, in_posterior = np.intersect1d(
+        prior.member_ids, posterior.member_ids, return_indices=True
+    )
+    if common.size < 2:
+        raise ConfigError(
+            f"the run's prior and posterior share {common.size} member(s); the "
+            "extrapolation fits on at least 2"
+        )
+    before = np.ascontiguousarray(np.asarray(prior.state[variable])[:, in_prior])
+    after = np.ascontiguousarray(np.asarray(posterior.state[variable])[:, in_posterior])
+    keys = list(composition.build_run(run, surrogate=False).workflow.observations.keys)
+    seed = _prediction_seed(config, run)
+    # The file is named by what the fit reads: the same inputs find the same file.
+    inputs = hashlib.sha256()
+    inputs.update(run.model_error.model_dump_json().encode())
+    inputs.update(json.dumps([str(key) for key in keys]).encode())
+    for array in (common, before, after):
+        inputs.update(str(array.shape).encode() + array.dtype.str.encode() + array.tobytes())
+    inputs.update(str(seed.entropy).encode() + repr(seed.spawn_key).encode())
+    path = section.output_dir / f"forecast_state-{inputs.hexdigest()[:16]}.npz"
+    saved = section.output_dir / "config.json"
+    if (
+        not path.is_file()
+        and PredictionDirectory(section.output_dir).finished_members()
+        and saved.is_file()
+        and saved.read_text(encoding="utf-8") != config.model_dump_json(indent=2)
+    ):
+        # The folder's open() would refuse it: refused before fitting, so no new state
+        # file lands in another prediction's folder (the coder's review). Only a changed
+        # configuration is caught here; a changed run file with the same configuration
+        # is refused by open()'s fingerprint, after the fit.
+        raise ConfigError(
+            f"{section.output_dir} holds a prediction with another configuration and "
+            "finished members; choose another name or output_dir, or delete it to start "
+            f"again with this configuration: rm -r '{section.output_dir}'"
+        )
+    fitted = not path.is_file()
+    try:
+        if fitted:
+            write_forecast_state(path, model.forecast_state(before, after, keys), seed)
+    except ValueError as error:
+        raise ConfigError(f"[model_error] {run.model_error.name}: {error}") from error
+    options = {**run.model_error.options, FORECAST_STATE_OPTION: str(path)}
+    predicted = run.model_copy(
+        update={"model_error": run.model_error.model_copy(update={"options": options})}
+    )
+    rebuilt = _forecasting_model_error(config, predicted, simulator, layout)
+    assert rebuilt is not None
+    record: dict[str, object] = {
+        "forecast_state": {"file": path.name, "sha256": provenance.file_hash(path),
+                           "posterior_iteration": int(results.posterior_iteration),
+                           "members": int(common.size), "fitted": fitted},
+        "seed": {"entropy": str(seed.entropy), "spawn_key": list(seed.spawn_key),
+                 "given": section.seed is not None},
+    }  # fmt: skip
+    logger.info(
+        "the model-error model's parameters past the history are extrapolated",
+        extra={"event": "prediction_model_error_extrapolation", "file": path.name},
+    )
+    return predicted, rebuilt, record
 
 
 def _model_error_files(run: HistoryMatchConfig) -> dict[str, Path]:

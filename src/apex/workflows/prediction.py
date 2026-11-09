@@ -331,6 +331,19 @@ def first_prediction_time(times: Sequence[str], observation_times: Sequence[str]
     return next((i for i, t in enumerate(axis) if t > end), len(axis))
 
 
+def stream_key(ensemble: str, member_id: int) -> tuple[int, int]:
+    """Return a prediction member's ``stream_key``.
+
+    The first 31 bits of the SHA-256 of the ensemble's name (``posterior``, ``prior``,
+    ``iteration:3``, ``posterior:mean``, ...), so a member's draws do not depend on which
+    other ensembles the prediction forecasts, and ``member_id - TRUTH_ID`` (non-negative:
+    the truth 0, a mean model 1, the run's members their original index + 2): member 3 of
+    the prior and of the posterior draw differently.
+    """
+    name = int.from_bytes(hashlib.sha256(ensemble.encode()).digest()[:4], "big") >> 1
+    return (name, int(member_id) - TRUTH_ID)
+
+
 def ensemble_digest(state: NDArray[np.float64], member_ids: NDArray[np.int64]) -> str:
     """SHA-256 of an ensemble (its state and member ids), to detect a changed run."""
     digest = hashlib.sha256()
@@ -648,6 +661,7 @@ class PredictionWorkflow:
             work_dir=self.directory.simulation_dir(ensemble, member_id)
             if getattr(self.simulator, "needs_work_dir", False)
             else None,
+            stream_key=stream_key(ensemble, member_id),
         )
 
     def _forecast_group(

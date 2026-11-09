@@ -1,0 +1,27 @@
+# A prediction of control_scenario_esmda (config_esmda.toml; run it first) to 2027 under a
+# control scenario: PRO1 drawn down to 60 bar, PRO2 held back at 120 bar.
+# Another scenario is another prediction, with a name of its own.
+[prediction]
+name = "bhp"
+run_dir = "runs/control_scenario_esmda"
+ensembles = ["posterior", "prior", "truth"]
+
+[prediction.outputs]
+vectors = ["WOPR:*", "WWPR:*", "WWIR:*"]
+times = "report"
+
+[simulator]   # the forecast's deck: the history unchanged, then the scenario's controls
+name = "opm_flow"
+options = { deck_template_file = "deck_forecast.mako", timeout_s = 300, keep_files = false }
+
+[execution]
+name = "process"
+options = { workers = 4 }
+
+# The control scenario: the producers' bottom-hole pressures (bar), [PRO1, PRO2], which
+# deck_forecast.mako reads as ${bhp[0]} and ${bhp[1]} after the history.
+[[controls.variables]]
+name = "bhp"
+values = [60.0, 120.0]
+lower = 50.0
+upper = 200.0

@@ -1,0 +1,47 @@
+# A small box for predictions with a control scenario: ES-MDA (4 steps) on the wells' rates,
+# on OPM Flow; the log-permeability of every cell is uncertain. The predictions are
+# predict_hold.toml and predict_bhp.toml.
+[run]
+name = "control_scenario_esmda"
+seed = 2026
+
+[[state.variables]]
+name = "permx"   # ln PERMX (mD)
+size = 800
+grid = [20, 20, 2]
+lower = 0.0
+upper = 10.0
+
+[prior]
+ensemble_size = 30
+generator = { name = "gaussian_field", options = { grid = [20, 20, 2], mean = 5.0, variance = 1.0, major_range = 8.0, variogram = "gaussian" } }
+
+[observations]
+file = "observations.csv"
+
+[case]
+kind = "synthetic"
+truth_file = "truth.npz"
+
+[[metrics]]
+name = "normalized_data_mismatch"
+
+[[metrics]]
+name = "rmse"
+
+[simulator]
+name = "opm_flow"
+
+[simulator.options]
+deck_template_file = "deck.mako"
+timeout_s = 300
+keep_files = false
+
+[execution]
+name = "process"
+options = { workers = 4 }
+
+[method]
+name = "esmda"
+options = { inflation = [4, 4, 4, 4] }
+strategy = { name = "approx", options = { energy = 0.98 } }

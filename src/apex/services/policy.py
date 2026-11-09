@@ -91,7 +91,12 @@ def _plugin_sections(config: BaseModel) -> list[tuple[str, BaseModel]]:
     if isinstance(config, PredictionConfig):
         # The controls' parameterizations name files and programs too (decision 6).
         controls = [] if config.controls is None else config.controls.parameterizations
-        return [("simulators", config.simulator), *(("parameterizations", p) for p in controls)]
+        # The forecast's own model-error options, by the run's model.
+        model_error = [] if config.model_error is None else [
+            ("model_error_models", config.model_error)
+        ]  # fmt: skip
+        return [("simulators", config.simulator), *(("parameterizations", p) for p in controls),
+                *model_error]  # fmt: skip
     if isinstance(config, OptimizationConfig):
         from apex.services.plugins import objective_plugins
 
@@ -245,15 +250,15 @@ def _program_allowed(value: str, rules: PolicySection) -> bool:
     return found is not None and _allowed(found, [*rules.code_roots, *SYSTEM_PROGRAM_ROOTS])
 
 
-def _run_simulator(run_dir: Path) -> str | None:
-    """Return the simulator a run's saved configuration names (``None`` if unreadable)."""
+def _run_simulator(run_dir: Path, section: str = "simulator") -> str | None:
+    """Return the plugin a run's saved section names (``None`` if unreadable or absent)."""
     import json
 
     try:
         saved = json.loads((Path(run_dir) / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    name = (saved.get("simulator") or {}).get("name") if isinstance(saved, dict) else None
+    name = (saved.get(section) or {}).get("name") if isinstance(saved, dict) else None
     return name if isinstance(name, str) else None
 
 
@@ -277,7 +282,10 @@ def named(
             # Changes to the run's simulator: judged by its declarations, not by what every
             # simulator would agree on (an option two simulators declare differently was
             # refused as undeclared).
-            name = _run_simulator(config.prediction.run_dir)
+            name = _run_simulator(
+                config.prediction.run_dir,
+                "model_error" if registry == "model_error_models" else "simulator",
+            )
         options = getattr(section, "options", {}) or {}
         found += [
             (kind, f"{registry}.{name or '?'}: {key}", value)

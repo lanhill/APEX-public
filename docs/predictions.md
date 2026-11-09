@@ -60,4 +60,5 @@ options = { variable = "bhp", output = "bhp_steps", knots = [0, 60], n_steps = 1
 - **A scenario is part of the prediction:** another scenario is another prediction, so give it another name. A prediction without `[controls]` is unchanged.
 - **Where they belong in the deck:** only after the history, so that the history check still reproduces the run. Template expressions are rendered in the deck template itself, not in the files it includes, so write the forecast's schedule in the template.
 - **Where it is recorded:** the scenario, after its parameterizations, is in `provenance.json`; `apex summary` names it in the prediction's notes.
+- **An example:** `examples/prediction_controls` history-matches a small box on OPM Flow in about a minute and forecasts it under two scenarios of the producers' bottom-hole pressures, with its forecast template.
 - **With a surrogate:** the model must be built over the controls; see [Predictions with a surrogate](surrogates.md#predictions-with-a-surrogate).

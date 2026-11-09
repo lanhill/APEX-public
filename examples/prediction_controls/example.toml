@@ -1,0 +1,28 @@
+[example]
+title = "Predictions under a control scenario (OPM Flow)"
+summary = "A small box history-matched by ES-MDA, then forecast under two control scenarios: the producers' bottom-hole pressures after the history."
+source = "The APEX authors' (its fluids are the 3dBox case's, GPL-3.0-or-later)"
+tags = [
+    "reservoir",
+    "prediction",
+]
+cost = "minutes"
+requires = [
+    "reservoir",
+    "opm_flow",
+]
+
+[[example.entries]]
+workflow = "history_matching"
+config = "config_esmda.toml"
+title = "ES-MDA (run it first)"
+
+[[example.entries]]
+workflow = "prediction"
+config = "predict_hold.toml"
+title = "the producers held at 90 bar"
+
+[[example.entries]]
+workflow = "prediction"
+config = "predict_bhp.toml"
+title = "PRO1 at 60 bar, PRO2 at 120 bar"

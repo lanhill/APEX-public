@@ -850,6 +850,10 @@ def _validate_prediction(session: ToolSession, path: Path) -> dict[str, Any]:
     except ApexError as error:
         return {"valid": False, "errors": [str(error)]}
     _confine_config(session, forecast, sources=[path])
+    try:
+        prediction.check_prediction(forecast)  # after the confinement: it reads the run
+    except ApexError as error:
+        return {"valid": False, "errors": [str(error)]}
     print_ = _prediction_print(forecast.model_dump_json())
     return {"valid": True, **_issue_token(session, print_, None, 1)}
 

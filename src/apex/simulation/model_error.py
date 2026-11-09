@@ -32,11 +32,13 @@ from numpy.typing import NDArray
 from apex.core.errors import SimulationError
 from apex.core.simulation import (
     CaseFileSimulator,
+    ExtrapolatingModel,
     MemberInput,
     MemberSeries,
     ModelErrorModel,
     SeriesRequest,
     Simulator,
+    extrapolates,
 )
 from apex.domain.observations import DataKey
 from apex.simulation.deck import report_values
@@ -512,7 +514,7 @@ class ModelErrorSimulator:
             assert self._read_series is not None  # run_series is set only with it
             series = self._read_series(case, request)
             keys = [DataKey(t, v) for v in series.vectors for t in series.times]
-            residuals = self.model.residuals(case, theta, keys)
+            residuals = self._residuals(member, case, theta, keys)
             values = np.asarray(series.values, dtype=np.float64) + residuals.reshape(
                 len(series.vectors), len(series.times)
             )
@@ -523,6 +525,20 @@ class ModelErrorSimulator:
             raise
         self.inner.clean(case)
         return MemberSeries(series.times, series.vectors, np.ascontiguousarray(values))
+
+    def _residuals(
+        self, member: MemberInput, case: Path, theta: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        """Return the model's residuals for the member.
+
+        A member a prediction keyed (``stream_key``) of a model that extrapolates gets its
+        own blocks past the history (:meth:`ExtrapolatingModel.member_residuals`); any
+        other member, and any other model, the residuals of before.
+        """
+        if member.stream_key and extrapolates(self.model):
+            assert isinstance(self.model, ExtrapolatingModel)
+            return self.model.member_residuals(case, theta, keys, member.stream_key)
+        return self.model.residuals(case, theta, keys)
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Return ``g(m) + r(m, theta)`` at ``keys`` (and ``r`` at ``MEC:`` keys)."""
@@ -537,7 +553,7 @@ class ModelErrorSimulator:
         try:
             # One reading of the run's files gives r at every key: added to the simulated
             # data at the data keys, as is at the MEC: keys.
-            values = self.model.residuals(case, theta, keys)
+            values = self._residuals(member, case, theta, keys)
             values[data_rows] += self.inner.read(case, [keys[i] for i in data_rows])
         except BaseException:
             # A failed member's files stay for diagnosis (keep_simulations); only what the

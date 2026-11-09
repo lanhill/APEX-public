@@ -29,7 +29,7 @@ ENTRIES = [(e.id, entry.config) for e in EXAMPLES for entry in e.manifest.exampl
 
 def test_the_catalogue_has_every_workflow_and_the_toy_problems() -> None:
     workflows = {entry.workflow for e in EXAMPLES for entry in e.manifest.example.entries}
-    assert {"history_matching", "optimization"} <= workflows
+    assert {"history_matching", "prediction", "optimization"} <= workflows
     ids = {e.id for e in EXAMPLES}
     problems = ("sch", "fon", "kur", "zdt1", "zdt2", "zdt3", "dtlz2", "bnh", "tnk", "srn")
     analytic = {f"toy/multi_objective/{n}" for n in problems}
@@ -57,6 +57,20 @@ def test_every_entry_validates(tmp_path: Path, example_id: str, config: str) -> 
     service = ApexService(tmp_path / "service")
     path = ROOT / example_id / config
     document = tomllib.loads(path.read_text("utf-8"))
+    if "prediction" in document:  # as `apex validate` checks one: its form and names
+        from apex.services.prediction import check_prediction, load_prediction_config
+        from apex.simulation.deck import template_names
+
+        check_prediction(load_prediction_config(path))
+        # Its run does not exist yet, so the check above cannot ask the simulator whether it
+        # reads the control scenario: the forecast's deck template must name every control.
+        controls = {v["name"] for v in document.get("controls", {}).get("variables", [])}
+        template = document.get("simulator", {}).get("options", {}).get("deck_template_file")
+        if controls and template is not None:
+            names = template_names(path.parent / template)
+            assert names is not None, (example_id, config)
+            assert controls <= names, (example_id, config, names)
+        return
     if "optimizer" in document:
         validation = service.validate_optimization(path)
     else:
@@ -221,6 +235,24 @@ def test_a_copys_names_skip_runs_already_in_the_users_runs_folder(
         "absolute": "/w/runs/lg",
     }  # fmt: skip
     assert "not renamed" in caplog.text
+
+
+def test_a_copys_prediction_names_where_the_web_ui_places_its_run(tmp_path: Path) -> None:
+    """The web UI's runs go to ``UI/<user>/runs/<name>``, not beside the copied example: a
+    prediction's ``run_dir = "runs/<name>"`` named a folder that would never exist."""
+    example = get_example(ROOT, "prediction_controls")
+    user = tmp_path / "UI" / "owner"
+    runs = user / "runs"
+    (runs / "control_scenario_esmda").mkdir(parents=True)  # taken: the copy's run is -2
+    copied = copy_example(example, user / "examples", runs_dir=runs)
+    for name in ("predict_hold.toml", "predict_bhp.toml"):
+        path = copied.folder / name
+        run_dir = tomllib.loads(path.read_text("utf-8"))["prediction"]["run_dir"]
+        assert (path.parent / run_dir).resolve() == (runs / "control_scenario_esmda-2").resolve()
+    # Without a runs folder (a copy for `apex run`), the run is beside the copy as written.
+    plain = copy_example(example, tmp_path / "plain")
+    text = (plain.folder / "predict_bhp.toml").read_text("utf-8")
+    assert tomllib.loads(text)["prediction"]["run_dir"] == "runs/control_scenario_esmda"
 
 
 def test_copies_made_before_either_ran_get_names_of_their_own(tmp_path: Path) -> None:

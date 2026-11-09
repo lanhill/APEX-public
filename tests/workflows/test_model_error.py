@@ -7,6 +7,7 @@ effective data mismatch falls below the run without it, and theta approaches ``b
 
 import json
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +15,9 @@ import pytest
 from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError, SimulationError
+from apex.core.options import InputFile
 from apex.core.plugins import model_error_models, simulators
-from apex.core.simulation import MemberInput
+from apex.core.simulation import SEED_ENTROPY, SEED_SPAWN_KEY, MemberInput
 from apex.domain.observations import DataKey, ObservationSet
 from apex.services import composition
 from apex.simulation.model_error import RESIDUAL_PREFIX
@@ -627,3 +629,532 @@ def test_a_parameter_mask_with_local_analysis_and_held_out_data(tmp_path: Path) 
         np.testing.assert_array_equal(matrix[N_STATE:], np.vstack([early, ~early]).astype(float))
     finally:
         model_error_models._factories.pop("test_halves")
+
+
+# ------------------------------------------- extrapolated parameters
+
+HISTORY = 5  # the observations cover t0..t4; t5..t7 are past the history
+
+
+class Steps(Offset):
+    """``r = theta_i`` at history time ``i``; past it, ``theta_last + level + draw``.
+
+    ``level`` is fitted from the run's ensembles (the posterior's mean last block minus the
+    prior's); the draw is ``N(0, 1)`` from the prediction's seed and the member's key.
+    """
+
+    n_params = HISTORY
+    forecasts = True
+    extrapolates = True
+    forecast_options = frozenset({"shift", "table_file"})
+
+    def __init__(
+        self,
+        state_variable: str = "nn_params",
+        forecast_state_file: InputFile | None = None,
+        shift: float = 0.0,
+        table_file: InputFile | None = None,
+    ) -> None:
+        super().__init__(state_variable)
+        self.shift = float(shift)
+        self.level: float | None = None
+        self.seed: np.random.SeedSequence | None = None
+        if forecast_state_file is not None:
+            with np.load(forecast_state_file, allow_pickle=False) as data:
+                self.level = float(data["level"])
+                self.seed = np.random.SeedSequence(
+                    int(str(data[SEED_ENTROPY])),
+                    spawn_key=tuple(int(k) for k in data[SEED_SPAWN_KEY]),
+                )
+
+    def forecast_state(
+        self, prior: NDArray[np.floating], posterior: NDArray[np.floating],
+        keys: Sequence[DataKey],
+    ) -> dict[str, NDArray[np.generic]]:  # fmt: skip
+        # The assimilated keys are the history's (t0..t4) and the members are paired.
+        assert [k.time for k in keys] == [f"t{i}" for i in range(HISTORY)]
+        assert prior.shape == posterior.shape
+        return {"level": np.array(float(posterior[-1].mean() - prior[-1].mean())),
+                "members": np.array(prior.shape[1])}  # fmt: skip
+
+    def residuals(
+        self, case: Path, theta: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        if any(int(k.time[1:]) >= HISTORY for k in keys):
+            raise SimulationError("past the history: only member_residuals answers there")
+        return np.array([theta[int(k.time[1:])] for k in keys])
+
+    def member_residuals(
+        self, case: Path, theta: NDArray[np.float64], keys: Sequence[DataKey],
+        member: Sequence[int],
+    ) -> NDArray[np.float64]:  # fmt: skip
+        assert self.seed is not None
+        assert self.level is not None
+        out = []
+        for key in keys:
+            i = int(key.time[1:])
+            if i < HISTORY:
+                out.append(theta[i])
+                continue
+            stream = np.random.SeedSequence(
+                self.seed.entropy, spawn_key=(*self.seed.spawn_key, *member, i)
+            )
+            draw = np.random.default_rng(stream).standard_normal()
+            out.append(theta[-1] + self.level + self.shift + draw)
+        return np.array(out)
+
+
+def _steps_case(folder: Path) -> Path:
+    config = _case(folder, mec=True, size=HISTORY)
+    observations = folder / "observations.csv"
+    observations.write_text("\n".join(observations.read_text().splitlines()[: 1 + HISTORY]) + "\n")
+    config.write_text(config.read_text().replace('name = "test_offset"', 'name = "test_steps"'))
+    return config
+
+
+@pytest.fixture
+def steps() -> Iterator[None]:
+    model_error_models.register("test_steps")(Steps)
+    try:
+        yield
+    finally:
+        model_error_models._factories.pop("test_steps")
+
+
+def _expected(
+    folder: Path, ensemble: str, iteration: int, seed: np.random.SeedSequence, level: float
+) -> NDArray[np.float64]:
+    from apex.storage.run_results import RunResults
+    from apex.workflows.prediction import stream_key
+
+    config = composition.load_config(folder / "config.toml")
+    results = RunResults(folder / "runs" / "run", composition.build_layout(config))
+    iterate = results.iterate(iteration)
+    x, theta = np.asarray(iterate.state["x"]), np.asarray(iterate.state["nn_params"])
+    columns = []
+    for column, member in enumerate(iterate.member_ids):
+        r = list(theta[:, column])
+        for i in range(HISTORY, N_DATA):
+            stream = np.random.SeedSequence(
+                seed.entropy, spawn_key=(*seed.spawn_key, *stream_key(ensemble, int(member)), i)
+            )
+            r.append(theta[-1, column] + level + np.random.default_rng(stream).standard_normal())
+        columns.append(G @ x[:, column] + np.array(r))
+    return np.stack(columns, axis=-1)
+
+
+def test_a_prediction_extrapolates_each_members_parameters_from_its_own_key(
+    tmp_path: Path, steps: None
+) -> None:
+    """The model's state is fitted once from the run's prior and
+    posterior and written with the seed to a content-named file the model is built from;
+    each member draws from its own key (its ensemble's and its id), so member 3 of the
+    prior and of the posterior differ; the history check holds (the stored blocks); a
+    resume of a dropped member and a second prediction with the same seed reproduce the
+    draws bit for bit; the seed is recorded."""
+    from apex.services.prediction import predict
+    from apex.storage.run_results import RunResults
+
+    composition.start(_steps_case(tmp_path))
+    prediction = _future(tmp_path, "ahead", 'seed = 42\nensembles = ["posterior", "prior"]')
+    prediction.write_text(prediction.read_text().replace('ensembles = ["posterior"]\n', "", 1))
+    result = predict(prediction)
+    folder = tmp_path / "runs/run/predictions/ahead"
+    recorded = json.loads((folder / "provenance.json").read_text())["model_error"]
+    assert recorded["seed"] == {"entropy": "42", "spawn_key": [], "given": True}
+    state_file = folder / recorded["forecast_state"]["file"]
+    assert state_file.name.startswith("forecast_state-")
+    with np.load(state_file) as data:
+        level = float(data["level"])
+    config = composition.load_config(tmp_path / "config.toml")
+    results = RunResults(tmp_path / "runs" / "run", composition.build_layout(config))
+    seed = np.random.SeedSequence(42)
+    posterior = _expected(tmp_path, "posterior", results.posterior_iteration, seed, level)
+    prior = _expected(tmp_path, "prior", 0, seed, level)
+    np.testing.assert_allclose(result.forecasts["posterior"].values[0], posterior, rtol=1e-12)
+    np.testing.assert_allclose(result.forecasts["prior"].values[0], prior, rtol=1e-12)
+    # A resumed member draws as before.
+    saved = sorted((folder / "members").glob("posterior_*.npz"))
+    saved[3].unlink()
+    (folder / "forecast_posterior.npz").unlink()
+    again = predict(prediction)
+    np.testing.assert_array_equal(
+        again.forecasts["posterior"].values, result.forecasts["posterior"].values
+    )
+    # Another prediction with the same seed and ensembles: the same file and the same draws.
+    other = _future(tmp_path, "twin", 'seed = 42\nensembles = ["posterior", "prior"]')
+    other.write_text(other.read_text().replace('ensembles = ["posterior"]\n', "", 1))
+    twin = predict(other)
+    np.testing.assert_array_equal(
+        twin.forecasts["posterior"].values, result.forecasts["posterior"].values
+    )
+    twin_record = json.loads((tmp_path / "runs/run/predictions/twin/provenance.json").read_text())[
+        "model_error"
+    ]
+    assert twin_record["forecast_state"] == recorded["forecast_state"]
+
+
+def test_the_default_seed_follows_the_run_and_the_name_and_refusals(
+    tmp_path: Path, steps: None
+) -> None:
+    """Without ``seed`` the run's seed and the prediction's name seed it (recorded); the
+    truth is refused for an extrapolating model, and a seed where nothing draws."""
+    from apex.services.prediction import predict
+
+    composition.start(_steps_case(tmp_path))
+    predict(_future(tmp_path, "plain"))
+    recorded = json.loads((tmp_path / "runs/run/predictions/plain/provenance.json").read_text())[
+        "model_error"
+    ]["seed"]
+    assert recorded["entropy"] == "11"
+    assert recorded["given"] is False
+    assert len(recorded["spawn_key"]) == 1
+    truth = _future(tmp_path, "truthful", "truth_is_simulator = true")
+    truth.write_text(truth.read_text().replace('["posterior"]', '["posterior", "truth"]'))
+    with pytest.raises(ConfigError, match="cannot forecast 'truth'"):
+        predict(truth)
+
+
+def test_a_seed_is_refused_where_nothing_draws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apex.services.prediction import predict
+
+    _forecasting(monkeypatch)
+    composition.start(_case(tmp_path, mec=True))
+    with pytest.raises(ConfigError, match="nothing in this prediction draws"):
+        predict(_future(tmp_path, "seeded", "seed = 3"))
+
+
+def test_members_without_a_key_get_the_history_residuals(tmp_path: Path) -> None:
+    """History matching gives no ``stream_key``: the model's own residuals, as before."""
+    from apex.simulation.model_error import ModelErrorSimulator
+
+    effective = ModelErrorSimulator(FileLinear(), Steps())
+    x = np.array([0.3, -0.2, 1.1])
+    member = MemberInput(member_id=0, state={"x": x, "nn_params": np.arange(5.0)},
+                         work_dir=tmp_path)  # fmt: skip
+    keys = [DataKey(f"t{i}", "y") for i in range(HISTORY)]
+    np.testing.assert_allclose(effective.run(member, keys), G[:HISTORY] @ x + np.arange(5.0))
+    with pytest.raises(SimulationError, match="past the history"):
+        effective.run(member, [DataKey("t6", "y")])
+
+
+def test_dropped_members_pair_by_id_and_the_default_seed_reproduces(
+    tmp_path: Path, steps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review: a member that failed in the run is dropped from its posterior; the fit
+    pairs the rest by id (members recorded), and each keeps its original id's draws. Two
+    predictions of one name (other folders) draw the same with the derived seed."""
+    from apex.services.prediction import predict
+    from apex.storage.run_results import RunResults
+
+    monkeypatch.setattr(FileLinear, "fail_members", frozenset({2}))
+    composition.start(_steps_case(tmp_path))
+    monkeypatch.setattr(FileLinear, "fail_members", frozenset())
+    config = composition.load_config(tmp_path / "config.toml")
+    results = RunResults(tmp_path / "runs" / "run", composition.build_layout(config))
+    assert 2 not in results.iterate(results.posterior_iteration).member_ids
+    one = predict(_future(tmp_path, "same", 'output_dir = "out_a"'))
+    folder = tmp_path / "out_a"
+    recorded = json.loads((folder / "provenance.json").read_text())["model_error"]
+    assert recorded["forecast_state"]["members"] == 59
+    with np.load(folder / recorded["forecast_state"]["file"]) as data:
+        assert int(data["members"]) == 59
+        level = float(data["level"])
+    seed = np.random.SeedSequence(
+        int(recorded["seed"]["entropy"]), spawn_key=tuple(recorded["seed"]["spawn_key"])
+    )
+    expected = _expected(tmp_path, "posterior", results.posterior_iteration, seed, level)
+    np.testing.assert_allclose(one.forecasts["posterior"].values[0], expected, rtol=1e-12)
+    two = predict(_future(tmp_path, "same", 'output_dir = "out_b"'))
+    np.testing.assert_array_equal(
+        two.forecasts["posterior"].values, one.forecasts["posterior"].values
+    )
+
+
+def test_a_prediction_sets_only_the_models_forecast_options(tmp_path: Path, steps: None) -> None:
+    """``[model_error] options`` in a prediction: a forecast option changes the forecast
+    past the history only (the history check holds); any other option is refused."""
+    from apex.services.prediction import predict
+
+    composition.start(_steps_case(tmp_path))
+    base = predict(_future(tmp_path, "base", "seed = 5"))
+    shifted_config = _future(tmp_path, "shifted", "seed = 5")
+    shifted_config.write_text(
+        shifted_config.read_text() + "\n[model_error.options]\nshift = 10.0\n"
+    )
+    shifted = predict(shifted_config)
+    difference = shifted.forecasts["posterior"].values - base.forecasts["posterior"].values
+    np.testing.assert_allclose(difference[0, :HISTORY], 0.0, atol=1e-12)
+    np.testing.assert_allclose(difference[0, HISTORY:], 10.0, rtol=1e-12)
+    refused = _future(tmp_path, "refused", "seed = 5")
+    refused.write_text(refused.read_text() + '\n[model_error.options]\nstate_variable = "x"\n')
+    with pytest.raises(ConfigError, match="only the model's forecast options"):
+        predict(refused)
+
+
+def test_replacing_an_unfinished_prediction_keeps_only_the_forecast_state_in_use(
+    tmp_path: Path,
+) -> None:
+    """Replacing a prediction that had no finished member keeps the forecast state the new
+    configuration wrote or reused (named by its inputs) and removes the replaced
+    configurations'; a configuration without one keeps none."""
+    from apex.storage.prediction_directory import PredictionDirectory
+
+    directory = PredictionDirectory(tmp_path / "p")
+    directory.open(config_text="{}", fingerprint="one")
+    old = directory.path / "forecast_state-0123456789abcdef.npz"
+    new = directory.path / "forecast_state-fedcba9876543210.npz"
+    old.write_bytes(b"old state")
+    new.write_bytes(b"state")
+    (directory.path / "forecast_state-0000000000000000.npz.tmp").write_bytes(b"crashed")
+    (directory.path / "forecast_posterior.npz").write_bytes(b"old")
+    directory.open(config_text="{}", fingerprint="two", forecast_state=new.name)
+    assert new.read_bytes() == b"state"
+    assert sorted(p.name for p in directory.path.glob("forecast_*")) == [new.name]
+    directory.open(config_text="{}", fingerprint="three")
+    assert not list(directory.path.glob("forecast_*"))
+
+
+def test_forecast_options_where_nothing_extrapolates_are_refused_and_policy_sees_them(
+    tmp_path: Path, steps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-review: options that would change nothing are refused, as a needless seed;
+    the tool policy judges a prediction's model-error options by the run's model."""
+    from apex.domain.prediction import PredictionConfig
+    from apex.services import policy
+    from apex.services.prediction import load_prediction_config, predict
+
+    composition.start(_steps_case(tmp_path))
+    config = _future(tmp_path, "inert")
+    config.write_text(config.read_text() + "\n[model_error.options]\nshift = 1.0\n")
+    named = policy.named(load_prediction_config(config))
+    assert not [key for _, key, _ in named if key.startswith("model_error_models")]
+    sections = policy._plugin_sections(load_prediction_config(config))
+    assert ("model_error_models", load_prediction_config(config).model_error) in sections
+    assert isinstance(load_prediction_config(config), PredictionConfig)
+    monkeypatch.setattr(Steps, "extrapolates", False)
+    with pytest.raises(ConfigError, match="would change nothing"):
+        predict(config)
+
+
+def test_validation_refuses_what_needs_no_fit(tmp_path: Path, steps: None) -> None:
+    """The coder's review: the truth, a needless seed or options, a non-forecast option are
+    refused by ``check_prediction`` (apex validate, the tools, submission), before a job."""
+    from apex.services.prediction import check_prediction, load_prediction_config
+
+    composition.start(_steps_case(tmp_path))
+    check_prediction(load_prediction_config(_future(tmp_path, "fine", "seed = 1")))
+    truth = _future(tmp_path, "truthful", "truth_is_simulator = true")
+    truth.write_text(truth.read_text().replace('["posterior"]', '["posterior", "truth"]'))
+    with pytest.raises(ConfigError, match="cannot forecast 'truth'"):
+        check_prediction(load_prediction_config(truth))
+    other = _future(tmp_path, "other")
+    other.write_text(other.read_text() + '\n[model_error.options]\nstate_variable = "x"\n')
+    with pytest.raises(ConfigError, match="only the model's forecast options"):
+        check_prediction(load_prediction_config(other))
+
+
+def test_a_needless_seed_is_refused_by_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apex.services.prediction import check_prediction, load_prediction_config
+
+    _forecasting(monkeypatch)
+    composition.start(_case(tmp_path, mec=True))
+    with pytest.raises(ConfigError, match="nothing in this prediction draws"):
+        check_prediction(load_prediction_config(_future(tmp_path, "seeded", "seed = 3")))
+
+
+def test_the_policy_judges_a_path_in_the_forecast_options(tmp_path: Path, steps: None) -> None:
+    """The coder's review: a forecast option naming a file is reported to the tool policy."""
+    from apex.services import policy
+    from apex.services.prediction import load_prediction_config
+
+    composition.start(_steps_case(tmp_path))
+    config = _future(tmp_path, "tabled")
+    config.write_text(
+        config.read_text() + '\n[model_error.options]\ntable_file = "/elsewhere/t.npz"\n'
+    )
+    named = policy.named(load_prediction_config(config))
+    assert ("input", "model_error_models.test_steps: table_file", "/elsewhere/t.npz") in named
+
+
+def test_each_input_of_the_fit_names_its_own_state_file(
+    tmp_path: Path, steps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coder's review: a changed option, seed or posterior iterate gives a new file; the
+    same inputs reuse it. A finished folder of another configuration is refused before a
+    fit lands in it."""
+    from apex.services.prediction import predict
+    from apex.storage.run_results import RunResults
+
+    composition.start(_steps_case(tmp_path))
+
+    def state_file(name: str, body: str) -> str:
+        predict(_future(tmp_path, name, f'output_dir = "out"\n{body}'))
+        record = json.loads((tmp_path / "out" / "provenance.json").read_text())
+        return str(record["model_error"]["forecast_state"]["file"])
+
+    first = state_file("p", "seed = 1")
+    assert state_file("p", "seed = 1") == first  # the same inputs: reused (a resume)
+    with pytest.raises(ConfigError, match="another configuration and finished members"):
+        predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 2'))
+    assert sorted(p.name for p in (tmp_path / "out").glob("forecast_state-*")) == [first]
+    names = {first}
+    for index, body in enumerate(("seed = 2", "seed = 1\n[model_error.options]\nshift = 1.0")):
+        folder = f"out{index}"
+        predict(_future(tmp_path, "p", f'output_dir = "{folder}"\n{body}'))
+        record = json.loads((tmp_path / folder / "provenance.json").read_text())
+        names.add(record["model_error"]["forecast_state"]["file"])
+    monkeypatch.setattr(RunResults, "posterior_iteration", property(lambda self: 1))
+    predict(_future(tmp_path, "p", 'output_dir = "out_iterate"\nseed = 1'))
+    record = json.loads((tmp_path / "out_iterate" / "provenance.json").read_text())
+    names.add(record["model_error"]["forecast_state"]["file"])
+    assert len(names) == 4
+
+
+def test_a_refused_extrapolating_prediction_leaves_no_folder(tmp_path: Path, steps: None) -> None:
+    """The coder's review: a prediction refused after its forecast state was written (here
+    an unknown score) removes the new folder, the state file included."""
+    from apex.services.prediction import predict
+
+    composition.start(_steps_case(tmp_path))
+    config = _future(tmp_path, "refused", 'output_dir = "fresh"\nscores = ["no_such_score"]')
+    with pytest.raises(ConfigError, match="no_such_score"):
+        predict(config)
+    assert not (tmp_path / "fresh").exists()
+
+
+def test_validation_accepts_a_run_to_come_and_a_plain_run(tmp_path: Path) -> None:
+    """The review: a study's prediction of a run not yet written is not checked; a run
+    without a model-error model passes unchanged (a seed there is still refused)."""
+    from apex.services.prediction import check_prediction, load_prediction_config
+
+    check_prediction(load_prediction_config(_future(tmp_path, "later", "seed = 1")))
+    composition.start(_case(tmp_path, mec=False))
+    check_prediction(load_prediction_config(_future(tmp_path, "plain")))
+    with pytest.raises(ConfigError, match="nothing in this prediction draws"):
+        check_prediction(load_prediction_config(_future(tmp_path, "seeded", "seed = 1")))
+
+
+def test_a_bad_forecast_option_is_a_configuration_error(tmp_path: Path, steps: None) -> None:
+    """The coder's re-review: the model's constructor refusing a client's forecast option is
+    a ConfigError: validation reports it, and a prediction leaves no folder."""
+    from apex.services.prediction import check_prediction, load_prediction_config, predict
+
+    composition.start(_steps_case(tmp_path))
+    config = _future(tmp_path, "bad", 'output_dir = "fresh"')
+    config.write_text(config.read_text() + '\n[model_error.options]\nshift = "a lot"\n')
+    with pytest.raises(ConfigError, match="test_steps"):
+        check_prediction(load_prediction_config(config))
+    with pytest.raises(ConfigError, match="test_steps"):
+        predict(config)
+    assert not (tmp_path / "fresh").exists()
+
+
+def _state_files(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.glob("forecast_state-*"))
+
+
+def _used_state(folder: Path) -> str:
+    record = json.loads((folder / "provenance.json").read_text())
+    return str(record["model_error"]["forecast_state"]["file"])
+
+
+def test_a_replacement_through_predict_keeps_the_state_it_uses(
+    tmp_path: Path, steps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prediction that failed after opening its folder, before any member, is replaced
+    by another seed: the replacement keeps the state file it has just fitted (the service
+    names it to the folder; dropping it would leave the rebuilt model without its file)."""
+    from apex.services import prediction as service
+
+    composition.start(_steps_case(tmp_path))
+    real = composition.configure_logging
+    failures = iter([RuntimeError("stopped after opening")])
+
+    def configure_logging(folder: Path) -> None:
+        error = next(failures, None)
+        if error is not None:
+            raise error
+        real(folder)
+
+    monkeypatch.setattr(composition, "configure_logging", configure_logging)
+    out = tmp_path / "out"
+    with pytest.raises(RuntimeError, match="stopped after opening"):
+        service.predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 1'))
+    first = _state_files(out)
+    assert len(first) == 1
+    assert (out / "state.json").exists()
+    assert not list((out / "members").glob("*.npz"))
+    service.predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 2'))
+    assert _state_files(out) == [_used_state(out)]
+    assert _state_files(out) != first
+
+
+def test_a_folder_made_by_another_start_keeps_its_state_when_this_one_is_refused(
+    tmp_path: Path, steps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race: another start makes the folder (with its state file) after this one began
+    but before its lock. This start's refusal must not remove that folder as its own, as it
+    did when it judged the folder new by an exists() taken before the lock."""
+    from apex.services import prediction as service
+    from apex.storage import locks
+
+    composition.start(_steps_case(tmp_path))
+    out = tmp_path / "out"
+
+    @contextmanager
+    def other_start_first(directory: Path, what: str = "run") -> Iterator[bool]:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "forecast_state-0123456789abcdef.npz").write_bytes(b"theirs")
+        with locks.exclusive(directory, what) as made:
+            yield made
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise ConfigError("refused")
+
+    monkeypatch.setattr(service, "exclusive", other_start_first)
+    monkeypatch.setattr(service, "_predict", refused)
+    with pytest.raises(ConfigError, match="refused"):
+        service.predict(_future(tmp_path, "p", 'output_dir = "out"'))
+    assert (out / "forecast_state-0123456789abcdef.npz").read_bytes() == b"theirs"
+
+
+def test_a_start_refused_by_another_predictions_folder_leaves_no_state_there(
+    tmp_path: Path, steps: None
+) -> None:
+    """A configuration refused by a folder holding another prediction (here: other files)
+    removes the state file it fitted there; the folder is otherwise untouched."""
+    from apex.services.prediction import predict
+
+    composition.start(_steps_case(tmp_path))
+    out = tmp_path / "out"
+    predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 1'))
+    kept = _state_files(out)
+    (out / "notes.txt").write_text("mine\n")
+    for member in (out / "members").glob("*.npz"):
+        member.unlink()
+    with pytest.raises(ConfigError, match="other files"):
+        predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 2'))
+    assert _state_files(out) == kept
+    assert (out / "notes.txt").exists()
+
+
+def test_a_folder_without_a_prediction_keeps_only_the_state_in_use(tmp_path: Path) -> None:
+    """A start that ended between its fit and opening the folder left a state file in a
+    folder with no prediction yet: the next start keeps only its own."""
+    from apex.storage.prediction_directory import PredictionDirectory
+
+    folder = tmp_path / "p"
+    folder.mkdir()
+    (folder / "forecast_state-0123456789abcdef.npz").write_bytes(b"old")
+    (folder / "forecast_state-fedcba9876543210.npz").write_bytes(b"mine")
+    (folder / "notes.txt").write_text("kept\n")
+    PredictionDirectory(folder).open(
+        config_text="{}", fingerprint="a", forecast_state="forecast_state-fedcba9876543210.npz"
+    )
+    assert _state_files(folder) == ["forecast_state-fedcba9876543210.npz"]
+    assert (folder / "notes.txt").exists()
