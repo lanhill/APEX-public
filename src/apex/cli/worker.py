@@ -153,6 +153,34 @@ def run_job(runner: LocalJobRunner, job_id: str) -> None:
                 stopped=_stop_requested(runner, job_id),
             )
             state = "complete" if run.finished else "stopped"
+        elif record["kind"] in ("surrogate_build", "surrogate_build_resume"):
+            # A build, stopped between waves of member runs.
+            from apex.domain.surrogate import SurrogateConfig
+            from apex.services import surrogates
+
+            stopped = _stop_requested(runner, job_id)
+            if record["kind"] == "surrogate_build":
+                built = surrogates.build_config(
+                    SurrogateConfig.model_validate_json(spec["config"]),
+                    progress=progress, max_runs=spec.get("max_runs"), stopped=stopped,
+                )  # fmt: skip
+            else:
+                built = surrogates.resume_build(
+                    Path(spec["build_dir"]), progress=progress,
+                    max_runs=spec.get("max_runs"), stopped=stopped,
+                )  # fmt: skip
+            state = "complete" if built.complete else "stopped"
+        elif record["kind"] == "surrogate_check":
+            from apex.services import surrogates
+
+            checked = surrogates.check_surrogate(
+                Path(spec["model_file"]), Path(spec["against"]), runs=int(spec["runs"]),
+                seed=int(spec.get("seed", 0)), iteration=spec.get("iteration"),
+                min_success_fraction=float(spec.get("min_success_fraction", 0.9)),
+                min_inside=float(spec.get("min_inside", 0.8)), progress=progress,
+                max_runs=spec.get("max_runs"), stopped=_stop_requested(runner, job_id),
+            )  # fmt: skip
+            state = "complete" if checked.summary.status != "stopped" else "stopped"
         elif record["kind"] == "prediction":
             prediction.predict_config(
                 PredictionConfig.model_validate_json(spec["config"]),

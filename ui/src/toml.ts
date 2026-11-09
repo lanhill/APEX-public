@@ -2,7 +2,7 @@
 
 import { parse as parseToml } from "smol-toml";
 
-export type Kind = "history_match" | "study" | "prediction" | "optimization";
+export type Kind = "history_match" | "study" | "prediction" | "optimization" | "surrogate";
 
 /**
  * What a document is, as the service decides (api/app.py `_kind`): an optimization by its
@@ -10,6 +10,8 @@ export type Kind = "history_match" | "study" | "prediction" | "optimization";
  */
 export function kindOf(document: Record<string, unknown>): Kind {
   if ("optimization" in document && "optimizer" in document) return "optimization";
+  // A surrogate build: [surrogate] alone is a run's or a prediction's.
+  if ("surrogate" in document && "design" in document) return "surrogate";
   const first = Object.keys(document)[0];
   return first === "study" ? "study" : first === "prediction" ? "prediction" : "history_match";
 }

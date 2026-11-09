@@ -137,6 +137,10 @@ class SerialExecutor:
         :class:`RetryPolicy`).
     """
 
+    #: How many members it runs at once (an optional capability: a surrogate build's
+    #: waves).
+    parallel_width = 1
+
     def __init__(
         self,
         pools: ResourcePools | None = None,

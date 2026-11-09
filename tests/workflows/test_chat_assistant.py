@@ -2199,9 +2199,10 @@ def test_a_card_proposes_the_chats_latest_draft_of_its_kind(
     _, _, store, assistant = _planning(tmp_path, linear_case, None)
     chat = store.create("plan")
     tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
-    variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"}]
 
     def plan(name: str) -> str:
+        # Two different studies: the same one under two names is one card (#296).
+        variants = [{"name": f"baseline_{name}", "patch": {}, "rationale": "as configured"}]
         draft: str = tools["plan_study"].handler(tools["plan_study"].arguments(
             case="alpha/config.toml", goal="a baseline", budget=5000, name=name,
             variants=variants))["draft"]  # fmt: skip
@@ -2293,6 +2294,82 @@ def test_named_methods_reads_multiword_names_and_a_wrappers_inner_counts(
         variants=[{"name": "plain", "rationale": "as configured"}],
     ))  # fmt: skip
     assert set(planned["methods"]) == {"chop"}
+
+
+def test_the_same_study_under_another_name_keeps_its_one_open_card(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #296 (2026-11-09): asked to show a proposed study, the assistant planned it again
+    under another name and proposed that, and a second card for the same study went up."""
+    import threading
+
+    from apex.agents.chat import _Turn
+
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+
+    def plan(name: str, goal: str, variant: str = "baseline") -> str:
+        variants = [{"name": variant, "patch": {}, "rationale": "as configured"}]
+        draft: str = tools["plan_study"].handler(tools["plan_study"].arguments(
+            case="alpha/config.toml", goal=goal, budget=5000, name=name,
+            variants=variants))["draft"]  # fmt: skip
+        return draft
+
+    def propose(draft: str) -> dict[str, Any]:
+        result: dict[str, Any] = tools["propose_action"].handler(
+            tools["propose_action"].arguments(draft=draft, summary="Launch it.")
+        )
+        return result  # fmt: skip
+
+    first = plan("compare", "Compare the baseline")
+    card = propose(first)
+    renamed = plan("ui_compare", "Compare the baseline, worded again")
+    again = propose(renamed)
+
+    assert again["proposal"] == card["proposal"]
+    assert again["draft"] == first
+    assert "no new card" in again["note"]
+    assert [(p.draft, p.state) for p in store.proposals(chat.id)] == [(first, "pending")]
+    [reused] = [e for e in store.events(chat.id) if e.kind == "proposal_reused"]
+    assert reused.data == {"n": card["proposal"], "draft": renamed, "card_draft": first}
+    # The answer does not call the renamed draft one without a card (the review of #296).
+    assistant._running[chat.id] = 7
+    assert assistant._unproposed_drafts(chat.id, 0, _Turn(7, threading.Event(), [])) == []
+    # A card is judged by its file as launching it would read it: once revised, it no
+    # longer launches the original study, which, planned again, gets a card of its own.
+    text = tools["read_draft"].handler(tools["read_draft"].arguments(draft=first))["text"]
+    tools["revise_draft"].handler(tools["revise_draft"].arguments(
+        draft=first, text=text.replace("baseline", "baseline_b")))  # fmt: skip
+    assert propose(plan("third", "Compare the baseline"))["proposal"] != card["proposal"]
+    assert [p.state for p in store.proposals(chat.id)] == ["pending", "pending"]
+
+
+def test_a_launch_is_the_same_whatever_its_name_but_not_whatever_its_plugins(
+    tmp_path: Path,
+) -> None:
+    """The review of #296: in an optimization, ``name`` also picks the optimizer, objective
+    and simulator; only the launch's own name ([study], [optimization]) is left out."""
+    from apex.agents.chat import draft_fingerprint
+
+    def written(name: str, text: str) -> Path:
+        path = tmp_path / name
+        path.write_text(text)
+        return path
+
+    study = '[study]\nname = "{}"\ncases = ["a.toml"]\n'
+    one = written("s1.toml", "# planned once\n" + study.format("one"))
+    two = written("s2.toml", study.format("two"))
+    assert draft_fingerprint(one, "launch_study") == draft_fingerprint(two, "launch_study")
+    optimization = (
+        '[optimization]\nname = "{}"\n[optimizer]\nname = "{}"\n[objective]\nname = "npv"\n'
+    )
+    enopt = written("o1.toml", optimization.format("a", "enopt"))
+    renamed = written("o2.toml", optimization.format("b", "enopt"))
+    genopt = written("o3.toml", optimization.format("a", "genopt"))
+    kind = "launch_optimization"
+    assert draft_fingerprint(enopt, kind) == draft_fingerprint(renamed, kind)
+    assert draft_fingerprint(enopt, kind) != draft_fingerprint(genopt, kind)
 
 
 def test_two_run_drafts_can_both_be_proposed_and_a_saved_report_is_kept(

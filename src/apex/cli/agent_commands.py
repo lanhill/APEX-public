@@ -147,7 +147,7 @@ def monitor(
     api_key_env: KeyEnv = None,
     no_tool_calls: NoToolCalls = False,
 ) -> None:
-    """Check a run's health: rules on its facts, and a model's judgement."""
+    """Check a run's, an optimization's or a surrogate build's health: rules, a model."""
     import time
 
     from apex.agents.loop import LoopSettings
@@ -166,7 +166,10 @@ def monitor(
             settings = LoopSettings(
                 max_turns=6, max_tokens=llm.max_tokens, temperature=llm.temperature
             )
-    if _is_optimization(service, target):
+    if _is_optimization(service, target) or _is_surrogate_build(service, target):
+        if watch:
+            typer.secho("--watch follows a run's scored forecasts: this is checked once",
+                        err=True, fg=typer.colors.YELLOW)  # fmt: skip
         _monitor_optimization(service, chosen, settings, target, act, json_output)
         return
     agent = RunMonitor(service, chosen, settings=settings)
@@ -206,6 +209,19 @@ def _is_optimization(service: "ApexService", target: str) -> bool:
     return record["kind"] in ("optimization", "optimization_resume")
 
 
+def _is_surrogate_build(service: "ApexService", target: str) -> bool:
+    """Whether ``target`` is a surrogate build's folder or job."""
+    from apex.agents.surrogate import BUILD_KINDS, is_build_dir
+
+    if is_build_dir(Path(target)):
+        return True
+    try:
+        record = service.jobs.record(target)
+    except KeyError:
+        return False
+    return record["kind"] in BUILD_KINDS
+
+
 def _monitor_optimization(
     service: "ApexService",
     provider: "LLMProvider | None",
@@ -214,13 +230,20 @@ def _monitor_optimization(
     act: bool,
     json_output: bool,
 ) -> None:
+    """Check an optimization or a surrogate build once: they only advise (no ``--act``)."""
     from apex.agents.optimization import OptimizationMonitor
+    from apex.agents.surrogate import SurrogateMonitor
 
+    build = _is_surrogate_build(service, target)
     if act:
-        typer.secho("--act does not apply to optimizations: the monitor only advises",
+        what = "surrogate builds" if build else "optimizations"
+        typer.secho(f"--act does not apply to {what}: the monitor only advises",
                     err=True, fg=typer.colors.YELLOW)  # fmt: skip
     try:
-        check = OptimizationMonitor(service, provider, settings=settings).check(target)
+        agent = (SurrogateMonitor if build else OptimizationMonitor)(
+            service, provider, settings=settings
+        )
+        check = agent.check(target)
     except ApexError as error:
         raise _fail(error) from error
     if json_output:
@@ -650,7 +673,10 @@ def draft_optimization(
 @agent_app.command("report")
 def report(
     target: Annotated[
-        str | None, typer.Argument(help="A run directory, a run id or a job id.")
+        str | None,
+        typer.Argument(
+            help="A run, optimization or surrogate build directory, a run id or a job id."
+        ),
     ] = None,
     study: Annotated[str | None, typer.Option(help="Report on this study instead.")] = None,
     root: Root = None,
@@ -662,7 +688,7 @@ def report(
     api_key_env: KeyEnv = None,
     no_tool_calls: NoToolCalls = False,
 ) -> None:
-    """Write a narrative report of a run or a study."""
+    """Write a narrative report of a run, optimization, surrogate build or study."""
     from apex.agents.reporter import Reporter
     from apex.services.api import ApexService
 
@@ -678,6 +704,11 @@ def report(
             from apex.agents.optimization import optimization_report
 
             result = optimization_report(service, chosen, target)
+            default = result.trace.parent.parent / "report" / "narrative.md"
+        elif target is not None and _is_surrogate_build(service, target):
+            from apex.agents.surrogate import surrogate_report
+
+            result = surrogate_report(service, chosen, target)
             default = result.trace.parent.parent / "report" / "narrative.md"
         elif study is not None:
             result = reporter.study_report(study)

@@ -202,6 +202,27 @@ Each finished run is saved at once. Running the same configuration again (or `ap
 
 A build refuses a case with `[model_error]`, and stacks whose coupling reads each step's restart files.
 
+## Builds and checks as jobs
+
+The job service runs builds and checks in the background, as it runs history matches and optimizations:
+
+```bash
+apex submit build.toml                 # a build: recognised by its [surrogate] and [design] tables
+apex submit build.toml --max-steps 20  # at most 20 member runs now; the rest later
+apex submit --resume runs/NAME         # continue a stopped build
+apex jobs list && apex jobs stop JOB   # a build stops between waves of member runs
+```
+
+- **Approval.** A build is gated by its simulator runs (training and held-out runs, twice with a coarse stack), a check by its `runs`, as any submission is: above the service's limits it needs approval or a budget grant.
+- **Where it goes.** `apex submit` places a build beside its file (`runs/<name>`), as `apex surrogate build` does. Submitted through the client, the REST API (`POST /v1/surrogates`, `POST /v1/surrogates:check`) or the tools (`submit_surrogate`, `surrogate_summary`) without an `output_dir`, it goes to `<root>/surrogates/<name>/<id>`, named by its content: submitting the same build again finds it there instead of running it again. A web-UI user's build goes to their own folder.
+- **Stopping.** A stopped build ends after its current wave of member runs: four times the executor's parallel width (its workers, or for an executor on other hosts their slots over a member's threads), capped by the simulator's (an Eclipse licence count). An executor that does not say its width runs the design in one batch, which a stop cannot interrupt: it takes effect before the batch and before the fit. An executor on other hosts prepares each wave as a forecast of its own (its connections and the case's files on the hosts), a small cost per wave. Every finished member is kept, and resuming (`apex submit --resume BUILD_DIR`, or the job's resume) writes the same model files as an uninterrupted build, on the same code. A stopped check is submitted again. `apex stop BUILD_DIR` stops a build running as a job; a build run by `apex surrogate build` stops with Ctrl-C and resumes the same way.
+- **Approval names what is built.** An approval is for the build's content (its configuration and its case's, with the files they name), whatever its folder: an edited build needs a new one. A build of the same folder still queued or running is returned as it is, and a complete one needs none.
+- **Checks** write their verdict beside the model, and a model's last verdict decides whether runs may use it: a web-UI user checks only models of their own folder, and under a `[policy]` the verdicts' folder must lie in the output roots. A check runs against a history-matching or optimization configuration, or a run.
+- **Pinned code.** A job pinned to a commit whose worker cannot run surrogate jobs is refused when it is submitted.
+- **Under a `[policy]`** a build is judged with its case's configuration, which it runs, and a model file with what its manifest names (its plugin's file options and its snapshot file).
+- **In the web UI** the Surrogates page lists your builds and checks; a build's page shows its runs, its gate on the held-out runs datatype by datatype, its fit and prediction times, and a form that checks the model on new runs of a case. Submit a build from the Editor.
+- **The monitor and the report agents** read a build (`apex agent monitor BUILD_DIR|JOB`, `apex agent report BUILD_DIR|JOB`, REST `POST /v1/agents/monitor` and `/report` with `surrogate`, or the buttons on its page). Their rules say whether the gate failed or the latest check failed (then runs refuse the model), whether more than `[agents.monitor] surrogate_max_failed_share` (5 %) of the design's runs failed, whether a prediction is less than `surrogate_min_speedup` (10) times faster than the median full run, and how many runs a stopped build has pending. They advise only: neither stops a build.
+
 ## The build's directory
 
 ```text

@@ -85,7 +85,7 @@ from apex.services.plugins import (
 )
 from apex.services.settings import ChatSection
 from apex.services.tools import RESULT_LIMIT, CutFromEnd, ToolSession
-from apex.storage.chat_store import ChatBusy, ChatStore
+from apex.storage.chat_store import ChatBusy, ChatStore, Proposal
 
 if TYPE_CHECKING:
     from apex.domain.observations import ObservationSet
@@ -654,6 +654,9 @@ SYSTEM = (
     "You cannot submit, stop or resume anything: to run a planned "
     "study, call propose_action, which shows the user a card to review, launch or discard "
     "it; for anything else say what the user can do (the editor, the job page's buttons). "
+    "To show the user a draft or a card that exists already, read it back (read_draft) and "
+    "name its card; plan_study and propose_action again only when the user asks for a "
+    "change or a tool's next step says so. "
     "When the user asks you to set up or propose a study, call propose_action in that "
     "answer once its draft keeps to the rules below (never too small by your own "
     "judgement, which an inherited setting you state as a limit does not make it, nor a "
@@ -1500,6 +1503,22 @@ class ChatAssistant:
             except (KeyError, ValueError, OSError):  # gone, or no longer this chat's
                 return False
 
+        def same_launch(path: Path, draft: str, kind: str) -> Proposal | None:
+            """Return the open card of another draft that launches what ``path`` would."""
+            if kind == "launch_run":
+                return None
+            mine = draft_fingerprint(path, kind)
+            for card in reversed(store.proposals(chat_id)):
+                if card.state != "pending" or card.kind != kind or card.draft == draft:
+                    continue
+                try:  # as the card launches it now: its file at launch, not at proposal
+                    other = draft_path(card.draft)
+                    if other.exists() and draft_fingerprint(other, kind) == mine:
+                        return card
+                except (ApexError, KeyError, ValueError, OSError, tomllib.TOMLDecodeError):
+                    continue  # gone, invalid or no longer this chat's: not that launch
+            return None
+
         def propose(args: ProposeArguments) -> dict[str, Any]:
             path = draft_path(args.draft)
             if not path.exists():
@@ -1550,6 +1569,22 @@ class ChatAssistant:
                         "propose that one (the one your answer describes), or revise_draft "
                         "this one if it is the one the user wants"
                     )
+            if (card := same_launch(path, draft, kind)) is not None:
+                # #296: the same launch under another draft's name, already on an open card,
+                # is that card, not a second one (the same draft again replaces its card,
+                # below: one card either way).
+                self._emit(chat_id, "proposal_reused",
+                           {"n": card.n, "draft": draft, "card_draft": card.draft})  # fmt: skip
+                reused: dict[str, Any] = {
+                    "proposal": card.n, "draft": card.draft, "cost": total,
+                    "approval": _draft_facts(service, path, total)[1],
+                    "note": f"no new card: this launch is already card {card.n} "
+                            f"({card.draft}), still open; point the user to that card rather "
+                            "than saying it was proposed again",
+                }  # fmt: skip
+                if card.data.get("warnings"):  # still to be stated beside the card (#276)
+                    reused["warnings"] = card.data["warnings"]
+                return reused
             comparison, approval = _draft_facts(service, path, total)
             data: dict[str, Any] = {"cost": total}
             if comparison.get("unmatched"):
@@ -1653,6 +1688,7 @@ class ChatAssistant:
                       "invalid one is not saved).", ReviseArguments, revise),
             LocalTool("propose_action", "Propose launching a draft (a study, or an "
                       "optimization): the user sees a card to review, launch or discard it. "
+                      "A launch already on an open card returns that card. "
                       "You cannot launch it yourself.",
                       ProposeArguments, propose),
         ]  # fmt: skip
@@ -2042,7 +2078,7 @@ class ChatAssistant:
                 continue
             if event.kind in ("draft", "draft_revised"):
                 changed[draft] = event.n
-            elif event.kind == "proposal":
+            elif event.kind in ("proposal", "proposal_reused"):  # #296: on an open card
                 shown[draft] = event.n
         space = self.service.workspace()
         found = []
@@ -2613,6 +2649,25 @@ def _hidden_case(service: ApexService, access: "Access", path: Path) -> str | No
         if not all(access.folder(each) for each in shown):
             return f"case {name!r} ({written}) is not available"
     return None
+
+
+#: The table whose ``name`` labels a launch (where its results go), by launch kind; every
+#: other ``name`` (an optimizer's, an objective's, a simulator's) says what is computed.
+LAUNCH_LABELS = {"launch_study": "study", "launch_optimization": "optimization"}
+
+
+def draft_fingerprint(path: Path, kind: str) -> str:
+    """Return a digest of what a draft would launch, whatever its file's or launch's name.
+
+    Comments and the launch's own name (:data:`LAUNCH_LABELS`) are left out (issue #296:
+    asked to show a proposed study, the assistant planned it again under another name, and
+    a second card for the same study went up beside the first).
+    """
+    content = tomllib.loads(path.read_text())
+    label = content.get(LAUNCH_LABELS.get(kind, ""))
+    if isinstance(label, dict):
+        label.pop("name", None)
+    return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _draft_facts(

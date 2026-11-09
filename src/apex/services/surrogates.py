@@ -37,6 +37,7 @@ import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -258,8 +259,11 @@ def build_streams(seed: int) -> dict[str, np.random.Generator]:
     }
 
 
-def load_surrogate_config(path: Path) -> SurrogateConfig:
+def load_surrogate_config(path: Path, *, place: bool = True) -> SurrogateConfig:
     """Read and validate a build's configuration, resolving its relative paths.
+
+    ``place``: give a build without ``output_dir`` its folder beside the file (the CLI's
+    ``runs/<name>``); the service places it itself (decision 2).
 
     Raises
     ------
@@ -276,11 +280,16 @@ def load_surrogate_config(path: Path) -> SurrogateConfig:
         raise ConfigError(
             f"invalid surrogate configuration {path}:\n{validation_problems(error)}"
         ) from error
-    return resolve_surrogate_config(config, Path(path).resolve().parent)
+    return resolve_surrogate_config(config, Path(path).resolve().parent, place=place)
 
 
-def resolve_surrogate_config(config: SurrogateConfig, base: Path) -> SurrogateConfig:
-    """Return ``config`` with its paths resolved against ``base`` and its output folder set."""
+def resolve_surrogate_config(
+    config: SurrogateConfig, base: Path, *, place: bool = True
+) -> SurrogateConfig:
+    """Return ``config`` with its paths resolved against ``base`` and its output folder set.
+
+    ``place=False`` leaves a missing ``output_dir`` unset (the service places it).
+    """
 
     def resolve(value: Path) -> Path:
         return value if value.is_absolute() else (base / value).resolve()
@@ -304,7 +313,8 @@ def resolve_surrogate_config(config: SurrogateConfig, base: Path) -> SurrogateCo
     }
     return config.model_copy(update={
         "surrogate": section.model_copy(update={
-            "output_dir": resolve(section.output_dir or Path("runs") / section.name),
+            "output_dir": None if section.output_dir is None and not place
+            else resolve(section.output_dir or Path("runs") / section.name),
             "options": options}),
         "case": config.case.model_copy(update={"config_file": resolve(config.case.config_file)}),
         "design": design.model_copy(update={
@@ -930,6 +940,17 @@ def coarse_resolved_in(coarse: CoarseSection, folder: Path) -> CoarseSection:
     })  # fmt: skip
 
 
+def case_config(path: Path) -> HistoryMatchConfig | OptimizationConfig:
+    """Return the configuration a build's ``[case] config_file`` names (resolved).
+
+    Raises
+    ------
+    ConfigError
+        If it is neither a history-matching nor an optimization configuration.
+    """
+    return _case_config(path)
+
+
 def _case_config(path: Path) -> HistoryMatchConfig | OptimizationConfig:
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -1520,7 +1541,11 @@ def build(
 
 
 def resume_build(
-    path: Path, *, progress: ProgressReporter | None = None, max_runs: int | None = None
+    path: Path,
+    *,
+    progress: ProgressReporter | None = None,
+    max_runs: int | None = None,
+    stopped: Callable[[], bool] | None = None,
 ) -> BuildResult:
     """Continue the build in the directory ``path`` from its saved configuration.
 
@@ -1533,7 +1558,7 @@ def resume_build(
     if not SurrogateDirectory.holds_build(path):
         raise ConfigError(f"{path} holds no surrogate build")
     config = SurrogateConfig.model_validate_json((directory.path / "config.json").read_text())
-    return build_config(config, progress=progress, max_runs=max_runs)
+    return build_config(config, progress=progress, max_runs=max_runs, stopped=stopped)
 
 
 def build_config(
@@ -1541,8 +1566,12 @@ def build_config(
     *,
     progress: ProgressReporter | None = None,
     max_runs: int | None = None,
+    stopped: Callable[[], bool] | None = None,
 ) -> BuildResult:
     """Start or resume a build from a resolved configuration (one process per directory).
+
+    ``stopped`` (a job's stop decision 4) is checked between waves of
+    member runs; once true the build ends as stopped, its finished members kept.
 
     Raises
     ------
@@ -1554,7 +1583,27 @@ def build_config(
     """
     assert config.surrogate.output_dir is not None
     with exclusive(config.surrogate.output_dir, "surrogate build"):
-        return _build(config, progress, max_runs)
+        return _build(
+            config, progress, max_runs, _with_stop_file(config.surrogate.output_dir, stopped)
+        )
+
+
+#: The file ``apex stop`` and a job's stop write in the folder of what they stop.
+STOP_FILE = "stop_requested"
+
+
+def _with_stop_file(folder: Path, stopped: Callable[[], bool] | None) -> Callable[[], bool] | None:
+    """Return ``stopped`` that also reads ``folder``'s stop file, cleared first (a job's).
+
+    A stop asked before this start (it ended an earlier job, or was never read) is not one
+    for it, so the file is removed; the caller holds the folder's lock. Without ``stopped``
+    (the CLI) nothing changes: one batch, as before.
+    """
+    if stopped is None:
+        return None
+    stop_file = Path(folder) / STOP_FILE
+    stop_file.unlink(missing_ok=True)
+    return lambda: stopped() or stop_file.exists()
 
 
 def _model_problems(config: SurrogateConfig) -> list[str]:
@@ -1727,6 +1776,7 @@ def _run_adaptive(
     keep: str,
     max_runs: int | None,
     progress: ProgressReporter | None,
+    stopped: Callable[[], bool] | None = None,
 ) -> tuple[StoredDesign, MembersOutcome]:
     """Run an adaptive design's batches until ``training`` runs are made.
 
@@ -1759,11 +1809,15 @@ def _run_adaptive(
         outcome = run_members(
             directory, case.simulator, case.executor, members, case.run_keys, label="design",
             keep_simulations=keep, max_runs=budget, progress=progress,
+            stopped=stopped,
         )  # fmt: skip
         if budget is not None:
             budget = max(budget - (len(directory.journal()) - before), 0)
         if not outcome.complete or len(design.training_ids) >= n_train:
             return design, outcome
+        if stopped is not None and stopped():
+            # Before the next fit and batch (a fit may take hours): the resume continues.
+            return design, dataclasses.replace(outcome, stopped=True)
         for label, ids in (("held-out", design.held_out_ids), ("training", design.training_ids)):
             check_success(label, len(ids), sum(int(m) in outcome.failed for m in ids),
                           config.design.min_success_fraction)  # fmt: skip
@@ -1844,7 +1898,10 @@ def _completed_build(directory: SurrogateDirectory, config: SurrogateConfig) -> 
 
 
 def _build(
-    config: SurrogateConfig, progress: ProgressReporter | None, max_runs: int | None
+    config: SurrogateConfig,
+    progress: ProgressReporter | None,
+    max_runs: int | None,
+    stopped: Callable[[], bool] | None = None,
 ) -> BuildResult:
     section = config.surrogate
     assert section.output_dir is not None
@@ -1936,12 +1993,12 @@ def _build(
             )
             outcome = run_members(
                 directory, case.simulator, case.executor, members, case.run_keys, label="design",
-                keep_simulations=keep, max_runs=max_runs, progress=progress,
+                keep_simulations=keep, max_runs=max_runs, progress=progress, stopped=stopped,
             )  # fmt: skip
         else:
             design, outcome = _run_adaptive(
                 config, case, directory, plan, design, plan_provenance,
-                keep=keep, max_runs=max_runs, progress=progress,
+                keep=keep, max_runs=max_runs, progress=progress, stopped=stopped,
             )  # fmt: skip
         if not outcome.complete:
             # An adaptive design's later batches are pending too (not drawn yet).
@@ -1977,7 +2034,7 @@ def _build(
                  + _members(design.training_ids, design.training) if m[0] in values]
                 + only_members,
                 case.keys, label="coarse", keep_simulations=keep, max_runs=budget,
-                progress=progress,
+                progress=progress, stopped=stopped,
             )  # fmt: skip
             if not coarse_outcome.complete:
                 summary = _summary(
@@ -2015,6 +2072,14 @@ def _build(
         for label, ids in (("held-out", design.held_out_ids), ("training", design.training_ids)):
             check_success(label, len(ids), sum(int(m) in failed for m in ids),
                           config.design.min_success_fraction)  # fmt: skip
+    if stopped is not None and stopped():
+        # Every run made, the fit not started (it may take hours): ended as stopped, nothing
+        # pending; the resume fits.
+        summary = _summary(config, design, case, failed, 0, simulator_runs)
+        directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
+        directory.write_state(complete=False)
+        logger.info("build stopped", extra={"event": "surrogate_stopped", "pending": 0})
+        return BuildResult(directory.path, summary)
     failed_ids = sorted(failed)
     held_out = _snapshot_set(case, design.held_out_ids, design.held_out, values,
                              plan_provenance, failed_ids, coarse_values, coarse_only)  # fmt: skip
@@ -2153,6 +2218,51 @@ def _summary(
     )
 
 
+@dataclass(frozen=True)
+class PredictionCost:
+    """What predicting one member costs, against a full run (a build's facts and summary).
+
+    Attributes
+    ----------
+    simulation
+        What the model runs per member besides itself: ``none``, ``coarse`` (a
+        coarse-corrected model's coarse forecast) or ``early`` (an early-start
+        model's simulation up to its date).
+    seconds
+        One member's prediction, with the coarse run's median time when it needs one;
+        ``None`` when unknown (an early-start model: its early run is not timed by the build).
+    speedup
+        The median full run over ``seconds``; ``None`` when either is unknown.
+    """
+
+    simulation: Literal["none", "coarse", "early"]
+    seconds: float | None
+    speedup: float | None
+
+
+def prediction_cost(path: Path, summary: SurrogateBuildSummary) -> PredictionCost:
+    """Return a build's cost per predicted member (:class:`PredictionCost`)."""
+    try:
+        plugin = surrogate_models.factory(summary.plugin)
+    except PluginError:  # not installed here: judged by its folder only
+        plugin = None
+    full = summary.simulator_median_seconds
+    own = summary.prediction_seconds
+    if plugin is None:  # what it simulates per member is unknown here: no speedup
+        return PredictionCost("none", own, None)
+    if callable(getattr(plugin, "predict_from_early", None)):
+        return PredictionCost("early", None, None)
+    coarse = path / COARSE
+    # Coarse runs count only for a model that corrects a coarse forecast (a coarse/ folder of
+    # another model's build holds runs its predictions never make).
+    if coarse.is_dir() and callable(getattr(plugin, "predict_corrected", None)):
+        times = [r.seconds for r in SurrogateDirectory(coarse).journal().values()
+                 if r.ok and r.seconds is not None]  # fmt: skip
+        seconds = None if own is None or not times else own + float(np.median(times))
+        return PredictionCost("coarse", seconds, full / seconds if full and seconds else None)
+    return PredictionCost("none", own, full / own if full and own else None)
+
+
 def build_summary(path: Path) -> SurrogateBuildSummary:
     """Return a build's summary (``summary.json``).
 
@@ -2262,6 +2372,7 @@ def check_surrogate(
     min_inside: float = 0.8,
     progress: ProgressReporter | None = None,
     max_runs: int | None = None,
+    stopped: Callable[[], bool] | None = None,
 ) -> CheckResult:
     """Gate an existing model on new full runs (``apex surrogate check``); never changes it.
 
@@ -2383,7 +2494,7 @@ def check_surrogate(
         outcome = run_members(
             directory, case.simulator, case.executor,
             _members(design.held_out_ids, design.held_out),
-            case.run_keys, label="check", max_runs=max_runs, progress=progress,
+            case.run_keys, label="check", max_runs=max_runs, progress=progress, stopped=stopped,
         )  # fmt: skip
         # What is left of max_runs for the coarse stack: less the fine runs made now.
         left = (
@@ -2423,7 +2534,7 @@ def check_surrogate(
                  if m[0] in outcome.values],
                 case.keys, label="coarse",
                 max_runs=left,
-                progress=progress,
+                progress=progress, stopped=stopped,
             )  # fmt: skip
             if not coarse_outcome.complete:
                 directory.write_json(CHECK, json.loads(base.model_dump_json()))

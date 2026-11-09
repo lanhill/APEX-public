@@ -329,14 +329,21 @@ class Access:
         """
         from apex.services import policy
 
-        problems: list[str] = []
-
         # A surrogate's manifest in a folder the user may use: its coarse stack is judged
         # here too.
         def follow(value: str) -> bool:
             return Path(value).is_absolute() and paths.where(Path(value)) is not None
 
-        for kind, key, value in policy.named(config, follow=follow):
+        return self.refused_items(policy.named(config, follow=follow), paths)
+
+    def refused_items(self, found: Iterable[tuple[str, str, str]], paths: "PathRules") -> list[str]:
+        """Return which of ``found`` (``policy.named``'s kind, key, value) a UI user may not.
+
+        :meth:`refused_names`'s rules, for names that come from elsewhere than a
+        configuration (a surrogate's manifest, the coarse stack it runs:).
+        """
+        problems: list[str] = []
+        for kind, key, value in found:
             if kind == "undeclared":
                 problems.append(f"{key}: the plugin does not declare what this option names")
             elif kind == "output":
@@ -480,6 +487,10 @@ class OwnerView(Access):
 
     def refused_names(self, config: BaseModel, paths: "PathRules") -> list[str]:
         """None: the owner's files and programs are theirs (a ``[policy]`` still applies)."""
+        return []
+
+    def refused_items(self, found: Iterable[tuple[str, str, str]], paths: "PathRules") -> list[str]:
+        """None, as :meth:`refused_names`."""
         return []
 
 

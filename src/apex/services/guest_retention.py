@@ -47,7 +47,7 @@ from typing import Any
 
 from apex.services.access import SUBMITTED_BY
 from apex.services.api import ApexService
-from apex.services.deletion import remove_empty_parents
+from apex.services.deletion import jobs_using, remove_empty_parents, unsafe_build
 from apex.services.identities import identity_of
 from apex.services.jobs import FINAL
 from apex.services.settings import GuestsSection
@@ -55,8 +55,11 @@ from apex.storage.locks import locked
 
 logger = logging.getLogger("apex.service")
 
-#: Jobs whose outputs are their ``run_dirs`` (not catalogued runs).
-OUTPUT_KINDS = ("prediction", "optimization", "optimization_resume")
+#: Surrogate builds: their folders are judged as a deletion judges them.
+BUILD_KINDS = ("surrogate_build", "surrogate_build_resume")
+#: Jobs whose outputs are their ``run_dirs`` (not catalogued runs). A surrogate check's
+#: folder is its model's build's ``checks/``, removed with that build.
+OUTPUT_KINDS = ("prediction", "optimization", "optimization_resume", *BUILD_KINDS)
 
 
 @dataclass
@@ -72,6 +75,8 @@ class Submission:
     dirs: list[Path] = field(default_factory=list)
     studies: list[str] = field(default_factory=list)
     size: int = 0
+    #: Of ``dirs``, surrogate builds' folders (judged as a deletion judges them).
+    builds: list[Path] = field(default_factory=list)
 
 
 def _parse(stamp: str) -> dt.datetime:
@@ -123,6 +128,8 @@ def submissions(
                     unit.dirs.append(entry.path)
             if job.get("kind") in OUTPUT_KINDS:
                 unit.dirs += [Path(d) for d in job.get("run_dirs") or []]
+                if job.get("kind") in BUILD_KINDS:
+                    unit.builds += [Path(d) for d in job.get("run_dirs") or []]
             if job.get("kind") == "study":
                 name = (((job.get("spec") or {}).get("study") or {}).get("study") or {}).get("name")
                 if name:
@@ -171,6 +178,19 @@ def delete(service: ApexService, unit: Submission) -> tuple[bool, int, bool]:
             )  # fmt: skip
             kept = True
             continue
+        if path in unit.builds:
+            # A build's folder: only a build's own entries, and no live job
+            # (a check writing in it, a run reading its model) of another submission.
+            reason = unsafe_build(path, bases) or (
+                "a job still uses it" if jobs_using(service, path, exclude=unit.jobs) else None
+            )
+            if reason:
+                logger.warning(
+                    "guest retention: %s kept: %s", path, reason,
+                    extra={"event": "guest_prune_skipped", "path": str(path)},
+                )  # fmt: skip
+                kept = True
+                continue
         before = _size(path)
         shutil.rmtree(path, ignore_errors=True)
         freed += before - (_size(path) if path.exists() else 0)

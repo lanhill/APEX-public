@@ -46,7 +46,7 @@ Unknown keys are refused. Relative paths are resolved against the configuration'
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from apex.domain.config import PluginSection, _Strict
 from apex.domain.surrogate import QuantityKind
@@ -60,6 +60,18 @@ class OptimizationSection(_Strict):
     output_dir: Path | None = Field(
         default=None, description="Run directory; default `runs/<name>` next to the config."
     )
+
+    @field_validator("name")
+    @classmethod
+    def _one_folder(cls, value: str) -> str:
+        # The name places the optimization (runs/<name>, the service's optimizations/<name>,
+        # the web UI's UI/<user>/optimizations/<name>): a separator or "." / ".." would put
+        # it elsewhere, out of a guest's own folder (the review).
+        if "/" in value or "\\" in value or value in (".", ".."):
+            raise ValueError(
+                f"optimization name {value!r}: one folder name, no '/' or '\\', not '.' or '..'"
+            )
+        return value
 
 
 class ControlVariable(_Strict):

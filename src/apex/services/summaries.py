@@ -433,9 +433,15 @@ class SurrogateSummarizer:
         for metric, value in timing.items():
             if value is not None:
                 rows.append(_single(metric, "all", 0, value))
-        if summary.prediction_seconds and summary.simulator_median_seconds:
-            speedup = summary.simulator_median_seconds / summary.prediction_seconds
-            rows.append(_single("speedup", "all", 0, speedup))
+        # A member's whole prediction: with the coarse run a coarse-corrected model needs;
+        # none for an early-start model, whose early run the build does not time.
+        cost = surrogates.prediction_cost(path, summary)
+        if cost.speedup is not None:
+            rows.append(_single("speedup", "all", 0, cost.speedup))
+        if cost.simulation == "coarse":
+            notes.append("speedup counts each member's coarse run with its prediction")
+        elif cost.simulation == "early":
+            notes.append("no speedup: each member is also simulated up to the model's date")
         if summary.gate is not None:
             for entry in summary.gate.datatypes:
                 error = math.inf if entry.error is None else entry.error

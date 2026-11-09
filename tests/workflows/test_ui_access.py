@@ -595,6 +595,43 @@ def test_run_names_are_one_folder() -> None:
     assert RunSection(name="gies.v2-r0", seed=1).name == "gies.v2-r0"
 
 
+def test_optimization_and_prediction_names_are_one_folder(svc: Service) -> None:
+    """The review: an optimization's or a prediction's name had no such
+    rule, and the web UI places a guest's at ``<their folder>/optimizations/<name>/...`` and
+    ``.../predictions/<run>/<name>``: a name with ``..`` put it out of their own folder."""
+    from pydantic import ValidationError
+
+    from apex.domain.optimization import OptimizationSection
+    from apex.domain.prediction import PredictionSection
+
+    required = {"outputs": {"vectors": ["y"]}}
+    for bad in ("../../cases/x", "a/b", "..", "."):
+        with pytest.raises(ValidationError, match="one folder name"):
+            OptimizationSection(name=bad, seed=1)
+        with pytest.raises(ValidationError, match="one folder name"):
+            PredictionSection.model_validate({"name": bad, "run_dir": "r", **required})
+    assert OptimizationSection(name="enopt.v2-r0", seed=1).name == "enopt.v2-r0"
+    good = {"name": "to_2030", "run_dir": "r", **required}
+    assert PredictionSection.model_validate(good).name == "to_2030"
+
+    # Through the REST API: a guest's prediction named to escape is refused, nothing written.
+    (svc.root / "ui_access.toml").write_text(ACCESS)
+    http, alice = svc.http, svc.guest("alice")
+    run = http.post("/v1/runs", headers=alice, json={"config_file": svc.variant("iota", 12)})
+    svc.wait(run.json()["id"])
+    run_dir = svc.tmp / "UI/guests/alice/runs/iota"
+    outputs = ", ".join(f'["t{i}", "y"]' for i in range(8))
+    escaping = svc.file("escape.toml", (
+        f'[prediction]\nname = "../../../../escaped"\nrun_dir = "{run_dir}"\n'
+        'ensembles = ["posterior"]\n\n[prediction.outputs]\nvectors = ["y"]\n\n'
+        f'[simulator]\noptions = {{ forward_file = "forward.npz", outputs = [{outputs}] }}\n'
+    ))  # fmt: skip
+    refused = http.post("/v1/predictions", headers=alice, json={"prediction_file": escaping})
+    assert refused.status_code == 422, refused.text
+    assert "one folder name" in refused.text
+    assert not any(svc.tmp.rglob("escaped"))
+
+
 def test_a_recovered_or_resumed_run_is_still_deleted_with_its_submission(svc: Service) -> None:
     """A worker crash turns the creating job into a resume in place, and a stopped run is
     resumed by a job of its own: neither may leave the run undeletable (review)."""

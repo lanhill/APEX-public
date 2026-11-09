@@ -12,6 +12,8 @@ export type Route =
   | { page: "prediction"; path: string }
   | { page: "optimizations" }
   | { page: "optimization"; path: string }
+  | { page: "surrogates" }
+  | { page: "surrogate"; path: string }
   | { page: "plugins"; workflow?: string; registry?: string; name?: string }
   | { page: "examples"; workflow?: string }
   | { page: "agents"; name?: string }
@@ -35,6 +37,9 @@ export function parse(hash: string): Route {
     case "optimizations":
       // #/optimizations: the list; #/optimizations?path=DIR: one optimization.
       return params.get("path") ? { page: "optimization", path: params.get("path") as string } : { page: "optimizations" };
+    case "surrogates":
+      // #/surrogates: the builds; #/surrogates?path=DIR: one build.
+      return params.get("path") ? { page: "surrogate", path: params.get("path") as string } : { page: "surrogates" };
     case "plugins":
       // #/plugins/<workflow>/<registry>/<name>: a workflow's tab, and one plugin's details.
       return {
@@ -66,6 +71,8 @@ export function href(route: Route): string {
       return `#/prediction?path=${encodeURIComponent(route.path)}`;
     case "optimization":
       return `#/optimizations?path=${encodeURIComponent(route.path)}`;
+    case "surrogate":
+      return `#/surrogates?path=${encodeURIComponent(route.path)}`;
     case "runs":
       return route.filter ? `#/runs?filter=${encodeURIComponent(route.filter)}` : "#/runs";
     case "editor":

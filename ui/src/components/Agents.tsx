@@ -188,6 +188,42 @@ export function OptimizationAgents({ path }: { path: string }) {
   );
 }
 
+/** A surrogate build's agents: the monitor and the report, each a button. */
+export function SurrogateAgents({ path }: { path: string }) {
+  const api = useApi();
+  const names = useAgentNames();
+  const [model, setModel] = useState(false);
+  const [result, setResult] = useState<Result>();
+  const { busy, error, run: go } = useRunner();
+  if (!names.has("monitor") && !names.has("report")) return null;
+  return (
+    <section className="card agents">
+      <h2>Agents</h2>
+      <p className="muted">They read the build and its checks and advise; neither changes nor stops it.</p>
+      <div className="row">
+        {names.has("monitor") && (
+          <button disabled={busy !== null} onClick={() => void go("monitor", () => api.agentMonitorSurrogate(path, model),
+            (answer) => setResult({ kind: "monitor", answer }))}>
+            {busy === "monitor" ? "Checking…" : "Check health"}
+          </button>
+        )}{" "}
+        {names.has("report") && (
+          <button disabled={busy !== null} onClick={() => void go("report", () => api.agentReport({ surrogate: path }, model),
+            (answer) => setResult({ kind: "report", answer }))}>
+            {busy === "report" ? "Writing…" : "Write report"}
+          </button>
+        )}{" "}
+        <label>
+          <input type="checkbox" checked={model} onChange={(e) => setModel(e.target.checked)} /> ask the model
+          (slower)
+        </label>
+      </div>
+      <ErrorBox error={error} />
+      {result && <AgentResult result={result} />}
+    </section>
+  );
+}
+
 function AgentResult({ result }: { result: Result }) {
   let body: ReactNode;
   if (result.kind === "monitor") {

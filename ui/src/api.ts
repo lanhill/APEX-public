@@ -188,6 +188,77 @@ export interface OptimizationRow {
   annotations: Record<string, string>;
 }
 
+/** One surrogate job (GET /v1/surrogates): a build, its resume, or a check. */
+export interface SurrogateRow {
+  job: string;
+  kind: "surrogate_build" | "surrogate_build_resume" | "surrogate_check";
+  state: JobState;
+  /** The build's folder (a check's: where its verdict goes). */
+  path: string | null;
+  created: string | null;
+  finished: string | null;
+  client: string | null;
+  annotations: Record<string, string>;
+}
+
+/** One datatype through a surrogate's gate on its held-out runs. */
+export interface SurrogateDatatypeGate {
+  datatype: string;
+  measure: string;
+  error: number | null;
+  tolerance: number;
+  passed: boolean;
+}
+
+/** A surrogate build's summary (GET /v1/surrogates/summary): its runs, gate and timings. */
+export interface SurrogateBuildSummary {
+  name: string;
+  plugin: string;
+  plan: string;
+  status: "complete" | "stopped";
+  training_runs: number;
+  held_out_runs: number;
+  failed: number[];
+  pending: number;
+  simulator_runs: number;
+  coarse_only_runs?: number;
+  keys: number;
+  datatypes: string[];
+  gate: {
+    held_out: number[];
+    datatypes: SurrogateDatatypeGate[];
+    rank: { correlation: number | null; tolerance: number; runs: number; passed: boolean } | null;
+    passed: boolean;
+  } | null;
+  identity: string | null;
+  /** The model's manifest, relative to the build's folder. */
+  model: string | null;
+  fit_seconds: number | null;
+  prediction_seconds: number | null;
+  simulator_median_seconds: number | null;
+}
+
+/** A surrogate build's plan (POST /v1/configs:validate): what it will cost, before it runs. */
+export interface SurrogateBuildPlan {
+  name: string;
+  model: string;
+  plan: string;
+  training: number;
+  held_out: number;
+  simulator_runs: number;
+  coarse_only: number;
+  keys: number;
+  datatypes: string[];
+  measure: string;
+  simulator: string;
+  executor: string;
+  inputs: number;
+  output_dir: string;
+  warnings: string[];
+  /** What an approval of the build names (its content). */
+  identity?: string | null;
+}
+
 /** One row of an optimization's history.jsonl: a start, an accepted step or an EPF update. */
 export interface OptimizationStep {
   kind: string;
@@ -276,6 +347,8 @@ export interface Validation {
   plan: RunPlan | null;
   /** The plan of an optimization configuration; absent from older services. */
   optimization?: OptimizationPlan | null;
+  /** The plan of a surrogate build; absent from older services. */
+  surrogate?: SurrogateBuildPlan | null;
   plans: RunPlan[];
   /** What a study will not run, and why, e.g. "not run: <label>: <reason>". */
   notes?: string[];
@@ -650,7 +723,13 @@ export class Api {
   /** The run monitor on an optimization's directory; advisory, it stops nothing. */
   agentMonitorOptimization = (optimization: string, model = false) =>
     this.request<AgentAnswer & { report: MonitorReport }>("POST", "/agents/monitor", { optimization, model });
-  agentReport = (target: { run: string } | { study: string } | { optimization: string }, model = false) =>
+  /** The run monitor on a surrogate build's folder; advisory. */
+  agentMonitorSurrogate = (surrogate: string, model = false) =>
+    this.request<AgentAnswer & { report: MonitorReport }>("POST", "/agents/monitor", { surrogate, model });
+  agentReport = (
+    target: { run: string } | { study: string } | { optimization: string } | { surrogate: string },
+    model = false,
+  ) =>
     this.request<AgentAnswer & { markdown: string }>("POST", "/agents/report", { ...target, model });
   /** The plotter: figures into the run's report/plots, shown by `runFigures`. */
   agentPlot = (run: string, request: string | undefined, model = false) =>
@@ -718,6 +797,17 @@ export class Api {
       client: "ui",
       approval_token: approvalToken ?? null,
     });
+  surrogates = () => this.get<SurrogateRow[]>("/surrogates");
+  surrogateSummary = (path: string) => this.get<SurrogateBuildSummary>("/surrogates/summary", { path });
+  submitSurrogate = (surrogateFile: string, approvalToken?: string) =>
+    this.request<JobHandle>("POST", "/surrogates", {
+      surrogate_file: surrogateFile,
+      client: "ui",
+      approval_token: approvalToken ?? null,
+    });
+  /** Gate a model on new full runs of a case (POST /v1/surrogates:check), as a job. */
+  checkSurrogate = (check: { model_file: string; against: string; runs: number; seed?: number }, approvalToken?: string) =>
+    this.request<JobHandle>("POST", "/surrogates:check", { ...check, client: "ui", approval_token: approvalToken ?? null });
   examples = () => this.get<{ examples: Example[] }>("/examples");
   copyExample = (id: string) => this.request<CopiedExample>("POST", "/examples:copy", { id });
   submitPrediction = (predictionFile: string) =>

@@ -77,6 +77,7 @@ def test_every_tool_exports_to_each_format_with_flat_schemas() -> None:
         "submit_study",
         "submit_prediction",
         "submit_optimization",
+        "submit_surrogate",
         "resume_job",
     }
     assert len(json.dumps(openai)) < 12_000  # the whole tool set fits a small context

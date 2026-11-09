@@ -294,6 +294,90 @@ class Guard:
             raise Denied(403, f"plugins not available in the UI: {', '.join(hidden)}")
         self.names(config)
 
+    def surrogate(self, path: Path) -> None:
+        """Refuse a surrogate build that is not one of this request's visible jobs."""
+        if not self.filtered:
+            return
+        target = Path(path).resolve()
+        for record in self.records():
+            if record["kind"] in ("surrogate_build", "surrogate_build_resume") and any(
+                Path(d).resolve() == target for d in record.get("run_dirs") or []
+            ):
+                return
+        raise Denied(404, f"no surrogate build at {path}")
+
+    def surrogate_config(self, config: Any) -> None:  # noqa: ANN401 (a SurrogateConfig)
+        """Refuse a surrogate build with plugins or files UI users may not use.
+
+        Its own plugins (the surrogate, its design, executor and coarse stack), and its
+        case's configuration, which the build runs: judged as that configuration would be.
+        """
+        if not self.ui:
+            return
+        from apex.services.surrogates import case_config
+
+        used = [("surrogate_models", config.surrogate.model),
+                ("surrogate_designs", config.design.plan)]  # fmt: skip
+        if config.execution is not None:
+            used.append(("executors", config.execution.name))
+        if config.coarse is not None:
+            if config.coarse.simulator is not None:
+                used.append(("simulators", config.coarse.simulator))
+            used += [("parameterizations", p.name) for p in config.coarse.parameterizations]
+        hidden = sorted(f"{r}:{n}" for r, n in used if not self.access.plugin(r, n))
+        if hidden:
+            raise Denied(403, f"plugins not available in the UI: {', '.join(hidden)}")
+        self.names(config)
+        self.file(config.case.config_file)
+        case = case_config(config.case.config_file)
+        if isinstance(case, OptimizationConfig):
+            self.optimization_config(case)
+        else:
+            self.config(case)
+        from apex.services import policy
+
+        refused = self.access.refused_items(policy.build_coarse_items(config, case), self.paths())
+        if refused:
+            raise Denied(403, "not available in the UI: " + "; ".join(refused))
+
+    def surrogate_check(self, model_file: Path, case: Any) -> None:  # noqa: ANN401
+        """Refuse a check with plugins or files UI users may not use.
+
+        The model's plugin and the coarse stack it runs (read from its manifest, which runs
+        no code), and the case it is checked against (a configuration of either kind, or a
+        run's snapshot), judged as a submission of it would be.
+        """
+        if not self.ui:
+            return
+        from apex.domain.surrogate import SurrogateManifest
+
+        try:
+            manifest = SurrogateManifest.model_validate_json(Path(model_file).read_bytes())
+        except (OSError, ValueError) as error:
+            raise Denied(404, f"no surrogate at {model_file}") from error
+        used = [("surrogate_models", manifest.plugin)]
+        if manifest.coarse is not None:
+            if manifest.coarse.simulator is not None:
+                used.append(("simulators", manifest.coarse.simulator))
+            used += [("parameterizations", p.name) for p in manifest.coarse.parameterizations]
+        hidden = sorted(f"{r}:{n}" for r, n in used if not self.access.plugin(r, n))
+        if hidden:
+            raise Denied(403, f"plugins not available in the UI: {', '.join(hidden)}")
+        if isinstance(case, OptimizationConfig):
+            self.optimization_config(case)
+        else:
+            self.config(case)
+        # What the model names, and the coarse stack it runs over the case's simulator: the
+        # same rules as a configuration's names (files, templates, programs, arguments).
+        from apex.services import policy
+
+        found = policy.manifest_items(Path(model_file))
+        if isinstance(case, HistoryMatchConfig | OptimizationConfig):
+            found += policy.coarse_stack_items(case, Path(model_file))
+        refused = self.access.refused_items(found, self.paths())
+        if refused:
+            raise Denied(403, "not available in the UI: " + "; ".join(refused))
+
     def plugins(self, infos: Iterable[Any]) -> list[Any]:
         """Return the plugins this request may see."""
         return [p for p in infos if not self.ui or self.access.plugin(p.registry, p.name)]

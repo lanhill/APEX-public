@@ -27,6 +27,7 @@ needs that token, and plans again and removes under the store's lock, so what is
 exactly what the person confirmed.
 """
 
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -63,6 +64,18 @@ OPTIMIZATION_ENTRIES = (
 )  # fmt: skip
 #: Jobs whose ``run_dirs`` are optimizations' folders.
 OPTIMIZATION_KINDS = ("optimization", "optimization_resume")
+#: What APEX writes at the top of a surrogate build's folder (``storage/surrogate_directory``).
+SURROGATE_ENTRIES = (
+    "config.json", "state.json", "provenance.json", "design.npz", "members", "snapshots.jsonl",
+    "snapshots.npz", "fields_*.npz", "simulations", "coarse", "model", "gate.json",
+    "summary.json", "events.jsonl", "checks", "run.lock", "stop_requested", "*.tmp",
+    # The monitor's and the report's records and Markdown (agents/surrogate.py).
+    "agents", "report",
+)  # fmt: skip
+#: Jobs whose ``run_dirs`` are surrogate builds' folders.
+SURROGATE_KINDS = ("surrogate_build", "surrogate_build_resume")
+#: Jobs that own a folder of their own, shared by the submissions that resume it.
+FOLDER_KINDS = (*OPTIMIZATION_KINDS, *SURROGATE_KINDS)
 #: What APEX writes at the top of a prediction's folder (``storage/prediction_directory.py``).
 PREDICTION_ENTRIES = (
     "config.json", "provenance.json", "state.json", "members", "forecast_*.npz", "truth.npz",
@@ -91,6 +104,8 @@ class DeletionPlan:
     blocked: list[str] = field(default_factory=list)
     #: Of ``dirs``, the optimizations' folders (their entries differ from a run's).
     optimizations: list[Path] = field(default_factory=list)
+    #: Of ``dirs``, the surrogate builds' folders.
+    surrogates: list[Path] = field(default_factory=list)
 
     @property
     def token(self) -> str:
@@ -226,14 +241,14 @@ def plan(service: ApexService, job_id: str) -> DeletionPlan:
     shared_with_others = False
     while True:
         optimizing = {
-            Path(d).resolve() for i in members if by_id[i].get("kind") in OPTIMIZATION_KINDS
+            Path(d).resolve() for i in members if by_id[i].get("kind") in FOLDER_KINDS
             for d in by_id[i].get("run_dirs") or []
         }  # fmt: skip
         joined = False
         for record in records:
             top = _root(record, by_id)
             uses = {Path(d).resolve() for d in record.get("run_dirs") or []} & optimizing
-            if top in members or not uses or record.get("kind") not in OPTIMIZATION_KINDS:
+            if top in members or not uses or record.get("kind") not in FOLDER_KINDS:
                 continue
             if submitter(record) == owner:
                 members |= tree(top)
@@ -289,11 +304,14 @@ def plan(service: ApexService, job_id: str) -> DeletionPlan:
                     unit.blocked.append(f"prediction folder {output.name}: {why}")
                 else:
                     unit.dirs.append(output)
-        if record.get("kind") in OPTIMIZATION_KINDS:
+        if record.get("kind") in FOLDER_KINDS:
             for output in (Path(d) for d in record.get("run_dirs") or []):
                 if output.resolve() not in {d.resolve() for d in unit.dirs}:
                     unit.dirs.append(output)
-                    unit.optimizations.append(output)
+                    if record.get("kind") in SURROGATE_KINDS:
+                        unit.surrogates.append(output)
+                    else:
+                        unit.optimizations.append(output)
         if record.get("kind") == "study":
             study = ((record.get("spec") or {}).get("study") or {}).get("study") or {}
             if study.get("name"):
@@ -314,6 +332,11 @@ def _check_folders(
             "outside the workspace, so not deleted from the web UI: "
             + ", ".join(d.name for d in outside[:5])  # names: no server path for the UI
         )
+    for folder in unit.surrogates:
+        if jobs_using(service, folder, exclude=unit.jobs):
+            # A check of the build's model writes in its checks/, and a run, prediction or
+            # optimization may read its model.
+            unit.blocked.append(f"{folder.name}: a job still uses it; stop it first")
     going = set(unit.runs)
     others = [Path(e.path).resolve() for e in entries.values() if e.run_id not in going]
     foreign = [
@@ -325,11 +348,45 @@ def _check_folders(
             continue
         allowed = (
             RUN_ENTRIES if index < len(unit.runs)
-            else OPTIMIZATION_ENTRIES if folder in unit.optimizations else PREDICTION_ENTRIES
+            else OPTIMIZATION_ENTRIES if folder in unit.optimizations
+            else SURROGATE_ENTRIES if folder in unit.surrogates else PREDICTION_ENTRIES
         )  # fmt: skip
         reason = _unsafe(folder, roots, others, foreign, allowed)
         if reason:
             unit.blocked.append(f"{folder.name}: {reason}")
+
+
+def jobs_using(service: ApexService, folder: Path, exclude: Sequence[str] = ()) -> list[str]:
+    """Return the queued or running jobs that write in ``folder`` or name a file in it.
+
+    Its writers by their ``run_dirs`` (a surrogate check writes in a build's ``checks/``),
+    its readers by what their specification names (a ``[surrogate] model_file`` of a run,
+    prediction or optimization:), by its path as given or resolved.
+    """
+    names = {str(folder), str(folder.resolve())}
+    found = []
+    for record in service.jobs.all_records():
+        if record["state"] in FINAL or record["id"] in exclude:
+            continue
+        writes = any(_within(Path(d), folder) for d in record.get("run_dirs") or [])
+        spec = record.get("spec") or {}
+        text = json.dumps(spec, ensure_ascii=False)
+        if isinstance(spec.get("run_dir"), str):
+            # A resume's configuration is its run's own (``config.json``), not its spec.
+            with contextlib.suppress(OSError):
+                text += (Path(spec["run_dir"]) / "config.json").read_text(encoding="utf-8")
+        if writes or any(name + "/" in text for name in names):
+            found.append(str(record["id"]))
+    return found
+
+
+def unsafe_build(folder: Path, roots: Sequence[Path]) -> str | None:
+    """Return why a surrogate build's folder may not be deleted whole, or ``None``.
+
+    As a deletion judges it: a real folder, not a root, holding only a build's entries
+    (:data:`SURROGATE_ENTRIES`). For guest retention.
+    """
+    return _unsafe(folder, [r.resolve() for r in roots], [], [], SURROGATE_ENTRIES)
 
 
 def _unsafe(

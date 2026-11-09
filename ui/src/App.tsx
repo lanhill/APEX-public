@@ -25,6 +25,7 @@ import { ApiContext, ErrorBox, PathsContext, useApi, WhoContext, type Who } from
 import { makePaths, NO_PATHS, type Paths } from "./paths";
 import { JobPage, JobsPage } from "./pages/Jobs";
 import { OptimizationPage, OptimizationsPage } from "./pages/Optimizations";
+import { SurrogatePage, SurrogatesPage } from "./pages/Surrogates";
 import { ExamplesPage } from "./pages/Examples";
 import { PluginsPage } from "./pages/Plugins";
 import { PredictionPage, StudiesPage, StudyPage } from "./pages/Results";
@@ -324,6 +325,7 @@ const NAV: { page: Route["page"]; label: string; also: Route["page"][] }[] = [
   { page: "studies", label: "Studies", also: ["study"] },
   { page: "prediction", label: "Predictions", also: [] },
   { page: "optimizations", label: "Optimizations", also: ["optimization"] },
+  { page: "surrogates", label: "Surrogates", also: ["surrogate"] },
   { page: "editor", label: "Editor", also: [] },
   { page: "examples", label: "Examples", also: [] },
   { page: "plugins", label: "Plugins", also: [] },
@@ -480,6 +482,10 @@ function Page({ route }: { route: Route }) {
       return <OptimizationsPage />;
     case "optimization":
       return <OptimizationPage key={route.path} path={route.path} />;
+    case "surrogates":
+      return <SurrogatesPage />;
+    case "surrogate":
+      return <SurrogatePage key={route.path} path={route.path} />;
     case "plugins":
       return <PluginsPage workflow={route.workflow} registry={route.registry} name={route.name} />;
     case "examples":

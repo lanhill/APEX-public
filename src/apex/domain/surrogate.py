@@ -1237,6 +1237,10 @@ class SurrogateBuildPlan(_Frozen):
     inputs: int = Field(description="Entries of the surrogate's inputs (after parameterizations).")
     output_dir: str
     warnings: list[str] = Field(default_factory=list)
+    identity: str | None = Field(
+        default=None,
+        description="What the build computes, as a digest (the service's approval names it; ).",
+    )
 
 
 class DomainSummary(_Frozen):

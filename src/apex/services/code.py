@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 #: The file whose ``JOB_PROTOCOL`` says which job protocol a commit speaks.
 PROTOCOL_FILE = "src/apex/storage/sqlite_store.py"
+#: The worker, whose branches say which job kinds a commit runs.
+WORKER_FILE = "src/apex/cli/worker.py"
 _PROTOCOL = re.compile(r"^JOB_PROTOCOL = (\d+)$", re.MULTILINE)
 _COMMIT = re.compile(r"^[0-9a-f]{12}$")
 
@@ -332,6 +334,36 @@ class CodeCopies:
                 f"commit {commit} speaks job protocol {found.group(1)}, this service "
                 f"{JOB_PROTOCOL}: its worker would misread the job records; pin a commit "
                 "with the same protocol"
+            )
+
+    def check_job_kind(self, commit: str, kind: str) -> None:
+        """Refuse a commit whose worker does not run jobs of ``kind``.
+
+        The job protocol does not change when a kind is added (no record changes meaning),
+        so a commit from before the kind would take the job and fail in its worker; it is
+        refused when the job is submitted instead, by reading the commit's worker.
+
+        Raises
+        ------
+        CodeError
+            If the commit's worker has no branch for ``kind``.
+        """
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(self.repository), "show", f"{commit}:{WORKER_FILE}"],
+                capture_output=True, text=True, check=False,
+            )  # fmt: skip
+        except OSError as error:  # git missing or not runnable
+            raise CodeError(f"cannot read commit {commit}'s worker: {error}") from error
+        if done.returncode != 0:
+            raise CodeError(
+                f"cannot read commit {commit}'s worker ({WORKER_FILE}): "
+                f"{done.stderr.strip() or 'git failed'}"
+            )
+        if f'"{kind}"' not in done.stdout:
+            raise CodeError(
+                f"commit {commit} cannot run {kind} jobs (its worker predates them): pin a "
+                "later commit, or run it on the frozen HEAD"
             )
 
     # ------------------------------------------------------------------ copies

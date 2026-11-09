@@ -208,6 +208,14 @@ class MonitorSection(_Strict):
     # A hypervolume more than 5% below its best under one penalty factor: the front lost
     # ground (crowding truncation causes small dips, which are normal).
     optimization_hypervolume_drop: float = Field(default=0.05, gt=0, lt=1)
+    # Surrogate builds: more than 5% of the design's full runs failed.
+    # The build itself refuses below [design] min_success_fraction (0.9 by default); between
+    # the two, the fit is made on fewer runs than planned and the failures may cluster in one
+    # region of the inputs (the domain then has a hole the surrogate extrapolates into).
+    surrogate_max_failed_share: float = Field(default=0.05, ge=0, lt=1)
+    # ... and a model that predicts a member less than 10 times faster than the median full
+    # run: it saves little over simulating, so a run with it gains little.
+    surrogate_min_speedup: float = Field(default=10.0, gt=0)
 
 
 class DiagnosisSection(_Strict):

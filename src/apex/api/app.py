@@ -59,6 +59,7 @@ from apex.domain.services import (
     Validation,
 )
 from apex.domain.study import StudySpec
+from apex.domain.surrogate import SurrogateBuildSummary
 from apex.services import policy
 from apex.services.access import UI_CLIENT
 from apex.services.api import ApexService, SchemaKind
@@ -193,6 +194,38 @@ class PredictionBody(_Body):
     code: CodeChoice = None
 
 
+class SurrogateBody(_Body):
+    """``POST /v1/surrogates``: a surrogate build."""
+
+    surrogate_file: str | None = None
+    config: dict[str, Any] | None = None
+    base_dir: str | None = None
+    max_runs: int | None = Field(default=None, ge=0)
+    annotations: dict[str, str] = Field(default_factory=dict)
+    priority: Priority = "normal"
+    client: str = "api"
+    approval_token: str | None = None
+    code: CodeChoice = None
+
+
+class SurrogateCheckBody(_Body):
+    """``POST /v1/surrogates:check``: a surrogate gated on new full runs."""
+
+    model_file: str
+    against: str
+    runs: int = Field(ge=1)
+    seed: int = Field(default=0, ge=0)
+    iteration: int | None = Field(default=None, ge=0)
+    min_success_fraction: float = Field(default=0.9, gt=0, le=1)
+    min_inside: float = Field(default=0.8, ge=0, le=1)
+    max_runs: int | None = Field(default=None, ge=0)
+    annotations: dict[str, str] = Field(default_factory=dict)
+    priority: Priority = "normal"
+    client: str = "api"
+    approval_token: str | None = None
+    code: CodeChoice = None
+
+
 class OptimizationBody(_Body):
     """``POST /v1/optimizations``."""
 
@@ -281,6 +314,8 @@ def _kind(path: Path) -> str:
         raise _Problem(422, "Unreadable configuration", str(error)) from error
     if "optimization" in document and "optimizer" in document:
         return "optimization"
+    if "surrogate" in document and "design" in document:
+        return "surrogate"  # a build; [surrogate] alone is a run's
     if "prediction" in document:  # wherever its table is: a run's configuration has none
         return "prediction"
     first = next(iter(document), "")
@@ -467,6 +502,18 @@ def _check_snapshot(who: Guard, record: Mapping[str, Any]) -> None:
     if not dirs:
         return
     run_dir = Path(dirs[0])
+    if record.get("kind") in ("surrogate_build", "surrogate_build_resume"):
+        # A build: its saved configuration and its case, as submitted.
+        from apex.domain.surrogate import SurrogateConfig
+
+        try:
+            build = SurrogateConfig.model_validate_json((run_dir / "config.json").read_text())
+        except (OSError, ValueError) as error:
+            raise _Problem(
+                422, "Cannot resume", "its saved configuration cannot be read"
+            ) from error
+        who.surrogate_config(build)
+        return
     try:
         if record.get("kind") in ("optimization", "optimization_resume"):
             from apex.storage.optimization_directory import read_config
@@ -612,6 +659,36 @@ def _toml_or_none(text: str) -> dict[str, Any] | None:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return None
+
+
+def _validated_surrogate(
+    who: Guard, service: ApexService, source: "Path | dict[str, Any]", base: Path | None
+) -> Validation:
+    """Validate a surrogate build as its submission would judge it.
+
+    For UI users the case is seen as visible before anything opens it (resolving the build
+    reads the case, and a policy's findings would show its values).
+    """
+    if who.ui:
+        from apex.domain.surrogate import SurrogateConfig
+        from apex.services import surrogates
+
+        try:
+            unplaced = (
+                surrogates.load_surrogate_config(source, place=False) if isinstance(source, Path)
+                else surrogates.resolve_surrogate_config(
+                    SurrogateConfig.model_validate(source), base or Path.cwd(), place=False
+                )
+            )  # fmt: skip
+        except (ApexError, ValueError) as error:
+            return Validation(valid=False, errors=[str(error)])
+        who.file(unplaced.case.config_file)
+        try:
+            resolved = service.resolve_surrogate_build(source, base)
+        except ApexError as error:
+            return Validation(valid=False, errors=[str(error)])
+        who.surrogate_config(resolved)
+    return service.validate_surrogate_build(source, base)
 
 
 def _text_configs(
@@ -780,6 +857,9 @@ def create_app(
             base_dir = who.server_path(body.base_dir)
             who.folder(base_dir)
             document = _toml_or_none(body.config_text)
+            if document is not None and "surrogate" in document and "design" in document:
+                return _scrubbed(who, service, _validated_surrogate(who, service, document,
+                                                                    base_dir))  # fmt: skip
             if document is not None and "prediction" in document:
                 return _scrubbed(who, service, _validated_prediction(
                     who, service, document, base_dir
@@ -804,6 +884,8 @@ def create_app(
             if not isinstance(source, Path):
                 raise Denied(403, "UI users validate files of the workspace (config_file)")
             who.file(source)
+            if _kind(source) == "surrogate":
+                return _scrubbed(who, service, _validated_surrogate(who, service, source, None))
             if _kind(source) == "prediction":
                 return _scrubbed(who, service, _validated_prediction(who, service, source, None))
             if _kind(source) == "optimization":
@@ -837,6 +919,8 @@ def create_app(
                 return service.validate_study(source)
             if _kind(source) == "optimization":
                 return service.validate_optimization(source)
+            if _kind(source) == "surrogate":
+                return service.validate_surrogate_build(source)
             return service.validate(source, **as_submitted)
         if "study" in source:
             try:
@@ -850,6 +934,8 @@ def create_app(
             return service.validate_study(given, base_dir=base)
         if "optimization" in source and "optimizer" in source:
             return service.validate_optimization(source, base_dir=base)
+        if "surrogate" in source and "design" in source:
+            return service.validate_surrogate_build(source, base_dir=base)
         if "prediction" in source:  # a run's configuration has no [prediction]
             return service.validate_prediction(source, base)
         return service.validate(source, base_dir=base, **as_submitted)
@@ -1211,6 +1297,102 @@ def create_app(
         who.optimization(where)
         return service.optimization_summary(where)
 
+    # ------------------------------------------------------------ surrogates
+
+    @app.post("/v1/surrogates", status_code=202, response_model=JobHandle)
+    def submit_surrogate(body: SurrogateBody, who: Who) -> JSONResponse:
+        if body.surrogate_file:
+            source: Path | dict[str, Any] = who.server_path(body.surrogate_file)
+        elif body.config is not None:
+            source = body.config
+        else:
+            raise _Problem(422, "Missing surrogate build", "give surrogate_file or config")
+        base = who.optional_path(body.base_dir)
+        folder = who.ui_folder(body.client)
+        if who.ui:
+            who.action("submit")
+            if not isinstance(source, Path):
+                raise Denied(403, "UI users submit files of the workspace (surrogate_file)")
+            who.file(source)
+            # The case is opened when the build is resolved: seen first, so that no error
+            # describes a file in a folder the user cannot see.
+            from apex.services.surrogates import load_surrogate_config
+
+            unplaced = load_surrogate_config(source, place=False)
+            if unplaced.surrogate.output_dir is not None:
+                raise Denied(403, "web-UI surrogate builds are placed by the service in your "
+                             "own folder: leave [surrogate] output_dir out")  # fmt: skip
+            who.file(unplaced.case.config_file)
+        resolved = service.resolve_surrogate_build(source, base)
+        if who.ui:
+            who.surrogate_config(resolved)  # read once: checked as submitted
+        if folder is not None:
+            # Web-UI submissions write in the user's own folder, placed as the
+            # service places them: surrogates/<name>/<id> (decision 2).
+            # Always the service's placement, never a folder the user names (even their own):
+            # a build's folder is deleted whole with it, and retention prunes it.
+            section = resolved.surrogate
+            placed = service.root / "surrogates" / section.name
+            output = section.output_dir
+            if output is None or output.resolve().parent != placed.resolve():
+                raise Denied(403, "web-UI surrogate builds are placed by the service in your "
+                             "own folder: leave [surrogate] output_dir out")  # fmt: skip
+            moved = folder / "surrogates" / section.name / output.name
+            resolved = resolved.model_copy(
+                update={"surrogate": section.model_copy(update={"output_dir": moved})}
+            )
+        return accepted(
+            service.submit_surrogate_build(
+                resolved, max_runs=body.max_runs,
+                annotations=who.annotations(body.annotations), priority=body.priority,
+                client=who.client(body.client), approval_token=body.approval_token,
+                code=who.code(body.code),
+            )
+        )  # fmt: skip
+
+    @app.post("/v1/surrogates:check", status_code=202, response_model=JobHandle)
+    def check_surrogate(body: SurrogateCheckBody, who: Who) -> JSONResponse:
+        from apex.services.surrogates import checks_folder
+
+        model_file = who.server_path(body.model_file)
+        against = who.server_path(body.against)
+        folder = who.ui_folder(body.client)
+        if who.ui:
+            who.action("submit")
+            who.file(model_file)
+            who.file(against)
+            if against.is_dir():
+                # A run's posterior is drawn: only a run this user may see (as a prediction).
+                who.prediction(against, what="run")
+        if folder is not None and not checks_folder(model_file).resolve().is_relative_to(
+            folder.resolve()
+        ):
+            # A check writes its verdict beside the model, and the last verdict decides
+            # whether runs may use it: only a model of the user's own folder.
+            raise Denied(403, "web-UI users check models of their own folder")
+        if who.ui:
+            who.surrogate_check(model_file, service.surrogate_check_case(against))
+        return accepted(
+            service.submit_surrogate_check(
+                model_file, against, runs=body.runs, seed=body.seed, iteration=body.iteration,
+                min_success_fraction=body.min_success_fraction, min_inside=body.min_inside,
+                max_runs=body.max_runs, annotations=who.annotations(body.annotations),
+                priority=body.priority, client=who.client(body.client),
+                approval_token=body.approval_token, code=who.code(body.code),
+            )
+        )  # fmt: skip
+
+    @app.get("/v1/surrogates")
+    def surrogates(who: Who) -> list[dict[str, Any]]:
+        visible = who.visible_jobs()
+        return [r for r in service.surrogates() if visible is None or r["job"] in visible]
+
+    @app.get("/v1/surrogates/summary")
+    def surrogate_summary(path: str, who: Who) -> SurrogateBuildSummary:
+        where = who.server_path(path)
+        who.surrogate(where)
+        return service.surrogate_summary(where)
+
     # ------------------------------------------------------------------ workspace
 
     # ------------------------------------------------------------------ examples
@@ -1501,6 +1683,10 @@ class AgentRunBody(_Body):
         default=None,
         description="An optimization's directory (from GET /v1/optimizations; monitor and report).",
     )
+    surrogate: str | None = Field(
+        default=None,
+        description="A surrogate build's directory (from GET /v1/surrogates; monitor and report).",
+    )
     model: bool = Field(
         default=False,
         description="Ask the model of [agents.llm] (slower), not only the agent's rules.",
@@ -1606,6 +1792,18 @@ def _agent_routes(
         """Return the run monitor's report on a run (advisory: it never stops anything)."""
         from apex.agents.monitor import RunMonitor
 
+        if sum(x is not None for x in (body.run, body.optimization, body.surrogate)) > 1:
+            raise _Problem(422, "Several targets", "give one of run, optimization or surrogate")
+        if body.surrogate is not None:
+            from apex.agents.surrogate import SurrogateMonitor
+
+            who.surrogate(who.server_path(body.surrogate))
+            chosen, settings, note = model_for(who, "monitor", body.model)
+            build = SurrogateMonitor(service, chosen, settings=settings).check(
+                who.server_path(body.surrogate)
+            )
+            return {"report": build.report.model_dump(mode="json"),
+                    "decided_by": build.decided_by, "reason": note or build.reason}  # fmt: skip
         if body.optimization is not None:
             from apex.agents.optimization import OptimizationMonitor
 
@@ -1648,9 +1846,12 @@ def _agent_routes(
         """Return the narrative report of a run or a study (Markdown; numbers checked)."""
         from apex.agents.reporter import Reporter
 
-        given = [x for x in (body.run, body.study, body.optimization) if x is not None]
+        targets = (body.run, body.study, body.optimization, body.surrogate)
+        given = [x for x in targets if x is not None]
         if len(given) != 1:
-            raise _Problem(422, "Missing target", "give one of run, study or optimization")
+            raise _Problem(
+                422, "Missing target", "give one of run, study, optimization or surrogate"
+            )
         chosen, settings, note = model_for(who, "report", body.model)
         reporter = Reporter(service, chosen, settings=settings)
         if body.optimization is not None:
@@ -1658,6 +1859,11 @@ def _agent_routes(
 
             who.optimization(who.server_path(body.optimization))
             result = optimization_report(service, chosen, who.server_path(body.optimization))
+        elif body.surrogate is not None:
+            from apex.agents.surrogate import surrogate_report
+
+            who.surrogate(who.server_path(body.surrogate))
+            result = surrogate_report(service, chosen, who.server_path(body.surrogate))
         elif body.study is not None:
             who.study(body.study)
             result = reporter.study_report(body.study)

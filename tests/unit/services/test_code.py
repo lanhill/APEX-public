@@ -119,6 +119,27 @@ def test_a_commit_of_another_job_protocol_cannot_be_pinned(
     assert not sync.calls
 
 
+def test_a_commit_whose_worker_lacks_a_job_kind_is_refused_for_it(tmp_path: Path) -> None:
+    """Decision 5: a new kind keeps the job protocol, so a commit from
+    before it is refused for that kind when the job is submitted, by its worker's text."""
+    repo = make_repository(tmp_path / "repo")
+    code = CodeCopies(tmp_path / "code", repo, sync=StubSync())
+    worker = repo / "src" / "apex" / "cli" / "worker.py"
+    worker.parent.mkdir(parents=True)
+    worker.write_text('if kind == "run":\n    pass\n')
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "worker")
+    old = code.resolve("HEAD")
+    code.check_job_kind(old, "run")
+    with pytest.raises(CodeError, match="cannot run surrogate_build jobs"):
+        code.check_job_kind(old, "surrogate_build")
+    worker.write_text('if kind == "run":\n    pass\nelif kind in ("surrogate_build",):\n    pass\n')
+    _git(repo, "commit", "-q", "-am", "surrogates")
+    code.check_job_kind(code.resolve("HEAD"), "surrogate_build")
+    with pytest.raises(CodeError, match="cannot read commit"):  # a commit with no worker
+        code.check_job_kind(code.resolve("HEAD~2"), "run")
+
+
 def test_a_ref_that_looks_like_an_option_is_refused(copies: tuple[CodeCopies, StubSync]) -> None:
     code, _ = copies
     with pytest.raises(CodeError, match="not a commit"):

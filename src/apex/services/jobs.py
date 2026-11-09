@@ -512,7 +512,9 @@ class LocalJobRunner:
             # whichever process runs the run: not written while another process holds it,
             # which a job waiting for that lock would otherwise stop.
             self.log_event(job_id, "job_stop_requested")
-            for run_dir in record["run_dirs"]:
+            # A surrogate check reads its job's stop only: its folder is the model's checks/,
+            # shared by every check of the model.
+            for run_dir in [] if record["kind"] == "surrogate_check" else record["run_dirs"]:
                 if not held_by_another(Path(run_dir), record.get("pid")):
                     RunDirectory(Path(run_dir)).request_stop(by=f"job {job_id}")
         self.schedule()

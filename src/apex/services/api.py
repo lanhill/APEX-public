@@ -8,6 +8,7 @@ Its root (``$APEX_HOME``, else ``~/.apex/service``) holds the run catalogue, the
 and the runs of studies and of configurations submitted without an output directory.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from apex.domain.optimization_study import OptimizationStudySpec
     from apex.domain.services import Comparison, OptimizationSummary
     from apex.domain.study import StudySpec
+    from apex.domain.surrogate import SurrogateBuildSummary, SurrogateConfig
     from apex.services.study import ApprovalHook
     from apex.services.workspace import Workspace
 from apex.services.access import SUBMITTED_BY
@@ -63,6 +65,10 @@ from apex.storage.run_results import RunResults
 from apex.storage.sqlite_store import JOB_PROTOCOL
 
 logger = logging.getLogger(__name__)
+
+#: The job kinds of surrogate builds and checks.
+SURROGATE_BUILD_KINDS = ("surrogate_build", "surrogate_build_resume")
+SURROGATE_KINDS = (*SURROGATE_BUILD_KINDS, "surrogate_check")
 
 
 def default_root() -> Path:
@@ -706,9 +712,12 @@ class ApexService:
         return JobHandle(id=job, kind="resume", run_ids=[identity], reused=True)
 
     def _jobs_of(self, run_dir: Path) -> list[dict[str, Any]]:
-        """Return the jobs that ran (or reused) ``run_dir``, oldest first."""
-        where = str(run_dir)
-        return [r for r in self.jobs.all_records() if where in r["run_dirs"]]
+        """Return the jobs that ran (or reused) ``run_dir``, oldest first (paths resolved)."""
+        given, where = str(run_dir), Path(run_dir).resolve()
+        return [
+            r for r in self.jobs.all_records()
+            if any(d == given or Path(d).resolve() == where for d in r["run_dirs"])
+        ]  # fmt: skip
 
     def _resume_pin(
         self, code: str | None, run_dir: Path, records: Sequence[dict[str, Any]]
@@ -857,6 +866,13 @@ class ApexService:
         record = self.jobs.record(job)
         if record["kind"] in ("optimization", "optimization_resume"):
             return self._resume_optimization(record, max_steps, code)
+        if record["kind"] == "surrogate_check":
+            raise ConfigError(
+                f"job {job} is a surrogate check: a stopped check is not resumed, submit it again"
+            )
+        if record["kind"] in SURROGATE_BUILD_KINDS:
+            return self.resume_surrogate_build(Path(record["run_dirs"][0]), max_runs=max_steps,
+                                               code=code, record=record)  # fmt: skip
         if record["kind"] not in ("run", "resume") or not record["run_dirs"]:
             raise ConfigError(f"job {job} is not a history-matching run")
         rules = self.jobs.settings.policy
@@ -916,7 +932,7 @@ class ApexService:
         """
         path = Path(run_dir).resolve()
         for record in reversed(self.jobs.all_records()):
-            if record["kind"] in ("prediction", "study") or path not in {
+            if record["kind"] in ("prediction", "study", "surrogate_check") or path not in {
                 Path(d).resolve() for d in record["run_dirs"]
             }:
                 continue
@@ -926,6 +942,13 @@ class ApexService:
                 )
             return self.resume(record["id"], max_steps=max_steps, code=code)
         rules = self.jobs.settings.policy
+        from apex.storage.surrogate_directory import SurrogateDirectory
+
+        if SurrogateDirectory.holds_build(path):
+            # A surrogate build started by apex surrogate build; its
+            # folder has a state.json too, of another kind.
+            return self.resume_surrogate_build(path, max_runs=max_steps, code=code,
+                                               priority=priority, client=client)  # fmt: skip
         if not (path / "state.json").exists():
             if (path / opt_layout.CHECKPOINT_VALUES).exists():
                 # An optimization started by apex optimize.
@@ -937,7 +960,7 @@ class ApexService:
                     code=self._resume_pin(code, path, []),
                 )  # fmt: skip
                 return JobHandle(id=job, kind="optimization_resume")
-            raise ConfigError(f"{path} holds no run or optimization to resume")
+            raise ConfigError(f"{path} holds no run, optimization or surrogate build to resume")
         policy.check_source(path, rules, self.root)
         snapshot = composition.snapshot_config(RunDirectory(path))
         if policy.active(rules):
@@ -1137,6 +1160,404 @@ class ApexService:
 
         policy.check_source(path, self.jobs.settings.policy, self.root)
         return opt.optimization_summary(path)
+
+    # ------------------------------------------------------------ surrogates
+
+    def _surrogate_identity(self, resolved: "SurrogateConfig") -> str:
+        """Return what a build computes, as a digest (placement and approval name it).
+
+        Its configuration, its case's own id (its inputs by content, not its output
+        folders), the case's deck folder and the code (``identity.surrogate_build_id``).
+        """
+        from apex.services import surrogates
+        from apex.services.identity import optimization_id, surrogate_build_id
+
+        try:
+            case = surrogates.case_config(resolved.case.config_file)
+        except ConfigError:
+            # Validation names the case; the build's id is then its file's content only.
+            return surrogate_build_id(resolved)
+        found = None if case.simulator is None else case.simulator.options.get(
+            "deck_template_file"
+        )  # fmt: skip
+        # The case by its own id: its inputs by content, not its output folders (a run of
+        # the case that is going, or done, must not change the build's id).
+        case_id = optimization_id(case) if isinstance(case, OptimizationConfig) else run_id(case)
+        return surrogate_build_id(resolved, None if found is None else Path(str(found)), case_id)
+
+    def resolve_surrogate_build(
+        self, config: "SurrogateConfig | Mapping[str, Any] | Path", base_dir: Path | None = None
+    ) -> "SurrogateConfig":
+        """Resolve a surrogate build's configuration and place it, policy-checked.
+
+        An unset ``[surrogate] output_dir`` becomes ``<root>/surrogates/<name>/<id>``
+        (decision 2): an identical build finds its folder again.
+
+        Raises
+        ------
+        ConfigError
+            If it is invalid.
+        PolicyViolation
+            If it breaks the service's ``[policy]``.
+        """
+        return self._resolve_build(config, base_dir)[0]
+
+    def _resolve_build(
+        self, config: "SurrogateConfig | Mapping[str, Any] | Path", base_dir: Path | None
+    ) -> "tuple[SurrogateConfig, str]":
+        """Return the resolved, placed build and its identity, computed once (it hashes)."""
+        from apex.domain.surrogate import SurrogateConfig
+        from apex.services import surrogates
+        from apex.storage.surrogate_directory import SERVICE_FOLDER
+
+        rules = self.jobs.settings.policy
+        if isinstance(config, Path):
+            policy.check_file(config, rules, self.root)
+            resolved = surrogates.load_surrogate_config(config, place=False)
+        else:
+            try:
+                parsed = (
+                    config if isinstance(config, SurrogateConfig)
+                    else SurrogateConfig.model_validate(dict(config))
+                )  # fmt: skip
+            except ValueError as error:
+                raise ConfigError(f"invalid surrogate configuration: {error}") from error
+            resolved = surrogates.resolve_surrogate_config(
+                parsed, base_dir or Path.cwd(), place=False
+            )
+        identity = self._surrogate_identity(resolved)  # the name and place do not count
+        if resolved.surrogate.output_dir is None:
+            place = self.root / SERVICE_FOLDER / resolved.surrogate.name / identity[:12]
+            resolved = resolved.model_copy(update={"surrogate": resolved.surrogate.model_copy(
+                update={"output_dir": place})})  # fmt: skip
+        policy.check(resolved, rules, self.root)
+        return resolved, identity
+
+    def validate_surrogate_build(
+        self, config: "SurrogateConfig | Mapping[str, Any] | Path", base_dir: Path | None = None
+    ) -> Validation:
+        """Validate a surrogate build and plan its simulator runs; nothing is simulated.
+
+        The plan's ``identity`` is what an approval of the build names.
+        """
+        from apex.services import surrogates
+        from apex.services.plugins import unavailable_errors
+
+        try:
+            resolved, identity = self._resolve_build(config, base_dir)
+        except (ApexError, ValueError, TypeError) as error:
+            return Validation(valid=False, errors=[str(error)])
+        missing = unavailable_errors("surrogate_models", resolved.surrogate.model)
+        if missing:
+            return Validation(valid=False, errors=missing)
+        try:
+            plan = surrogates.plan_build(resolved)
+        except (ApexError, ValueError, TypeError) as error:
+            return Validation(valid=False, errors=[str(error)])
+        plan = plan.model_copy(update={"identity": identity})
+        return Validation(valid=True, surrogate=plan)
+
+    def _surrogate_reservation(
+        self, case: HistoryMatchConfig | OptimizationConfig, execution: PluginSection | None
+    ) -> dict[str, int]:
+        """Return a build's or check's reservation: its simulator at its executor's width.
+
+        ``execution`` is the build's own ``[execution]`` (``None``: the case's), as the
+        build composes its stack.
+        """
+        if case.simulator is None:
+            return {}
+        workers = (execution or case.execution).options.get("workers")
+        return self._reservation(case.simulator, int(workers) if isinstance(workers, int) else None)
+
+    def _pin_for(
+        self, kind: str, code: str | None, resume_of: Path | None = None
+    ) -> dict[str, str] | None:
+        """Pin a job's code, refusing a commit whose worker cannot run ``kind`` (decision 5).
+
+        A resume (``resume_of``, its folder) naming no code keeps its last job's pin, as a
+        run's or an optimization's does: never a mix of versions.
+        """
+        if resume_of is None:
+            pin = self.pin_code(code)
+        else:
+            # "frozen" (the CLI's default) means the build's own code: its last job's pin,
+            # which a build's folder cannot tell otherwise (no start commit is recorded).
+            records = self._jobs_of(resume_of)
+            pin = self._resume_pin(None if code == "frozen" else code, resume_of, records)
+            if pin is None and code == "frozen":
+                pin = self.pin_code(code, resume_of)
+        if pin is not None:
+            try:
+                self.code.check_job_kind(pin["commit"], kind)
+            except CodeError as error:
+                raise ConfigError(str(error)) from error
+        return pin
+
+    def submit_surrogate_build(
+        self,
+        config: "SurrogateConfig | Mapping[str, Any] | Path",
+        *,
+        base_dir: Path | None = None,
+        max_runs: int | None = None,
+        annotations: Annotations | None = None,
+        after: Sequence[str] = (),
+        parent: str | None = None,
+        priority: str = "normal",
+        client: str = "user",
+        approve: "Callable[[dict[str, Any]], bool] | None" = None,
+        approval_token: str | None = None,
+        approved: bool = False,
+        code: str | None = None,
+    ) -> JobHandle:
+        """Build a surrogate in the background; approved by its runs.
+
+        The approval names the build's identity (its content), whatever its folder. A build
+        of this folder still queued or running is returned as it is (``reused``); a complete
+        one runs nothing more (at most a refit), so it needs no approval.
+
+        Raises
+        ------
+        ConfigError
+            If the configuration is invalid, or the pinned code cannot run the job.
+        ApprovalRequired
+            If its simulator runs need a person's approval first.
+        """
+        from apex.services import surrogates
+
+        resolved, identity = self._resolve_build(config, base_dir)
+        plan = surrogates.plan_build(resolved)
+        assert resolved.surrogate.output_dir is not None  # placed above
+        folder = resolved.surrogate.output_dir
+        build_id = folder.name
+        for record in reversed(self._jobs_of(folder)):
+            if record["state"] not in FINAL and record["kind"] in SURROGATE_BUILD_KINDS:
+                given = record["spec"].get("config")
+                if given is None:  # a resume: the folder's own configuration
+                    try:
+                        given = (folder / "config.json").read_text()
+                    except OSError:
+                        given = None
+                if given is not None and json.loads(given) != json.loads(
+                    resolved.model_dump_json()
+                ):
+                    raise ConfigError(
+                        f"job {record['id']} is building {folder} with another configuration: "
+                        "wait for it or stop it, or give this build another output_dir"
+                    )
+                return JobHandle(id=record["id"], kind=record["kind"],
+                                 run_ids=record["run_ids"], reused=True)  # fmt: skip
+        complete = _surrogate_complete(folder)
+        if not approved and not complete:
+            self.gate([identity], plan.simulator_runs,
+                      approve=approve, approval_token=approval_token, client=client,
+                      annotations=annotations)  # fmt: skip
+        case = surrogates.case_config(resolved.case.config_file)
+        job = self.jobs.submit(
+            "surrogate_build",
+            {"config": resolved.model_dump_json(), "max_runs": max_runs},
+            run_ids=[build_id],
+            run_dirs=[str(folder)],
+            annotations=annotations,
+            after=after,
+            parent=parent,
+            priority=priority,
+            client=client,
+            reservation=self._surrogate_reservation(case, resolved.execution),
+            planned_runs=0 if complete else plan.simulator_runs,
+            code=self._pin_for("surrogate_build", code),
+        )
+        return JobHandle(id=job, kind="surrogate_build", run_ids=[build_id])
+
+    def resume_surrogate_build(
+        self,
+        build_dir: Path,
+        *,
+        max_runs: int | None = None,
+        code: str | None = None,
+        priority: str | None = None,
+        client: str = "user",
+        record: dict[str, Any] | None = None,
+    ) -> JobHandle:
+        """Continue a stopped surrogate build (its finished members kept) on its own code.
+
+        Raises
+        ------
+        ConfigError
+            If ``build_dir`` holds no build.
+        """
+        from apex.domain.surrogate import SurrogateConfig
+        from apex.services import surrogates
+        from apex.storage.surrogate_directory import SurrogateDirectory
+
+        build_dir = Path(build_dir)
+        rules = self.jobs.settings.policy
+        policy.check_source(build_dir, rules, self.root)
+        if not SurrogateDirectory.holds_build(build_dir):
+            raise ConfigError(f"{build_dir} holds no surrogate build")
+        stored = SurrogateConfig.model_validate_json((build_dir / "config.json").read_text())
+        policy.check(stored, rules, self.root)
+        record = record or {}
+        reservation = record.get("reservation")
+        if reservation is None:
+            case = surrogates.case_config(stored.case.config_file)
+            reservation = self._surrogate_reservation(case, stored.execution)
+        run_ids = record.get("run_ids") or [build_dir.name]
+        # What is left of the design (its fine and coarse runs made): charged as runs and
+        # optimizations are, not gated (a resume never is).
+        try:
+            total = surrogates.plan_build(stored).simulator_runs
+            done = len(SurrogateDirectory(build_dir).journal())
+            if (build_dir / "coarse").is_dir():
+                done += len(SurrogateDirectory(build_dir / "coarse").journal())
+            planned = max(total - done, 0)
+            if max_runs is not None:
+                planned = min(planned, max_runs)  # a resume runs at most max_runs now
+        except (ConfigError, OSError, ValueError):
+            planned = 0
+        new = self.jobs.submit(
+            "surrogate_build_resume",
+            {"build_dir": str(build_dir), "max_runs": max_runs},
+            run_ids=run_ids,
+            run_dirs=[str(build_dir)],
+            annotations=record.get("annotations"),
+            priority=priority or record.get("priority", "normal"),
+            client=record.get("client", client),
+            reservation=reservation,
+            planned_runs=planned,
+            code=self._pin_for("surrogate_build_resume", code, resume_of=build_dir),
+        )
+        return JobHandle(id=new, kind="surrogate_build_resume", run_ids=run_ids)
+
+    def _case_id(self, path: Path) -> str:
+        """Return a case configuration's own id (its inputs by content), else its file's hash."""
+        from apex.services import surrogates
+        from apex.services.identity import optimization_id
+        from apex.storage.provenance import file_hash
+
+        try:
+            case = surrogates.case_config(path)
+        except ConfigError:
+            return file_hash(path)
+        return optimization_id(case) if isinstance(case, OptimizationConfig) else run_id(case)
+
+    def surrogate_check_case(self, against: Path) -> HistoryMatchConfig | OptimizationConfig:
+        """Return the case a check runs: a run's snapshot, or a configuration (either kind).
+
+        Raises
+        ------
+        ConfigError
+            If it cannot be read.
+        """
+        from apex.services import surrogates
+
+        against = Path(against)
+        if against.is_dir():
+            return composition.snapshot_config(RunDirectory(against))
+        return surrogates.case_config(against)
+
+    def submit_surrogate_check(
+        self,
+        model_file: Path,
+        against: Path,
+        *,
+        runs: int,
+        seed: int = 0,
+        iteration: int | None = None,
+        min_success_fraction: float = 0.9,
+        min_inside: float = 0.8,
+        max_runs: int | None = None,
+        annotations: Annotations | None = None,
+        priority: str = "normal",
+        client: str = "user",
+        approve: "Callable[[dict[str, Any]], bool] | None" = None,
+        approval_token: str | None = None,
+        approved: bool = False,
+        code: str | None = None,
+    ) -> JobHandle:
+        """Gate a surrogate on new full runs in the background (``apex surrogate check``).
+
+        ``against`` is a history-matching or optimization configuration, or a run, as for
+        the CLI. The approval names the check itself: the model's content, ``against`` and
+        the draw (``runs``, ``seed``, ``iteration``).
+
+        Raises
+        ------
+        ConfigError
+            If the model or ``against`` cannot be read, or ``runs`` is below 1.
+        ApprovalRequired
+            If its runs need a person's approval first.
+        """
+        from apex.domain.surrogate import SurrogateManifest
+        from apex.services.surrogates import checks_folder
+        from apex.storage.provenance import file_hash
+
+        model_file, against = Path(model_file).absolute(), Path(against).absolute()
+        if runs < 1:
+            raise ConfigError("a check needs at least one run")
+        spec = {"model_file": str(model_file), "against": str(against), "runs": runs,
+                "seed": seed, "iteration": iteration,
+                "min_success_fraction": min_success_fraction, "min_inside": min_inside,
+                "max_runs": max_runs}  # fmt: skip
+        policy.check_surrogate_check(spec, self.jobs.settings.policy, self.root)
+        try:
+            manifest = SurrogateManifest.model_validate_json(model_file.read_bytes())
+        except (OSError, ValueError) as error:
+            raise ConfigError(f"cannot read the surrogate {model_file}: {error}") from error
+        planned = runs * (2 if manifest.coarse is not None else 1)
+        from apex.services.identity import design_run
+
+        # What it is checked against by content: a configuration's file, or a run's
+        # snapshot and iterates (an edited case is another check).
+        source = design_run(against) if against.is_dir() else self._case_id(against)
+        what = json.dumps({"model": file_hash(model_file), "against": source,
+                           "runs": runs, "seed": seed, "iteration": iteration},
+                          sort_keys=True)  # fmt: skip
+        identity = "surrogate-check:" + hashlib.sha256(what.encode()).hexdigest()
+        check_id = f"check-{identity[-12:]}"
+        if not approved:
+            self.gate([identity], planned, approve=approve, approval_token=approval_token,
+                      client=client, annotations=annotations)  # fmt: skip
+        case = self.surrogate_check_case(against)
+        job = self.jobs.submit(
+            "surrogate_check",
+            spec,
+            run_ids=[check_id],
+            # Where its verdict goes (a build's checks/, or checks/ beside a copied model): a
+            # stop request lands there, never in a folder the check does not write.
+            run_dirs=[str(checks_folder(model_file))],
+            annotations=annotations,
+            priority=priority,
+            client=client,
+            reservation=self._surrogate_reservation(case, None),
+            planned_runs=planned,
+            code=self._pin_for("surrogate_check", code),
+        )
+        return JobHandle(id=job, kind="surrogate_check", run_ids=[check_id])
+
+    def surrogates(self) -> list[dict[str, Any]]:
+        """Return the surrogate jobs: id, kind, state, folder and times."""
+        return [
+            {
+                "job": record["id"],
+                "kind": record["kind"],
+                "state": record["state"],
+                "path": (record.get("run_dirs") or [None])[0],
+                "created": record.get("created"),
+                "finished": record.get("finished"),
+                "client": record.get("client"),
+                "annotations": record.get("annotations") or {},
+            }
+            for record in self.jobs.all_records()
+            if record["kind"] in SURROGATE_KINDS
+        ]
+
+    def surrogate_summary(self, path: Path) -> "SurrogateBuildSummary":
+        """Return a surrogate build's summary: its runs, gate and verdict."""
+        from apex.services import surrogates
+
+        policy.check_source(path, self.jobs.settings.policy, self.root)
+        return surrogates.build_summary(path)
 
     def wait(self, job: str, *, timeout_s: float | None = None, poll_s: float = 1.0) -> JobStatus:
         """Block until a job ends (for scripts and tests); return its final status."""
@@ -1412,6 +1833,8 @@ class ApexService:
             return self.validate_study(spec, base_dir=base_dir)
         if "optimization" in document and "optimizer" in document:
             return self.validate_optimization(document, base_dir)
+        if "surrogate" in document and "design" in document:
+            return self.validate_surrogate_build(document, base_dir)
         return self.validate(document, base_dir=base_dir, check_output=check_output,
                              place_in=place_in, annotations=annotations)  # fmt: skip
 
@@ -1438,6 +1861,16 @@ def _made_with(records: list[dict[str, Any]], identity: str) -> str | None:
             continue
         return str((record.get("code") or {}).get("commit") or "live checkout")
     return None
+
+
+def _surrogate_complete(folder: Path) -> bool:
+    """Whether ``folder`` holds a complete surrogate build (nothing more to simulate)."""
+    from apex.storage.surrogate_directory import SUMMARY
+
+    try:
+        return bool(json.loads((folder / SUMMARY).read_text()).get("status") == "complete")
+    except (OSError, ValueError):
+        return False
 
 
 def _complete(path: Path) -> bool:

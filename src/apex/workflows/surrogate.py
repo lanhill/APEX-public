@@ -97,17 +97,21 @@ class MembersOutcome:
         ``{member: message}`` of every failed member.
     pending
         Members not run yet (a run budget stopped the step).
+    stopped
+        Whether a stop ended the step before what follows it (an adaptive design's next
+        fit and batch), even with no member pending.
     """
 
     values: Mapping[int, NDArray[np.float64]]
     seconds: Mapping[int, float]
     failed: Mapping[int, str]
     pending: tuple[int, ...]
+    stopped: bool = False
 
     @property
     def complete(self) -> bool:
-        """Whether every member ran."""
-        return not self.pending
+        """Whether every member ran, and the step was not stopped."""
+        return not self.pending and not self.stopped
 
 
 def run_members(
@@ -121,6 +125,7 @@ def run_members(
     keep_simulations: str = "failed",
     max_runs: int | None = None,
     progress: ProgressReporter | None = None,
+    stopped: Callable[[], bool] | None = None,
 ) -> MembersOutcome:
     """Run the members not finished yet; return every member's outcome.
 
@@ -130,6 +135,13 @@ def run_members(
         ``(member_id, {variable: (size,)})`` in state space, in the order they run.
     max_runs
         Run at most this many members now (``None``: all); the others stay pending.
+    stopped
+        Whether the build was asked to stop (a job's stop decision 4):
+        given, the members run in waves (:data:`WAVE_WIDTHS` times the executor's parallel
+        width, :func:`parallel_width`; one batch when it is unknown) and the check is made
+        before each; once true, the rest stay pending. Members
+        are independent and journalled by id, so waves change nothing a member computes.
+        ``None`` (the CLI): one batch.
     """
     reporter: ProgressReporter = GuardedProgress(NullProgress() if progress is None else progress)
     journal = directory.journal()
@@ -149,7 +161,78 @@ def run_members(
         else:
             missing.append((member_id, state))
     now = missing if max_runs is None else missing[: max(max_runs, 0)]
-    pending = tuple(m for m, _ in missing[len(now) :])
+    width = None if stopped is None else parallel_width(executor, simulator)
+    if width is None:
+        # The CLI, or an executor that does not say its width (as the
+        # user approved): one batch, the stop checked before it only. Narrow waves there
+        # could leave its capacity idle.
+        waves = [now] if now else []
+    else:
+        size = WAVE_WIDTHS * width
+        waves = [now[i : i + size] for i in range(0, len(now), size)]
+    ran = 0
+    for wave in waves:
+        if stopped is not None and stopped():
+            logger.info(
+                "design members stopped",
+                extra={"event": "surrogate_members_stopped", "label": label,
+                       "pending": len(missing) - ran},
+            )  # fmt: skip
+            break
+        _run_wave(directory, simulator, executor, wave, keys, label=label,
+                  keep_simulations=keep_simulations, reporter=reporter, values=values,
+                  seconds=seconds, failed=failed,
+                  pending=len(missing) - ran - len(wave))  # fmt: skip
+        ran += len(wave)
+    pending = tuple(m for m, _ in missing[ran:])
+    return MembersOutcome(values, seconds, failed, pending)
+
+
+def parallel_width(executor: Executor, simulator: object = None) -> int | None:
+    """Return how many members an executor runs at once, if it says (``None``: unknown).
+
+    Its ``parallel_width`` (an optional capability: a number, or a method of the simulator,
+    as the ssh executor's, whose width is its hosts' slots over a member's threads), else
+    its ``workers`` (the local executors'), capped by the simulator's ``max_parallel_runs``
+    (an Eclipse licence count), as the executor caps its pool.
+    """
+    width = None
+    for name in ("parallel_width", "workers"):
+        value = getattr(executor, name, None)
+        if callable(value):
+            value = value(simulator)
+        if isinstance(value, int) and value > 0:
+            width = value
+            break
+    cap = getattr(simulator, "max_parallel_runs", None)
+    if width is not None and isinstance(cap, int) and cap > 0:
+        width = min(width, cap)
+    return width
+
+
+#: A stoppable set of runs goes in waves of this many times the executor's parallel width:
+#: wider waves keep the executor busy past slow members, narrower ones stop sooner. Each
+#: wave is one ``run_all`` (a process pool started per wave, waiting for its slowest
+#: member): a modest cost against one batch, the price of stopping within a design.
+WAVE_WIDTHS = 4
+
+
+def _run_wave(
+    directory: SurrogateDirectory,
+    simulator: Simulator,
+    executor: Executor,
+    now: Sequence[tuple[int, Mapping[str, NDArray[np.float64]]]],
+    keys: Sequence[DataKey],
+    *,
+    label: str,
+    keep_simulations: str,
+    reporter: ProgressReporter,
+    values: dict[int, NDArray[np.float64]],
+    seconds: dict[int, float],
+    failed: dict[int, str],
+    pending: int,
+) -> None:
+    """Run ``now``'s members as one batch, recording each outcome in the three maps."""
     if now:
         wrapped = _Journalled(simulator, directory)
         needs_dir = bool(getattr(simulator, "needs_work_dir", False))
@@ -198,9 +281,8 @@ def run_members(
         logger.info(
             "design members run",
             extra={"event": "surrogate_members", "label": label, "ran": len(inputs),
-                   "failed": n_failed, "pending": len(pending)},
+                   "failed": n_failed, "pending": pending},
         )  # fmt: skip
-    return MembersOutcome(values, seconds, failed, pending)
 
 
 def check_success(label: str, total: int, failed: int, min_success_fraction: float) -> None:

@@ -33,6 +33,7 @@ import apex
 from apex.core.service_files import is_service_file, service_roots
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.optimization import OptimizationConfig
+from apex.domain.surrogate import SurrogateConfig
 from apex.storage.provenance import file_hash, git
 
 #: Length of the id's hex prefix used in names (the full hash is the id).
@@ -188,6 +189,63 @@ def run_id(config: HistoryMatchConfig, engine: Mapping[str, Any] | None = None) 
         identity["engine"] = {**engine, "version": _engine_version(str(engine["engine"]))}
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def surrogate_build_id(
+    config: SurrogateConfig,
+    case_template: Path | None = None,
+    case: str | None = None,
+) -> str:
+    """Return the id of the surrogate build ``config`` describes (paths must be resolved).
+
+    As :func:`optimization_id` (decision 2): the configuration without its
+    name and place (its case's configuration file by content), the case's own id ``case``
+    (:func:`run_id` or :func:`optimization_id`: its data and prior files by content, never
+    its output folders; an executor's locations by their paths, as a run's), the folder of
+    the case's deck template
+    ``case_template`` (if any), and the code's version.
+    """
+    document = json.loads(config.model_dump_json())
+    document["surrogate"].pop("name", None)
+    document["surrogate"].pop("output_dir", None)
+    # An executor's locations by path, never their trees (as a run's: the review).
+    locations = _executor_locations(document)
+    design = document.get("design") or {}
+    if design.get("run_dir"):
+        # A design from a run's forecasts reads its snapshot and its checkpoints: those,
+        # not the run's whole folder (its simulations, its growing events).
+        chosen = design.get("iterations")
+        design["run_dir"] = design_run(
+            Path(str(design["run_dir"])), chosen if isinstance(chosen, list) else None
+        )
+    identity: dict[str, Any] = {
+        "config": _content(document),
+        "model_dir": None if case_template is None else tree_hash(case_template.parent),
+        "case": case,
+        "code": code_version(),
+    }
+    if locations:
+        identity["locations"] = locations
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def design_run(run_dir: Path, iterations: list[int] | None = None) -> dict[str, Any]:
+    """Identify a run a design reads: its configuration's snapshot and its iterates' files.
+
+    ``iterations``: the iterates it reads (``None``: all of them, as ``iterations = "all"``).
+    """
+    checkpoints = run_dir / "checkpoints"
+    files = (
+        sorted(checkpoints.glob("iter_*.npz")) if iterations is None
+        else [checkpoints / f"iter_{k}.npz" for k in sorted(set(iterations))]
+    )  # fmt: skip
+    files = [f for f in files if f.is_file()]
+    snapshot = run_dir / "config.json"
+    return {
+        "config": file_hash(snapshot) if snapshot.is_file() else None,
+        "iterates": {f.name: file_hash(f) for f in files},
+    }
 
 
 def optimization_id(config: OptimizationConfig) -> str:

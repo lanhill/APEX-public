@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from apex.domain.config import _Strict
+from apex.domain.surrogate import SurrogateBuildPlan
 
 #: Version of the service documents; bumped on a breaking change (with an ADR).
 SCHEMA_VERSION = 1
@@ -148,6 +149,9 @@ class Validation(_Document):
     optimization: OptimizationPlan | None = Field(
         default=None, description="The plan of an optimization configuration."
     )
+    surrogate: SurrogateBuildPlan | None = Field(
+        default=None, description="The plan of a surrogate build."
+    )
     plans: list[RunPlan] = Field(default_factory=list, description="Per run, for a study.")
     notes: list[str] = Field(
         default_factory=list,
@@ -160,7 +164,10 @@ class JobHandle(_Document):
     """A submitted job."""
 
     id: str
-    kind: Literal["run", "resume", "prediction", "study", "optimization", "optimization_resume"]
+    kind: Literal[
+        "run", "resume", "prediction", "study", "optimization", "optimization_resume",
+        "surrogate_build", "surrogate_build_resume", "surrogate_check",
+    ]  # fmt: skip
     run_ids: list[str] = Field(default_factory=list)
     reused: bool = Field(default=False, description="An identical run existed: no new run.")
     job_visible: bool | None = Field(

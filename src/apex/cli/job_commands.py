@@ -25,7 +25,7 @@ from apex.services.api import ApexService
 from apex.services.approval import ApprovalRequired
 from apex.services.jobs import FINAL
 
-Kind = Literal["run", "prediction", "optimization"]
+Kind = Literal["run", "prediction", "optimization", "surrogate"]
 
 #: Overrides ``[jobs] cli_code`` (the test suite runs live code: no copies of the checkout).
 CLI_CODE_ENV = "APEX_CLI_CODE"
@@ -103,7 +103,7 @@ def detect_kind(config: Path) -> Kind:
     Raises
     ------
     ConfigError
-        If it cannot be read, or describes none or several of the three.
+        If it cannot be read, or describes none or several of the four.
     """
     try:
         sections = set(tomllib.loads(config.read_text(encoding="utf-8")))
@@ -113,11 +113,14 @@ def detect_kind(config: Path) -> Kind:
         ("run", "method"),
         ("prediction", "prediction"),
         ("optimization", "optimization"),
+        # A surrogate build: [surrogate] alone is also a run's,
+        # prediction's or optimization's surrogate, so a build is told by its [design].
+        ("surrogate", "design"),
     )
     found = [kind for kind, section in marks if section in sections]
     if len(found) != 1:
-        what = " and ".join(found) or "none of [method], [prediction], [optimization]"
-        raise ConfigError(f"{config} has {what}: give --kind run|prediction|optimization")
+        what = " and ".join(found) or ("none of [method], [prediction], [optimization], [design]")
+        raise ConfigError(f"{config} has {what}: give --kind run|prediction|optimization|surrogate")
     return found[0]
 
 
@@ -227,17 +230,21 @@ def _job_id(service: ApexService, prefix: str) -> str:
 
 def submit(
     config: Annotated[
-        Path | None, typer.Argument(help="A run, prediction or optimization configuration.")
+        Path | None, typer.Argument(help="A run, prediction, optimization or surrogate build.")
     ] = None,
     resume: Annotated[
-        Path | None, typer.Option(help="Resume this run directory instead.")
+        Path | None, typer.Option(help="Resume this run, optimization or build directory instead.")
     ] = None,
     kind: Annotated[
-        str | None, typer.Option(help="run, prediction or optimization (default: from the file).")
+        str | None,
+        typer.Option(help="run, prediction, optimization or surrogate (default: by the file)."),
     ] = None,
     max_steps: Annotated[
         int | None,
-        typer.Option(help="Stop after this many steps (iterations of an optimization)."),
+        typer.Option(
+            help="Stop after this many steps (iterations of an optimization, member runs of a "
+            "surrogate build)."
+        ),
     ] = None,
     code: Annotated[
         str | None,
@@ -272,8 +279,8 @@ def submit(
     """
     if (config is None) == (resume is None):
         raise typer.BadParameter("give a configuration, or --resume RUN_DIR (not both)")
-    if kind is not None and kind not in ("run", "prediction", "optimization"):
-        raise typer.BadParameter("--kind is run, prediction or optimization")
+    if kind is not None and kind not in ("run", "prediction", "optimization", "surrogate"):
+        raise typer.BadParameter("--kind is run, prediction, optimization or surrogate")
     annotations = parse_annotations(annotation)
     service = ApexService(root)
     # --yes approves at the gate; otherwise the gate tries a grant first, and only then is
@@ -405,6 +412,15 @@ def _submit(
         return service.submit_prediction(
             config, priority=request.priority, code=code, client=request.client,
             annotations=notes,
+        )  # fmt: skip
+    if what == "surrogate":
+        from apex.services.surrogates import load_surrogate_config
+
+        # Placed as apex surrogate build places it (runs/<name> beside the file).
+        return service.submit_surrogate_build(
+            load_surrogate_config(config), max_runs=request.max_steps,
+            priority=request.priority, approve=approve, approval_token=approval_token,
+            code=code, client=request.client, annotations=notes,
         )  # fmt: skip
     from apex.services.optimization import load_optimization_config
 

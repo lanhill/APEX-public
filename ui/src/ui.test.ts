@@ -73,6 +73,7 @@ import {
   plainNumber,
   unscaled,
 } from "./optimization";
+import { surrogateLabel } from "./surrogate";
 import { agentLabel, visibilityOf, visibleAgents, whereInUi } from "./agents";
 import { filterGroup, groupPlugins, optionRows, registryLabel, summaryParts, typeText } from "./plugins";
 import { dirname, isReadOnly, kindOf, syntaxError } from "./toml";
@@ -199,6 +200,8 @@ describe("routes", () => {
       { page: "agents" },
       { page: "optimizations" },
       { page: "optimization", path: "/w/UI/owner/optimizations/npv/ab12&c" },
+      { page: "surrogates" },
+      { page: "surrogate", path: "/w/UI/owner/surrogates/lin/ab12&c" },
       { page: "agents", name: "monitor" },
     ] as const;
     for (const route of routes) expect(parse(href(route))).toEqual(route);
@@ -214,6 +217,9 @@ describe("TOML helpers", () => {
     // As the service decides (ADR 0043): both tables, wherever they are.
     expect(kindOf({ controls: {}, optimization: {}, optimizer: {} })).toBe("optimization");
     expect(kindOf({ optimization: {} })).toBe("history_match");
+    // A surrogate build (ADR 0073 phase 6): [surrogate] with [design]; a run's [surrogate] alone is a run.
+    expect(kindOf({ surrogate: {}, design: {}, case: {} })).toBe("surrogate");
+    expect(kindOf({ run: {}, surrogate: {} })).toBe("history_match");
     expect(syntaxError('[run]\nname = "a"\n')).toBeNull();
     expect(syntaxError("[run\n")).not.toBeNull();
     expect(dirname("/a/b/c.toml")).toBe("/a/b");
@@ -1537,5 +1543,12 @@ describe("unmatchedOf", () => {
     ]);
     expect(unmatchedOf({ data: { cost: 100 } })).toEqual([]);
     expect(unmatchedOf({ data: { unmatched: ["x", 3, null] } })).toEqual(["x"]);
+  });
+});
+
+describe("surrogate builds", () => {
+  it("label a build by its folder's last parts", () => {
+    expect(surrogateLabel("/w/UI/owner/surrogates/lin/0123abcd")).toBe("lin/0123abcd");
+    expect(surrogateLabel(null)).toBe("–");
   });
 });

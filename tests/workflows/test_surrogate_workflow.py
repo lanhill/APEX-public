@@ -292,6 +292,58 @@ def test_an_interrupted_build_resumes_to_identical_model_files(tmp_path: Path) -
     assert sorted(json.loads(line)["member"] for line in lines) == list(range(25))
 
 
+def test_a_stopped_build_ends_between_waves_and_resumes_to_identical_files(
+    tmp_path: Path,
+) -> None:
+    """A job's stop (decision 4) is checked before each wave of member runs
+    (four times the executor's parallel width, here one): the build ends as stopped with the
+    rest pending, and its resume writes the uninterrupted build's model files."""
+    from apex.workflows.surrogate import WAVE_WIDTHS
+
+    write_case(tmp_path)
+    whole = surrogates.build(write_build(tmp_path, name="whole"))
+    path = write_build(tmp_path, name="parts")
+    checks: list[int] = []
+
+    def stopped() -> bool:
+        checks.append(1)
+        return len(checks) > 1  # the first wave runs, the second is refused
+
+    first = surrogates.build_config(surrogates.load_surrogate_config(path), stopped=stopped)
+    assert not first.complete
+    assert first.summary.pending == 25 - WAVE_WIDTHS
+    assert len(checks) == 2
+    finished = surrogates.resume_build(first.path, stopped=lambda: False)
+
+    assert finished.complete
+    for name in ("surrogate.json", "surrogate.npz"):
+        assert (finished.path / "model" / name).read_bytes() == (
+            whole.path / "model" / name
+        ).read_bytes()
+
+
+def test_the_service_places_a_build_by_its_content(tmp_path: Path) -> None:
+    """Unplaced (decision 2), a build keeps no folder; its id ignores the
+    name and the folder and follows the case's configuration and deck."""
+    from apex.services.identity import surrogate_build_id
+
+    write_case(tmp_path)
+    path = write_build(tmp_path, name="one")
+    unplaced = surrogates.load_surrogate_config(path, place=False)
+    assert unplaced.surrogate.output_dir is None
+    assert surrogates.load_surrogate_config(path).surrogate.output_dir is not None
+    renamed = unplaced.model_copy(update={"surrogate": unplaced.surrogate.model_copy(
+        update={"name": "two", "output_dir": tmp_path / "elsewhere"})})  # fmt: skip
+    assert surrogate_build_id(renamed) == surrogate_build_id(unplaced)
+    other = unplaced.model_copy(update={"surrogate": unplaced.surrogate.model_copy(
+        update={"seed": unplaced.surrogate.seed + 1})})  # fmt: skip
+    assert surrogate_build_id(other) != surrogate_build_id(unplaced)
+    case = unplaced.case.config_file
+    before = surrogate_build_id(unplaced)
+    case.write_text(case.read_text() + "\n# changed\n")
+    assert surrogate_build_id(unplaced) != before
+
+
 def test_a_changed_plugin_option_refits_on_the_runs_made(tmp_path: Path) -> None:
     write_case(tmp_path)
     first = surrogates.build(write_build(tmp_path))
@@ -813,6 +865,33 @@ def test_an_adaptive_design_runs_its_batches_and_resumes_to_identical_files(
             whole.path / "model" / name
         ).read_bytes()
     assert json.loads((result.path / "state.json").read_text())["adaptive"]["batches"] == batches
+
+
+@pytest.mark.usefixtures("_adaptive")
+def test_an_adaptive_build_stopped_before_its_next_fit_resumes_to_identical_files(
+    tmp_path: Path,
+) -> None:
+    """A job's stop between an adaptive design's batches (before the fit that chooses the
+    next one): the build ends stopped, and its resume chooses the same
+    batches and writes the same model files."""
+    write_case(tmp_path)
+    whole = surrogates.build(write_build(tmp_path, name="whole", design=ADAPTIVE))
+    config = surrogates.load_surrogate_config(write_build(tmp_path, name="parts", design=ADAPTIVE))
+    assert config.surrogate.output_dir is not None
+    journal = config.surrogate.output_dir / JOURNAL
+
+    def after_the_initial_runs() -> bool:  # 5 held-out and 6 initial training runs
+        return journal.exists() and len(journal.read_text().splitlines()) >= 11
+
+    stopped = surrogates.build_config(config, stopped=after_the_initial_runs)
+    assert stopped.summary.status == "stopped"
+    assert len(journal.read_text().splitlines()) == 11
+    resumed = surrogates.resume_build(stopped.path, stopped=lambda: False)
+    assert resumed.complete
+    for name in ("surrogate.json", "surrogate.npz"):
+        assert (resumed.path / "model" / name).read_bytes() == (
+            whole.path / "model" / name
+        ).read_bytes()
 
 
 @pytest.mark.usefixtures("_adaptive")

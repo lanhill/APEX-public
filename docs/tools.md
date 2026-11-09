@@ -54,14 +54,14 @@ Errors come back as results that say what to do (`did you mean ...`, the allowed
 
 ## Path rules
 
-A tool client acts with the rights of the service's owner, so what it may make the service read, render or run is confined. Without a `[policy]` (the default), the readable folders are the workspace's roots (`[workspace] roots` in `service.toml`, by default `<root>/configs`), the folders in `[tools] roots`, and the service's own `runs/`, `studies/` and `optimizations/`. Then:
+A tool client acts with the rights of the service's owner, so what it may make the service read, render or run is confined. Without a `[policy]` (the default), the readable folders are the workspace's roots (`[workspace] roots` in `service.toml`, by default `<root>/configs`), the folders in `[tools] roots`, and the service's own `runs/`, `studies/`, `optimizations/` and `surrogates/`. Then:
 
-- The files a call names (`config_file`, `study_file`, `prediction_file`, `optimization_file`) and a study's cases must lie in those folders.
+- The files a call names (`config_file`, `study_file`, `prediction_file`, `optimization_file`, `surrogate_file`) and a study's cases must lie in those folders; so must a surrogate build's case.
 - Every file the configuration reads must lie in them too: data and truth files, prior files, the folder of a deck's includes (`case_dir`), and any plugin option declared as an input file. This holds for each cell of a study and its predictions, for predictions and optimizations, and after `overrides` are applied. A prediction's run is checked before its snapshot is read.
 - Deck templates and programs written in the configuration file itself (a GEOS or MPSlib build in a home folder, say) are the owner's choice and are accepted wherever they lie. Not so in a web-UI user's folder other than the owner's (`UI/guests/<name>/`, an agent's): a template or program written by a configuration there, or lying there, is refused, since running it would run someone else's code as the owner. A `[policy]` decides those instead.
 - `overrides` may change settings and file paths (within the folders), but not deck templates, programs, program arguments or hosts.
 - A study or optimization file that does not load is refused, so nothing it names is read unchecked.
-- An output folder or a prediction's run may also be a run of the catalogue; so may the folders given to `prediction_summary` and `optimization_summary`.
+- An output folder or a prediction's run may also be a run of the catalogue; so may the folders given to `prediction_summary`, `optimization_summary` and `surrogate_summary`.
 - Paths are checked before anything is opened, so a refusal does not tell whether a file exists, and a refusal or a validation error never shows a file's contents.
 
 With a `[policy]`, the policy decides instead: its `input_roots`, `code_roots` and `output_roots`, as for every other client (see the job service page).

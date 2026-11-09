@@ -119,6 +119,11 @@ class StoredDesign:
     coarse_only: Mapping[str, NDArray[np.float64]] | None = None
 
 
+#: Where the job service places builds it is given without a folder
+#: (decision 2): ``<root>/surrogates/<name>/<id>``.
+SERVICE_FOLDER = "surrogates"
+
+
 class SurrogateDirectory:
     """A surrogate build's (or check's) directory (module docstring)."""
 

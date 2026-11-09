@@ -39,7 +39,7 @@ catches a symlink swapped in between submission and execution.
 
 import fnmatch
 import shutil
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -51,6 +51,7 @@ from apex.core.plugins import surrogate_models
 from apex.domain.config import HistoryMatchConfig
 from apex.domain.optimization import OptimizationConfig
 from apex.domain.prediction import PredictionConfig
+from apex.domain.surrogate import SurrogateConfig
 from apex.services.settings import PolicySection
 
 PATH_SUFFIXES = ("_file", "_dir", "_path")
@@ -75,6 +76,17 @@ Kind = Literal[
 
 class PolicyViolation(ConfigError):
     """A submission breaks the service's ``[policy]``."""
+
+
+class _Plugin(BaseModel):
+    """A plugin a configuration names in a section of another shape (a surrogate build's).
+
+    ``origin`` is the section whose ``options`` these are, left out of the field scan.
+    """
+
+    name: str | None
+    options: dict[str, Any]
+    origin: Any = None
 
 
 def active(rules: PolicySection) -> bool:
@@ -108,6 +120,25 @@ def _plugin_sections(config: BaseModel) -> list[tuple[str, BaseModel]]:
         if config.simulator is not None:
             sections.append(("simulators", config.simulator))
         return sections
+    if isinstance(config, SurrogateConfig):
+        # decision 6: the surrogate, its design, its executor and coarse
+        # stack; the case's own plugins are its configuration's (judged with it).
+        found: list[tuple[str, BaseModel]] = [
+            ("surrogate_models", _Plugin(name=config.surrogate.model,
+                                         options=config.surrogate.options,
+                                         origin=config.surrogate)),
+            ("surrogate_designs", _Plugin(name=config.design.plan,
+                                          options=config.design.options,
+                                          origin=config.design)),
+        ]  # fmt: skip
+        if config.execution is not None:
+            found.append(("executors", config.execution))
+        if config.coarse is not None:
+            # The coarse simulator's options are judged with the case's, as they merge
+            # (:func:`build_coarse_items`); left out of the field scan here.
+            found.append(("simulators", _Plugin(name=None, options={}, origin=config.coarse)))
+            found += [("parameterizations", p) for p in config.coarse.parameterizations]
+        return found
     return []
 
 
@@ -236,9 +267,11 @@ def _allowed(value: str | Path, roots: list[str]) -> bool:
 def service_roots(root: Path) -> list[str]:
     """Return the service root's folders a submission may write and read runs from."""
     from apex.storage.optimization_directory import SERVICE_FOLDER
+    from apex.storage.surrogate_directory import SERVICE_FOLDER as SURROGATES
 
     base = Path(root).resolve()
-    return [str(base / "runs"), str(base / "studies"), str(base / SERVICE_FOLDER)]
+    return [str(base / "runs"), str(base / "studies"), str(base / SERVICE_FOLDER),
+            str(base / SURROGATES)]  # fmt: skip
 
 
 def _program_allowed(value: str, rules: PolicySection) -> bool:
@@ -275,7 +308,9 @@ def named(
     Used by the policy, and for web-UI users with or without one (``services/access.py``).
     """
     sections = _plugin_sections(config)
-    found = list(_items(config, plugins=frozenset(id(s) for _, s in sections)))
+    found = list(
+        _items(config, plugins=frozenset(id(getattr(s, "origin", None) or s) for _, s in sections))
+    )
     for registry, section in sections:
         name = getattr(section, "name", None)
         if name is None and isinstance(config, PredictionConfig):
@@ -293,13 +328,49 @@ def named(
         ]
     surrogate = getattr(config, "surrogate", None)
     model_file = getattr(surrogate, "model_file", None)
-    if (
-        follow is not None
-        and isinstance(config, HistoryMatchConfig)
-        and model_file is not None
-        and follow(str(model_file))
-    ):
-        found += _coarse_stack_items(config, Path(model_file))
+    if follow is not None and model_file is not None and follow(str(model_file)):
+        found += manifest_items(Path(model_file))
+        if isinstance(config, HistoryMatchConfig | OptimizationConfig):
+            found += coarse_stack_items(config, Path(model_file))
+    return found
+
+
+#: The start of the keys :func:`manifest_items` gives.
+MANIFEST = "surrogate's manifest: "
+
+
+def manifest_items(model_file: Path) -> list[tuple[Kind, str, str]]:
+    """Return what a surrogate's manifest names (decision 6).
+
+    Its plugin's options by their declarations (file options resolved against the manifest's
+    folder, as loading resolves them) and its snapshot file. Reading the manifest runs no
+    code; one that cannot be read names nothing here, and is refused when it
+    is loaded.
+    """
+    import os
+
+    from apex.domain.surrogate import SurrogateManifest
+    from apex.services.composition import PATH_OPTION_SUFFIXES
+
+    try:
+        manifest = SurrogateManifest.model_validate_json(model_file.read_bytes())
+    except (OSError, ValueError):
+        return []
+    folder = model_file.parent
+    options = {
+        k: os.path.abspath(folder / v)
+        if k.endswith(PATH_OPTION_SUFFIXES) and isinstance(v, str)
+        else v
+        for k, v in manifest.options.items()
+    }
+    found: list[tuple[Kind, str, str]] = [
+        (kind, f"{MANIFEST}surrogate_models.{manifest.plugin}: {key}", value)
+        for kind, key, value in _plugin_items("surrogate_models", manifest.plugin, options)
+    ]
+    if manifest.snapshots is not None and manifest.snapshots.path is not None:
+        found.append(
+            ("input", f"{MANIFEST}snapshots", os.path.abspath(folder / manifest.snapshots.path))
+        )
     return found
 
 
@@ -307,8 +378,8 @@ def named(
 COARSE_STACK = "surrogate's coarse stack: "
 
 
-def _coarse_stack_items(
-    config: HistoryMatchConfig, model_file: Path
+def coarse_stack_items(
+    config: HistoryMatchConfig | OptimizationConfig, model_file: Path
 ) -> list[tuple[Kind, str, str]]:
     """Return what the coarse stack a surrogate's manifest names names.
 
@@ -347,14 +418,15 @@ def _coarse_stack_items(
             for k, v in options.items()
         }
 
-    name = coarse.simulator or config.simulator.name
+    case_simulator = config.simulator
+    name = coarse.simulator or (None if case_simulator is None else case_simulator.name)
     # The run merges the coarse options over the case's. With the case's simulator, the
     # case's options are judged already, by the same declarations; with another one, they
     # are judged again by its own.
     merged = (
         resolved(coarse.options)
-        if name == config.simulator.name
-        else {**config.simulator.options, **resolved(coarse.options)}
+        if case_simulator is None or name == case_simulator.name
+        else {**case_simulator.options, **resolved(coarse.options)}
     )
     found = [
         (kind, f"{COARSE_STACK}simulators.{name}: {key}", value)
@@ -370,16 +442,10 @@ def _coarse_stack_items(
     return found
 
 
-def violations(config: BaseModel, rules: PolicySection, root: Path) -> list[str]:
-    """Return why a resolved configuration breaks the policy (empty when it does not)."""
-    if not active(rules):
-        return []
+def judged(found: Sequence[tuple[Kind, str, str]], rules: PolicySection, root: Path) -> list[str]:
+    """Return why what a configuration (or a manifest) names breaks the policy, by kind."""
     own = service_roots(root)
-    problems = []
-    readable = [*rules.input_roots, *rules.code_roots, *rules.output_roots, *own]
-    # A surrogate's manifest the policy lets the run read: its coarse stack is checked as the
-    # configuration's own simulator is.
-    found = named(config, follow=lambda path: _allowed(path, readable))
+    problems: list[str] = []
     for kind, key, value in found:
         if kind == "undeclared":
             problems.append(
@@ -423,6 +489,61 @@ def violations(config: BaseModel, rules: PolicySection, root: Path) -> list[str]
                 "(under [policy] output_roots or the service's runs/ and studies/)"
             )
     return problems
+
+
+def violations(config: BaseModel, rules: PolicySection, root: Path) -> list[str]:
+    """Return why a resolved configuration breaks the policy (empty when it does not)."""
+    if not active(rules):
+        return []
+    own = service_roots(root)
+    problems = []
+    readable = [*rules.input_roots, *rules.code_roots, *rules.output_roots, *own]
+    # A surrogate's manifest the policy lets the run read: its coarse stack is checked as the
+    # configuration's own simulator is.
+    found = named(config, follow=lambda path: _allowed(path, readable))
+    if isinstance(config, SurrogateConfig):
+        problems += _case_violations(config, rules, root)
+    problems += judged(found, rules, root)
+    return problems
+
+
+def build_coarse_items(
+    config: SurrogateConfig, case: HistoryMatchConfig | OptimizationConfig
+) -> list[tuple[Kind, str, str]]:
+    """Return what a build's coarse simulator is given, judged as the build composes it.
+
+    Its options merged over the case's simulator's (the case's own judged with the case),
+    by the declarations of the simulator that runs them: ``[coarse] simulator`` or the
+    case's (the access review).
+    """
+    coarse = config.coarse
+    if coarse is None:
+        return []
+    case_simulator = case.simulator
+    name = coarse.simulator or (None if case_simulator is None else case_simulator.name)
+    options = dict(coarse.options)
+    if case_simulator is not None and name != case_simulator.name:
+        options = {**case_simulator.options, **options}
+    return [
+        (kind, f"[coarse] simulators.{name or '?'}: {key}", value)
+        for kind, key, value in _plugin_items("simulators", name, options)
+    ]
+
+
+def _case_violations(config: SurrogateConfig, rules: PolicySection, root: Path) -> list[str]:
+    """Why a build's case breaks the policy: its file, then its configuration (it runs it)."""
+    readable = [*rules.input_roots, *rules.code_roots, *rules.output_roots, *service_roots(root)]
+    path = config.case.config_file
+    if not _allowed(str(path), readable):
+        return []  # named by the build as an input: refused there already
+    from apex.services.surrogates import case_config
+
+    try:
+        case = case_config(path)
+    except ConfigError:
+        return []  # validation names it
+    found = [f"[case] {path}: {problem}" for problem in violations(case, rules, root)]
+    return found + judged(build_coarse_items(config, case), rules, root)
 
 
 def check(config: BaseModel, rules: PolicySection, root: Path) -> None:
@@ -469,6 +590,45 @@ def check_source(run_dir: Path, rules: PolicySection, root: Path) -> None:
         )
 
 
+def check_surrogate_check(spec: Mapping[str, Any], rules: PolicySection, root: Path) -> None:
+    """Refuse a surrogate check that breaks the policy (decision 6).
+
+    Its model file, what its manifest names (the plugin's options, the snapshots, and the
+    coarse stack a coarse-corrected model runs), where its verdict is written (the model's
+    ``checks/``, within the output roots), and what it is checked against: a configuration
+    of either kind (judged as any) or a run directory the service wrote (its snapshot).
+
+    Raises
+    ------
+    PolicyViolation
+        Naming every violation.
+    """
+    if not active(rules):
+        return
+    from apex.services import composition, surrogates
+    from apex.storage.run_directory import RunDirectory
+
+    model_file, against = Path(spec["model_file"]), Path(spec["against"])
+    check_file(model_file, rules, root)
+    case: BaseModel
+    if against.is_dir():
+        check_source(against, rules, root)
+        case = composition.snapshot_config(RunDirectory(against))
+    else:
+        check_file(against, rules, root)
+        case = surrogates.case_config(against)
+    check(case, rules, root)
+    found = manifest_items(model_file)
+    if isinstance(case, HistoryMatchConfig | OptimizationConfig):
+        found += coarse_stack_items(case, model_file)
+    problems = judged(found, rules, root)
+    verdicts = surrogates.checks_folder(model_file)
+    if not _allowed(str(verdicts), [*rules.output_roots, *service_roots(root)]):
+        problems.append(f"the check's verdicts in {verdicts} are outside [policy] output_roots")
+    if problems:
+        raise PolicyViolation("refused by the service's [policy]: " + "; ".join(problems))
+
+
 def check_job(kind: str, spec: dict[str, Any], rules: PolicySection, root: Path) -> None:
     """Re-check a queued job just before a worker runs it (what it executes, where it writes).
 
@@ -504,6 +664,15 @@ def check_job(kind: str, spec: dict[str, Any], rules: PolicySection, root: Path)
         check_source(run_dir, rules, root)
         stored = OptimizationConfig.model_validate(optimization_directory.read_config(run_dir))
         check(stored, rules, root)
+    elif kind == "surrogate_build":
+        check(SurrogateConfig.model_validate_json(spec["config"]), rules, root)
+    elif kind == "surrogate_build_resume":
+        build_dir = Path(spec["build_dir"])
+        check_source(build_dir, rules, root)
+        build = SurrogateConfig.model_validate_json((build_dir / "config.json").read_text())
+        check(build, rules, root)
+    elif kind == "surrogate_check":
+        check_surrogate_check(spec, rules, root)
     elif kind == "prediction":
         config = PredictionConfig.model_validate_json(spec["config"])
         check(config, rules, root)

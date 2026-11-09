@@ -146,6 +146,24 @@ class SubmitOptimization(_Arguments):
     annotations: dict[str, str] = Field(default_factory=dict)
 
 
+class SubmitSurrogate(_Arguments):
+    """Arguments of ``submit_surrogate``."""
+
+    surrogate_file: str
+    approval_token: str = Field(description="From validate, for the same file.")
+    max_runs: int | None = Field(
+        default=None, ge=0, description="Stop after this many member runs (resumable)."
+    )
+    priority: Literal["high", "normal", "low"] = "normal"
+    annotations: dict[str, str] = Field(default_factory=dict)
+
+
+class SurrogatePath(_Arguments):
+    """Arguments of ``surrogate_summary``."""
+
+    path: str = Field(description="The build's directory (from job_status's run_dirs).")
+
+
 class OptimizationPath(_Arguments):
     """Arguments of ``optimization_summary``."""
 
@@ -248,7 +266,8 @@ class ToolSession:
 
         Under a ``[policy]`` the policy decides (``policy.check_file``), so ``None`` here.
         Otherwise the workspace's roots, ``[tools] roots`` and the service's own ``runs/``,
-        ``studies/`` and ``optimizations/``: a tool client acts as the service's owner,
+        ``studies/``, ``optimizations/`` and ``surrogates/``: a tool client acts as the
+        service's owner,
         and without this it could read any file the owner can (release tester N3).
         """
         settings = self.service.jobs.settings
@@ -429,13 +448,39 @@ def _confine_config(
         return _readable_item("input", path, roots, runs)
 
     known = set(policy.named(before, follow=follow)) if before is not None else None
+    problems = _refused_items(session, policy.named(config, follow=follow), sources, known)
+    if problems:
+        refusal = _outside(
+            session, roots,
+            "use files under those folders, or ask the service's owner to add theirs to "
+            "[tools] roots in service.toml",
+        )  # fmt: skip
+        raise ToolFailure(f"{'; '.join(problems[:5])}: {refusal.error}", refusal.hint)
+
+
+def _refused_items(
+    session: ToolSession,
+    found: Sequence[tuple[policy.Kind, str, str]],
+    sources: Sequence[Path],
+    known: set[tuple[policy.Kind, str, str]] | None = None,
+) -> list[str]:
+    """Return which of ``found`` (``policy.named``'s items) the session may not use.
+
+    :func:`_confine_config`'s rules, for names from a configuration or one composed with
+    it (a surrogate build's coarse stack): within the readable folders,
+    no template or program a configuration another web-UI user wrote names, nor one lying
+    in their folder, and ``known`` (the items before ``overrides``) bounds what overrides
+    may add.
+    """
+    roots = session.readable() or []
+    runs = [str(e.path) for e in session.service.store.entries()]
     space = session.service.workspace()
     # For the owner's clients (MCP, the CLI's tools, agent loops); a web-UI user's session
     # (the assistant's, ``access`` set) is held to its own allowlist.
     owners = session.access is None
     written_by_others = owners and any(space.in_other_ui_user_folder(f) for f in sources)
     problems = []
-    for kind, key, value in policy.named(config, follow=follow):
+    for kind, key, value in found:
         if kind in ("code", "executable") and written_by_others:
             problems.append(f"{key}: a template or program in a configuration another web-UI "
                             "user wrote is refused (a [policy] decides those)")  # fmt: skip
@@ -451,13 +496,7 @@ def _confine_config(
             trusted=not (owners and space.in_other_ui_user_folder(value)),
         ):  # fmt: skip
             problems.append(f"{key} = {value!r}")
-    if problems:
-        refusal = _outside(
-            session, roots,
-            "use files under those folders, or ask the service's owner to add theirs to "
-            "[tools] roots in service.toml",
-        )  # fmt: skip
-        raise ToolFailure(f"{'; '.join(problems[:5])}: {refusal.error}", refusal.hint)
+    return problems
 
 
 def _confine_optimization(session: ToolSession, path: Path) -> None:
@@ -474,6 +513,28 @@ def _confine_optimization(session: ToolSession, path: Path) -> None:
     _confine_config(session, config, sources=[path])
 
 
+def _confine_surrogate(session: ToolSession, path: Path) -> None:
+    """Refuse a surrogate build whose configuration (or its case's) names files outside."""
+    if session.readable() is None:
+        return
+    from apex.services.surrogates import case_config, load_surrogate_config
+
+    try:
+        config = load_surrogate_config(path, place=False)
+        _confine_config(session, config, sources=[path])
+        case = case_config(config.case.config_file)
+    except ApexError as error:
+        # Refused here: validating it would read what it names, unchecked.
+        raise ToolFailure(str(error), "fix the surrogate build's file") from error
+    _confine_config(session, case, sources=[config.case.config_file])
+    # The coarse simulator's options, as the build merges them over the case's,
+    # by the rules of the build file's own names (written by whom, lying where).
+    outside = _refused_items(session, policy.build_coarse_items(config, case), [path])
+    if outside:
+        refusal = _outside(session, session.readable() or [], "use files under those folders")
+        raise ToolFailure(f"{'; '.join(outside[:5])}: {refusal.error}", refusal.hint)
+
+
 def _kind(path: Path) -> str:
     try:
         document = tomllib.loads(path.read_text())
@@ -481,6 +542,8 @@ def _kind(path: Path) -> str:
         raise ToolFailure(f"cannot read {path}: {error}") from error
     if "optimization" in document and "optimizer" in document:
         return "optimization"
+    if "surrogate" in document and "design" in document:
+        return "surrogate"  # a build; [surrogate] alone is a run's
     first = next(iter(document), "")
     return {"study": "study", "prediction": "prediction"}.get(first, "history_match")
 
@@ -743,6 +806,10 @@ def _validate(session: ToolSession, args: Validate) -> Any:  # noqa: ANN401
         if args.overrides:
             raise ToolFailure("overrides apply to runs only", "edit the optimization file")
         return _validate_optimization(session, path, experiment)
+    if kind == "surrogate":
+        if args.overrides:
+            raise ToolFailure("overrides apply to runs only", "edit the surrogate build's file")
+        return _validate_surrogate(session, path, experiment)
     try:
         config = _run_config(session, args.config_file, args.overrides)
     except ApexError as error:
@@ -882,6 +949,79 @@ def _validate_optimization(
             session, fingerprint([plan.optimization_id]), plan.max_simulator_runs, 1, experiment
         ),
     }
+
+
+def _validate_surrogate(
+    session: ToolSession, path: Path, experiment: str | None = None
+) -> dict[str, Any]:
+    _confine_surrogate(session, path)
+    validation = session.service.validate_surrogate_build(path)
+    plan = validation.surrogate
+    if not validation.valid or plan is None:
+        return {"valid": False, "errors": validation.errors[:20]}
+    build_id = Path(plan.output_dir).name
+    assert plan.identity is not None  # the service's validation names it
+    return {
+        "valid": True,
+        "plan": {
+            "build_id": build_id,
+            "model": plan.model,
+            "design": plan.plan,
+            "training": plan.training,
+            "held_out": plan.held_out,
+            "simulator_runs": plan.simulator_runs,
+            "simulator": plan.simulator,
+            "keys": plan.keys,
+            "warnings": plan.warnings,
+        },
+        # The token names what the build computes, not its folder: an edited build is another.
+        **_issue_token(session, fingerprint([plan.identity]), plan.simulator_runs, 1, experiment),
+    }
+
+
+def _submit_surrogate(session: ToolSession, args: SubmitSurrogate) -> Any:  # noqa: ANN401
+    path = _path(session, args.surrogate_file, "surrogate build")
+    _confine_surrogate(session, path)
+    validation = session.service.validate_surrogate_build(path)
+    plan = validation.surrogate
+    if not validation.valid or plan is None:
+        raise ToolFailure("; ".join(validation.errors[:5]), "fix the file and validate again")
+    build_id = Path(plan.output_dir).name
+    assert plan.identity is not None  # the service's validation names it
+    spending = _spend(session, args.approval_token, fingerprint([plan.identity]),
+                      plan.simulator_runs, args.annotations.get("experiment"))  # fmt: skip
+    handle = _submitted(
+        spending,
+        lambda: session.service.submit_surrogate_build(
+            path,
+            max_runs=args.max_runs,
+            annotations=_annotations(session, args.annotations),
+            priority=args.priority,
+            client=session.client,
+            approved=True,
+        ),
+    )
+    return {"job_id": handle.id, "build_id": build_id}
+
+
+def _surrogate_summary(session: ToolSession, args: SurrogatePath) -> Any:  # noqa: ANN401
+    path = Path(args.path)
+    _confine_result(session, path, "surrogate build")
+    if session.access is not None:
+        target = path.resolve()
+        own = [
+            r for r in session.service.jobs.all_records()
+            if r["kind"] in ("surrogate_build", "surrogate_build_resume")
+            and any(Path(d).resolve() == target for d in r.get("run_dirs") or [])
+            and session.access.job(r)
+        ]  # fmt: skip
+        if not own:
+            raise ToolFailure(f"no surrogate build at {args.path}", "see job_status's run_dirs")
+    try:
+        summary = session.service.surrogate_summary(path)
+    except (ApexError, policy.PolicyViolation) as error:
+        raise ToolFailure(str(error), "give a surrogate build's directory") from error
+    return summary.model_dump(mode="json")
 
 
 def _submit_optimization(session: ToolSession, args: SubmitOptimization) -> Any:  # noqa: ANN401
@@ -1164,7 +1304,8 @@ DESCRIPTIONS = {
     'Example: list_plugins(registry="localizations").',
     "get_schema": "Get the JSON Schema of a configuration, or one section of it. Examples: "
     'get_schema(kind="study"), get_schema(kind="history_match", section="prior").',
-    "validate": "Check a run, study, prediction or optimization file without running it; "
+    "validate": "Check a run, study, prediction, optimization or surrogate build file "
+    "without running it; "
     "returns its cost "
     'and an approval token. Example: validate(config_file="/cases/m5/configs/run.toml", '
     'overrides={"method.max_iterations": 10}).',
@@ -1188,6 +1329,10 @@ DESCRIPTIONS = {
     "the token from validate for the same file.",
     "optimization_summary": "Get an optimization's state, objective by iteration and result. "
     'Example: optimization_summary(path="/service/optimizations/3well/ab12cd34ef56").',
+    "submit_surrogate": "Build a surrogate model (fitted on full simulator runs, gated on "
+    "held-out ones) in the background. Needs the token from validate for the same file.",
+    "surrogate_summary": "Get a surrogate build's runs, gate per datatype and verdict. "
+    'Example: surrogate_summary(path="/service/surrogates/5spots/ab12cd34ef56").',
 }
 
 _SPECS: list[tuple[str, type[_Arguments], bool, Handler]] = [
@@ -1207,6 +1352,8 @@ _SPECS: list[tuple[str, type[_Arguments], bool, Handler]] = [
     ("list_runs", ListRuns, False, _list_runs),
     ("submit_optimization", SubmitOptimization, True, _submit_optimization),
     ("optimization_summary", OptimizationPath, False, _optimization_summary),
+    ("submit_surrogate", SubmitSurrogate, True, _submit_surrogate),
+    ("surrogate_summary", SurrogatePath, False, _surrogate_summary),
 ]
 
 #: Every tool, by name.

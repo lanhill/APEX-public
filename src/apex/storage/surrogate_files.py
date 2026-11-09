@@ -300,9 +300,13 @@ def read_surrogate(path: Path, *, identity: str | None = None) -> StoredSurrogat
     ------
     ConfigError
         If a file is missing or not what it should be, the arrays file is not the one the
-        manifest records, an array holds objects, or the identity differs.
+        manifest records, an array holds objects, the identity differs, or the manifest is
+        not a ``.json`` file (as :func:`write_surrogate` writes it: a configuration file a
+        web-UI user wrote is never read as one).
     """
     path = Path(path)
+    if path.suffix != ".json":
+        raise ConfigError(f"a surrogate's manifest is a .json file, not {path.name}")
     try:
         manifest_bytes = path.read_bytes()
     except OSError as error:

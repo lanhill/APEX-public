@@ -53,6 +53,7 @@ from apex.domain.services import (
     Validation,
 )
 from apex.domain.study import StudySpec
+from apex.domain.surrogate import SurrogateBuildSummary, SurrogateConfig
 from apex.services.api import ApexService, SchemaKind
 from apex.services.approval import ApprovalRequired
 from apex.services.jobs import FINAL
@@ -195,6 +196,7 @@ class RemoteClient:
         config: HistoryMatchConfig
         | PredictionConfig
         | OptimizationConfig
+        | SurrogateConfig
         | Mapping[str, Any]
         | Path,
         key: str,
@@ -436,6 +438,70 @@ class RemoteClient:
         """Return an optimization's progress and result (``path`` on the service's machine)."""
         return OptimizationSummary.model_validate(
             self._call("GET", "/optimizations/summary", params={"path": _absolute(path)})
+        )
+
+    def submit_surrogate_build(
+        self,
+        config: SurrogateConfig | Mapping[str, Any] | Path,
+        *,
+        base_dir: Path | None = None,
+        max_runs: int | None = None,
+        annotations: Annotations | None = None,
+        priority: str = "normal",
+        client: str = "api",
+        approval_token: str | None = None,
+        code: str | None = None,
+    ) -> JobHandle:
+        """Build a surrogate in the background."""
+        body = self._config(config, "surrogate") | {
+            "code": code,
+            "max_runs": max_runs,
+            "annotations": dict(annotations or {}),
+            "priority": priority,
+            "client": client,
+            "approval_token": approval_token,
+        }
+        if base_dir is not None:
+            body["base_dir"] = _absolute(base_dir)
+        return JobHandle.model_validate(self._call("POST", "/surrogates", body=body))
+
+    def submit_surrogate_check(
+        self,
+        model_file: Path,
+        against: Path,
+        *,
+        runs: int,
+        seed: int = 0,
+        iteration: int | None = None,
+        min_success_fraction: float = 0.9,
+        min_inside: float = 0.8,
+        max_runs: int | None = None,
+        annotations: Annotations | None = None,
+        priority: str = "normal",
+        client: str = "api",
+        approval_token: str | None = None,
+        code: str | None = None,
+    ) -> JobHandle:
+        """Gate a surrogate on new full runs in the background (``apex surrogate check``)."""
+        body = {
+            "model_file": _absolute(model_file), "against": _absolute(against), "runs": runs,
+            "seed": seed, "iteration": iteration,
+            "min_success_fraction": min_success_fraction, "min_inside": min_inside,
+            "max_runs": max_runs, "annotations": dict(annotations or {}),
+            "priority": priority, "client": client, "approval_token": approval_token,
+            "code": code,
+        }  # fmt: skip
+        return JobHandle.model_validate(self._call("POST", "/surrogates:check", body=body))
+
+    def surrogates(self) -> list[dict[str, Any]]:
+        """Return the surrogate jobs this token may see."""
+        rows: list[dict[str, Any]] = self._call("GET", "/surrogates")
+        return rows
+
+    def surrogate_summary(self, path: Path) -> SurrogateBuildSummary:
+        """Return a surrogate build's summary (``path`` on the service's machine)."""
+        return SurrogateBuildSummary.model_validate(
+            self._call("GET", "/surrogates/summary", params={"path": _absolute(path)})
         )
 
     def runs(self, annotations: Mapping[str, str] | None = None) -> list[dict[str, Any]]:

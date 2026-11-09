@@ -4,7 +4,14 @@ import { EditorView, basicSetup } from "codemirror";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parse as parseToml } from "smol-toml";
 
-import { ApiError, type FileEntry, type JobHandle, type OptimizationPlan, type Validation } from "../api";
+import {
+  ApiError,
+  type FileEntry,
+  type JobHandle,
+  type OptimizationPlan,
+  type SurrogateBuildPlan,
+  type Validation,
+} from "../api";
 import { fmt } from "../chart";
 import { anyOtherEngine, engineOf } from "../comparison";
 import { ErrorBox, Show, useApi, useAsync, useCan, useInOwnFolder, usePaths } from "../components/common";
@@ -264,7 +271,9 @@ function FileEditor({ path }: { path: string }) {
             ? await api.submitPrediction(file)
             : kind === "optimization"
               ? await api.submitOptimization(file, token)
-              : await api.submitRun(file, token);
+              : kind === "surrogate"
+                ? await api.submitSurrogate(file, token)
+                : await api.submitRun(file, token);
       setPending(null);
       setSubmitted(handle);
     } catch (err) {
@@ -440,6 +449,7 @@ function ValidationView({ validation: v }: { validation: Validation }) {
         </div>
       )}
       {v.optimization && <OptimizationPlanView plan={v.optimization} />}
+      {v.surrogate && <SurrogatePlanView plan={v.surrogate} />}
       {(v.notes ?? []).map((n, i) => (
         <p key={`note-${i}`} className="note">
           {paths.display(n)}
@@ -482,6 +492,44 @@ function OptimizationPlanView({ plan: p }: { plan: OptimizationPlan }) {
             <dd>{paths.path(p.output_dir)}</dd>
           </>
         )}
+      </dl>
+      {p.warnings.map((w, i) => (
+        <p key={i} className="note">
+          ⚠ {paths.display(w)}
+        </p>
+      ))}
+    </>
+  );
+}
+
+/** A surrogate build's plan: its design's full runs, before it runs. */
+function SurrogatePlanView({ plan: p }: { plan: SurrogateBuildPlan }) {
+  const paths = usePaths();
+  return (
+    <>
+      <dl className="facts">
+        <dt>Surrogate</dt>
+        <dd>
+          {p.name} · <code>{p.model}</code>, gated by <code>{p.measure}</code>
+        </dd>
+        <dt>Design</dt>
+        <dd>
+          <code>{p.plan}</code>: {p.training} training and {p.held_out} held-out runs
+          {p.coarse_only > 0 && `, ${p.coarse_only} on the coarse stack only`}
+        </dd>
+        <dt>Simulator runs</dt>
+        <dd>
+          {p.simulator_runs} on {p.simulator} ({p.executor})
+        </dd>
+        <dt>Answers</dt>
+        <dd>
+          {p.keys} keys ({p.datatypes.join(", ")}) from {p.inputs} inputs
+        </dd>
+        <dt>Output</dt>
+        <dd>
+          {paths.path(p.output_dir)}
+          <div className="muted">Submitted from here, the service places the build in your own folder.</div>
+        </dd>
       </dl>
       {p.warnings.map((w, i) => (
         <p key={i} className="note">

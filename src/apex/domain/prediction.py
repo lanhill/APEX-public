@@ -31,7 +31,13 @@ from typing import Any, Literal, Self
 
 import numpy as np
 from numpy.typing import NDArray
-from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from apex.domain.config import PluginSection, _Strict
 
@@ -133,6 +139,18 @@ class PredictionSection(_Strict):
         if self.ensembles == ["truth"]:
             raise ValueError("a prediction needs at least one ensemble besides 'truth'")
         return self
+
+    @field_validator("name")
+    @classmethod
+    def _one_folder(cls, value: str) -> str:
+        # The name places the prediction (RUN_DIR/predictions/<name>, a guest's
+        # UI/guests/<name>/predictions/<run>/<name>): a separator or "." / ".." would put it
+        # elsewhere, out of a guest's own folder (the review).
+        if "/" in value or "\\" in value or value in (".", ".."):
+            raise ValueError(
+                f"prediction name {value!r}: one folder name, no '/' or '\\', not '.' or '..'"
+            )
+        return value
 
 
 class SimulatorOverride(_Strict):
