@@ -205,9 +205,9 @@ uv run apex submit CONFIG
 
 | option | default | description |
 |---|---|---|
-| `--resume` | | Resume this run directory instead. |
-| `--kind` | | run, prediction or optimization (default: from the file). |
-| `--max-steps` | | Stop after this many steps (iterations of an optimization). |
+| `--resume` | | Resume this run, optimization or build directory instead. |
+| `--kind` | | run, prediction, optimization or surrogate (default: by the file). |
+| `--max-steps` | | Stop after this many steps (iterations of an optimization, member runs of a surrogate build). |
 | `--code` | | live, frozen (the last commit; a resume: the run's own) or a commit (default: [jobs] cli_code, frozen). |
 | `--priority` | normal | high, normal or low. |
 | `--yes` | false | Approve a large job without asking. |

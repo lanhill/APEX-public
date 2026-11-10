@@ -8,6 +8,7 @@ items:
   - cli:apex schema
   - cli:apex stop
   - config:history_match:method
+  - config:prediction:prediction
   - plugin:damping_schemes:rlmmac
   - plugin:localizations:adaptive
   - plugin:localizations:adaptive_per_update
@@ -17,6 +18,7 @@ items:
   - plugin:localizations:distance_entries
   - plugin:methods:gn_enrml
   - plugin:methods:lm_enrml
+  - plugin:surrogate_designs:run
   - plugin:update_strategies:adaptive_rows
   - plugin:update_strategies:approx
   - plugin:update_strategies:local_analysis
@@ -65,9 +67,9 @@ The four adaptive plugins have no positions to set: you choose a taper and a thr
 | `distance` | distance-based localization around well locations (`dist_loc`) | one radius and taper for a set of named wells |
 | `distance_entries` | upstream PET's distance localization (`distance_loc`), one entry per data and variable | you want per-entry control of centre, reach, shape and target |
 
-Rule of thumb between the two `autoadaloc` plugins: `adaptive_per_update` uses a threshold of the form `threshold_scale * sqrt(2 ln n_block) * sigma` and is the one with a `threshold_scale`; `adaptive_projected` has no `threshold_scale` and works in PET's projected-data space, a term this page does not define beyond that. Start with `adaptive_per_update` unless you must match PET.
+Rule of thumb between the two `autoadaloc` plugins: `adaptive_per_update` uses a threshold of the form `threshold_scale * sqrt(2 ln n_block) * sigma` and is the one with a `threshold_scale`; `adaptive_projected` has no `threshold_scale`. Start with `adaptive_per_update` unless you must match PET.
 
-A run has one localization, chosen in `[method.localization]`: `name` is the plugin, and its options go in `[method.localization.options]`. It is passed to the update strategy, so `[method.strategy]` must name a strategy that receives a localization: `approx`, `rlmmac`, `local_analysis` and `local_rlmmac` do. `adaptive_rows` is not passed one, so do not combine it with `[method.localization]`. The snippets below use `approx` with `lm_enrml` (the iterative methods `lm_enrml` and `gn_enrml` both use a strategy in the same way).
+A run has one localization, chosen in `[method.localization]`: `name` is the plugin, and its options go in `[method.localization.options]`. It is passed to the update strategy, so `[method.strategy]` must name a strategy that receives a localization: `approx`, `rlmmac`, `local_analysis` and `local_rlmmac` do. `adaptive_rows` is not passed one, so do not combine it with `[method.localization]`. The snippets below use `approx` with `lm_enrml`; the iterative method `gn_enrml` takes a strategy in the same way.
 
 Without `[method.localization]` the update is not localized, except by the local-analysis strategies (`local_analysis`, `local_rlmmac`, `adaptive_rows`), which select data by prior correlation. These strategies belong to the `update_strategies` registry.
 
@@ -80,7 +82,7 @@ The adaptive plugins are correlation-based localization, from:
 - X. Luo, T. Bhakta and G. Nævdal (2018). Correlation-based adaptive localization with applications to ensemble-based 4D-seismic history matching. *SPE Journal* 23(2), 396–427. [doi:10.2118/185936-PA](https://doi.org/10.2118/185936-PA)
 - X. Luo and T. Bhakta (2020). Automatic and adaptive localization for ensemble-based history matching. *Journal of Petroleum Science and Engineering* 184, 106559. [doi:10.1016/j.petrol.2019.106559](https://doi.org/10.1016/j.petrol.2019.106559)
 
-`adaptive`, `adaptive_per_update` and `adaptive_prior` share the same four optional options:
+`adaptive`, `adaptive_per_update` and `adaptive_prior` share the same five optional options:
 
 | Option | Type | Default | Allowed values |
 |---|---|---|---|
@@ -88,6 +90,9 @@ The adaptive plugins are correlation-based localization, from:
 | `taper` | string | `"hard"` | `"hard"`, `"soft"`, `"sigmoid"` |
 | `threshold` | string | `"universal"` | `"universal"`, `"fixed"` |
 | `cutoff` | number or unset | unset | in `(0, 1)`; only with `threshold = "fixed"` |
+| `unlocalized` | list of strings | empty | names of state variables updated without localization |
+
+Use `unlocalized` for state variables whose individual values correlate too weakly with the data for any threshold, such as the parameters of a model-error neural network (`nn_params`). Otherwise the threshold can switch them all off: in one case only 0.0025 % of such correlations were kept.
 
 ### Choosing the threshold
 
@@ -144,7 +149,7 @@ Leave `cutoff` out to get the default `3/sqrt(N)`.
 
 ### `adaptive_projected`
 
-`adaptive_projected` has three optional options (it has no `threshold_scale`):
+`adaptive_projected` has three optional options (it has no `threshold_scale` and no `unlocalized`):
 
 | Option | Type | Default | Allowed values |
 |---|---|---|---|
@@ -221,7 +226,7 @@ A kernel is a weighting around a centre cell. Each entry in `entries` defines on
 
 - `gaspari_cohn` and `furrer_bengtsson` are defined by a centre `position` and a `radius`.
 - `import` takes the weights from a file of your own (`taper_file`), one value per grid cell, instead of from a centre and radius.
-- `region` is also available; this page does not describe its weights, so check the results before relying on it.
+- `region` is also available; try it on a small case and check the result before relying on it.
 
 The `radius` is the kernel's length in cells, not in metres. Treat the radii in the examples as illustrations and try values of your own.
 
@@ -233,16 +238,14 @@ The `radius` is the kernel's length in cells, not in metres. Treat the radii in 
 | `entries` | list of entries | required | in order: a later entry replaces an earlier one for the (data, time, variable) it names, as in PET |
 | `actnum_file` | path | none | optional `.npy` or `.npz` file of active cells: one boolean per grid cell, in Eclipse order. When given, the tapers are taken over the active cells only (PET `actnum`) |
 
-The facts state that `taper_file` is resolved relative to the configuration's folder; they do not say this for `actnum_file`, so prefer an absolute path there.
+`taper_file` is resolved relative to the configuration's folder. For `actnum_file`, prefer an absolute path.
 
 ### Entry options
 
-No entry option is required by the schema, and `taper` has no default. Always set:
+No entry option is required by the configuration check, and `taper` has no default. Always set:
 
 - for `gaspari_cohn` and `furrer_bengtsson`: `taper`, `position` and `radius`;
 - for `import`: `taper` and `taper_file`.
-
-What happens when one is missing is not specified, so do not leave them out.
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
@@ -256,7 +259,7 @@ What happens when one is missing is not specified, so do not leave them out.
 | `anisotropy` | list of numbers | none | `[ratio, angle in degrees]` |
 | `taper_file` | string | none | the `import` kernel's taper, relative to the configuration's folder |
 
-The schema does not say how a layer range that runs past the first or last layer is handled, so choose `r` so that `k - r` and `k + r` stay inside the grid.
+Choose `r` so that `k - r` and `k + r` stay inside the grid.
 
 `data`, `time` and `parameter` must match the data types, times and state variable names used in your own setup, spelled exactly. Unless you know the exact time name, leave `time` at `"*"`. For example, `parameter = "pressure"` applies an entry only to a state variable called `pressure`, if your setup has one.
 
@@ -266,7 +269,7 @@ The offset of a cell is its displacement from the centre cell `position`. With `
 
 Numeric check: with `angle = 0` there is no rotation. A cell 4 cells away along `j` with ratio 2 then has an effective distance of 2 cells.
 
-The direction in which a positive angle rotates follows upstream PET and is not stated here. Start with `angle = 0` to see the effect of the ratio alone.
+Start with `angle = 0` to see the effect of the ratio alone, then add a rotation and compare.
 
 ### Steps
 
@@ -282,7 +285,7 @@ With `taper = "import"`, the weights come from `taper_file`, so write only `tape
 
 The file is `.npy` or `.npz` with one value per grid cell: either flat in Eclipse order or shaped `(nx, ny, nz)`. The shaped form is easier to get right. The path is relative to the folder containing the configuration file, not to the directory where you start `apex run`.
 
-How the values are interpreted is defined by PET and not stated here. The all-ones file below only shows the file layout.
+The all-ones file below only shows the file layout.
 
 ```python
 import numpy as np
@@ -385,17 +388,19 @@ Two entries overlap when they can apply to the same data, time and variable and 
 
 - **Positions are 1-based.** The first cell is `[1, 1, 1]`, not `[0, 0, 0]`.
 - **`adaptive` and `adaptive_prior` are the same plugin.** Do not expect them to differ.
-- **A large variable can make the universal threshold strict.** If almost nothing is kept, lower `threshold_scale` or use `threshold = "fixed"`.
+- **A large variable can make the universal threshold strict.** If almost nothing is kept, lower `threshold_scale`, use `threshold = "fixed"`, or list the affected variables in `unlocalized`.
 - **A fixed threshold takes no `threshold_scale`.**
 - **Anisotropy widens the reach along `j`.** A ratio of 2 doubles it.
 - **`z_range` takes two kinds of value.** Use the string `"all"` or an integer.
 - **`import` needs a file.** Set `taper_file`, with the path relative to the folder of the configuration file.
-- **Always set `taper` in an entry.** It has no default and the schema does not require it.
+- **Always set `taper` in an entry.** It has no default and is not enforced.
 - **Required options.** `distance_entries` needs `grid` and `entries`; `distance` needs `grid`, `positions` and `radius`.
 - **Unknown options are errors.** All six plugins reject options not listed on this page.
 - **Do not set supplied values.** `block_sizes` and `variable_names` come from APEX.
 - **Names must match.** Values for `data`, `time`, `parameter` and the keys of `positions` that match nothing in your setup will not localize what you intend. With `distance`, a missing well stops the run unless `unlisted = "zero"`.
 - **Do not combine `adaptive_rows` with a localization.** It is not passed one.
+- **`local_rlmmac` and `gn_enrml` do not go together.** Use `local_rlmmac` with `gies` or `lm_enrml`.
+- **Do not confuse the plugin families.** `rlmmac` exists both as an update strategy and as a damping scheme, and `run` (in `surrogate_designs`) is not a localization.
 - **Default `"*"` overlaps.** An entry without `data`, `time` or `parameter` applies to everything.
 
 ## What to read next
@@ -415,10 +420,22 @@ uv run apex stop path/to/run_dir
 uv run apex resume path/to/run_dir --max-steps 5
 ```
 
-- `apex predict` with a prediction configuration forecasts the ensembles of a history-matching run beyond history:
+- `apex predict` takes a prediction configuration and forecasts the ensembles of a finished history-matching run beyond history. A minimal one (`prediction:prediction`) needs the prediction's `name`, the `run_dir` to forecast from, the `ensembles` to forecast (`"posterior"`, `"prior"`, `"iteration:<k>"`, and in synthetic cases `"truth"`) and the summary vectors in `[prediction.outputs]`:
+
+```toml
+[prediction]
+name = "forecast"
+run_dir = "path/to/run_dir"
+ensembles = ["prior", "posterior"]
+
+[prediction.outputs]
+vectors = ["WOPR:*"]
+```
 
 ```bash
 uv run apex predict prediction.toml
 ```
+
+  By default the forecast is checked against the run's stored forecasts over the history period (`check_history = true`), and results go to `<run_dir>/predictions/<name>`.
 
 - The [configuration reference](../../reference/configuration/history_match.md), for the rest of a run configuration.

@@ -78,6 +78,7 @@ nav:
       - guide/plugins/variogram_estimators.md
       - guide/cli/surrogate.md
       - guide/plugins/surrogate_designs.md
+      - guide/notebooks/prediction.ipynb
   - Reference:
       - reference/agents.md
       - reference/assistant-tools.md

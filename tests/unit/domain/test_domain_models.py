@@ -109,3 +109,14 @@ def test_a_state_grid_must_match_its_size() -> None:
     assert StateVariable("permx", 200, grid=(10, 10, 2)).grid == (10, 10, 2)
     with pytest.raises(ValueError, match="product is its size"):
         StateVariable("permx", 200, grid=(10, 10, 3))
+
+
+def test_an_empty_configuration_is_refused_as_empty() -> None:
+    """Tester's H42 (2026-11-09): an empty or comment-only file was refused for a missing
+    [case] truth_file, which is not what is wrong with it."""
+    import tomllib
+
+    for text in ("", "# only a comment\n", '# a line with escaped \\n and \\"quotes\\"\n'):
+        with pytest.raises(ValidationError, match="no configuration found") as caught:
+            HistoryMatchConfig.model_validate(tomllib.loads(text))
+        assert "truth_file" not in str(caught.value)

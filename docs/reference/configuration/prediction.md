@@ -5,7 +5,7 @@ generated: reference
 
 # Configuring prediction: reference
 
-Every one of these 5 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
+Every one of these 6 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use.
 
 ## `prediction:controls`
 
@@ -51,6 +51,14 @@ Where members run; default: the run's [execution].
 | `name` | string | required | |
 | `options` | object | | |
 
+## `prediction:model_error`
+
+Options of the run's model-error model for the forecast past the history (only those the model declares in forecast_options).
+
+| option | type | default | description |
+|---|---|---|---|
+| `options` | object | required | |
+
 ## `prediction:prediction`
 
 `[prediction]`.
@@ -66,6 +74,7 @@ Where members run; default: the run's [execution].
 | `percentile_convention` | string | percentile | 'percentile': p10 is the 10th percentile; 'exceedance': SPE-PRMS labels (P90 is the value exceeded with 90 % probability, the 10th percentile). |
 | `run_dir` | string | required | The history-matching run to forecast from. |
 | `scores` | array | | Forecast scores against the truth (synthetic cases, with 'truth'). |
+| `seed` | integer or null | | The seed of the prediction's own draws: a model-error model that extrapolates its parameters past the history. Default: derived from the run's seed and the prediction's name. Refused when nothing in the prediction draws. |
 | `truth_is_simulator` | boolean | false | A run with a model-error model: its truth is this simulator's own (the observations came from it, without model error), so 'truth' is forecast by the simulator alone. Without it, 'truth' is refused: a model error means the data came from another model, which the simulator does not reproduce. |
 
 **`PredictionOutputsSection`**: `[prediction.outputs]`: which series to forecast.

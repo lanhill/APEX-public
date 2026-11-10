@@ -2345,6 +2345,41 @@ def test_the_same_study_under_another_name_keeps_its_one_open_card(
     assert [p.state for p in store.proposals(chat.id)] == ["pending", "pending"]
 
 
+def test_a_failed_revision_leaves_no_file_behind(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tester's H41 (2026-11-09): revise_draft refused a text with escaped newlines (one
+    comment line: no configuration) yet left it as a new draft in the user's folder."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    chat = store.create("plan")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    revise, read = tools["revise_draft"], tools["read_draft"]
+    planned = tools["plan_study"].handler(tools["plan_study"].arguments(
+        case="alpha/config.toml", goal="a baseline", budget=5000, name="kept",
+        variants=[{"name": "baseline", "patch": {}, "rationale": "as configured"}]))  # fmt: skip
+    text = read.handler(read.arguments(draft=planned["draft"]))["text"]
+    shown, folder = assistant.drafts(chat.id)
+    copy = f"{shown}/my_copy_study.toml"
+    escaped = text.replace("\n", "\\n").replace('"', '\\"')
+
+    with pytest.raises(ValueError, match="no study, optimization or run"):
+        revise.handler(revise.arguments(draft=copy, text=escaped))
+    assert not (folder / "my_copy_study.toml").exists()
+    # A check that fails outright, on a new draft or an existing one, saves nothing either.
+    from apex.services.api import ApexService
+
+    def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("a check failed outright")
+
+    monkeypatch.setattr(ApexService, "checked_optimization_study", broken)
+    with pytest.raises(RuntimeError):
+        revise.handler(revise.arguments(draft=copy, text=text))
+    assert not (folder / "my_copy_study.toml").exists()
+    with pytest.raises(RuntimeError):
+        revise.handler(revise.arguments(draft=planned["draft"], text=text + "\n# changed\n"))
+    assert (folder / Path(planned["draft"]).name).read_text() == text
+
+
 def test_a_launch_is_the_same_whatever_its_name_but_not_whatever_its_plugins(
     tmp_path: Path,
 ) -> None:

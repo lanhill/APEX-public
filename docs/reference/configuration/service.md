@@ -94,6 +94,8 @@ written to a file or a log.
 | `poor_fit_mismatch` | number | 10000.0 | |
 | `stagnation_tolerance` | number | 0.01 | |
 | `stagnation_window` | integer | 3 | |
+| `surrogate_max_failed_share` | number | 0.05 | |
+| `surrogate_min_speedup` | number | 10.0 | |
 
 ## `service:agents.planner`
 

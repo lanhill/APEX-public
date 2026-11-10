@@ -69,7 +69,7 @@ The right column names the Python calls, `ApexService`'s and the clients' (`Clie
 | `GET /v1/studies/{name}`, `GET /v1/studies/{name}/comparison` (`?metric=`) | `study_status`, `compare` |
 | `GET /v1/predictions/summary?path=` | `prediction_summary` |
 | `GET /v1/optimizations`, `GET /v1/optimizations/summary?path=` | the caller's optimization jobs, `optimization_summary` |
-| `POST /v1/surrogates` | `submit_surrogate_build`: `surrogate_file`, or `config` with `base_dir`; `max_runs`, `annotations`, `priority`, `client`, `approval_token`. `202`, with the job; a build without `output_dir` is placed in `<root>/surrogates/<name>/<id>` |
+| `POST /v1/surrogates` | `submit_surrogate_build`: `surrogate_file`, or `config` with `base_dir`; `max_runs`, `annotations`, `priority`, `client`, `approval_token`. `202`, with the job; a build without `output_dir` is placed in `<root>/surrogates/<name>/<id>`; a build needs an installed surrogate model plugin, and none is included with APEX yet ([surrogates](surrogates.md)) |
 | `POST /v1/surrogates:check` | `submit_surrogate_check`: `model_file`, `against` (a configuration or a run), `runs`, `seed`, `iteration`, `min_success_fraction`, `min_inside`, `max_runs`. `202`, with the job |
 | `GET /v1/surrogates`, `GET /v1/surrogates/summary?path=` | the caller's surrogate jobs, `surrogate_summary` |
 

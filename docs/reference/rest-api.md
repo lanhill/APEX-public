@@ -5,7 +5,7 @@ generated: reference
 
 # The REST API: reference
 
-Every one of these 56 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use. Each route's request body, field by field, and its response where it is typed, are in the service's OpenAPI document, `GET /openapi.json`.
+Every one of these 60 items, with its options, as APEX's code defines them. Written from the code; the user guide teaches their use. Each route's request body, field by field, and its response where it is typed, are in the service's OpenAPI document, `GET /openapi.json`.
 
 ## `DELETE /v1/chats/{chat_id}`
 
@@ -193,6 +193,18 @@ Comparison
 
 
 
+## `GET /v1/surrogates`
+
+Surrogates
+
+
+
+## `GET /v1/surrogates/summary`
+
+Surrogate Summary
+
+
+
 ## `GET /v1/ui/pages`
 
 Contributed Pages
@@ -357,6 +369,18 @@ Submit Run
 ## `POST /v1/studies`
 
 Submit Study
+
+
+
+## `POST /v1/surrogates`
+
+Submit Surrogate
+
+
+
+## `POST /v1/surrogates:check`
+
+Check Surrogate
 
 
 

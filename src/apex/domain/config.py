@@ -1172,6 +1172,18 @@ class HistoryMatchConfig(_Strict):
     surrogate, checked by the simulator.
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def _not_empty(cls, data: object) -> object:
+        """Refuse an empty document as such (tester's H42), before any section's own rule."""
+        if isinstance(data, dict) and not data:
+            raise ValueError(
+                "no configuration found: the file is empty or holds only comments (a run's "
+                "configuration needs [run], [state], [prior], [observations], [simulator] "
+                "and [method])"
+            )
+        return data
+
     run: RunSection
     state: StateSection
     prior: PriorSection

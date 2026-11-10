@@ -1379,11 +1379,40 @@ class ChatAssistant:
                     spec_type.model_validate(parsed)
             except (tomllib.TOMLDecodeError, ValidationError) as error:
                 raise ValueError(f"not a valid draft: {error}") from error
-            before = path.read_text() if path.exists() else ""
+            if not (optimizing or "study" in parsed or ("run" in parsed and "method" in parsed)):
+                # H41: text with escaped newlines is one comment line, i.e. no configuration.
+                raise ValueError(
+                    "not a valid draft: the text holds no study, optimization or run "
+                    "configuration (e.g. it is empty, only comments, or written with escaped "
+                    "\\n); write the TOML's lines out, with real line breaks (not saved)"
+                )
+            existed = path.exists()
+            before = path.read_text() if existed else ""
+
+            def undo() -> None:
+                """Leave the draft as it was: its last valid version, or no file (H41).
+
+                Only while it still holds this revision: an editor's save meanwhile stays.
+                A failed undo is logged; the error that caused it is the one raised.
+                """
+                try:
+                    if not path.exists() or path.read_text() != args.text:
+                        return
+                    if existed:
+                        _write(space, args.draft, before)
+                    else:
+                        path.unlink(missing_ok=True)
+                except (ApexError, OSError) as error:
+                    logger.warning("could not restore draft %s: %s", draft, error)
+
             _write(space, args.draft, args.text)
-            total, errors = cost(path)
+            try:
+                total, errors = cost(path)
+            except BaseException:
+                undo()  # a check that fails outright saves nothing either
+                raise
             if errors:
-                _write(space, args.draft, before)  # keep the last valid version
+                undo()
                 raise ValueError("the revised draft is invalid (not saved): " + "; ".join(errors))
             diff = "".join(difflib.unified_diff(
                 before.splitlines(True), args.text.splitlines(True), "before", "after", n=1

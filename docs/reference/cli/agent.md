@@ -216,7 +216,7 @@ uv run apex agent geomodel CONFIG
 
 ## `apex agent monitor`
 
-Check a run's health: rules on its facts, and a model's judgement.
+Check a run's, an optimization's or a surrogate build's health: rules, a model.
 
 ```bash
 uv run apex agent monitor TARGET
@@ -293,7 +293,7 @@ uv run apex agent providers
 
 ## `apex agent report`
 
-Write a narrative report of a run or a study.
+Write a narrative report of a run, optimization, surrogate build or study.
 
 ```bash
 uv run apex agent report TARGET

@@ -109,7 +109,7 @@ Get a finished prediction's statistics and scores.
 
 ## `propose_action`
 
-Propose launching a draft (a study, or an optimization): the user sees a card to review, launch or discard it. You cannot launch it yourself.
+Propose launching a draft (a study, or an optimization): the user sees a card to review, launch or discard it. A launch already on an open card returns that card. You cannot launch it yourself.
 
 
 ## `read_draft`
