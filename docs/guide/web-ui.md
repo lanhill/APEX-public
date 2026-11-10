@@ -14,8 +14,17 @@ items:
   - cli:apex submit
   - cli:apex summary
   - cli:apex validate
+  - config:history_match:method
   - config:optimization:objectives
+  - config:prediction:prediction
+  - config:service:approval
+  - plugin:methods:esmda
+  - plugin:methods:gies
+  - plugin:methods:gn_enrml
+  - plugin:methods:lm_enrml
   - plugin:priors:file
+  - plugin:surrogate_designs:file
+  - plugin:surrogate_designs:run
   - plugin:update_strategies:full
   - webui:agents
   - webui:editor
@@ -42,7 +51,7 @@ By the end of this lesson you will know what each page of the APEX web UI shows,
 - A running APEX web UI that you can open in your browser.
 - Nothing else is needed for the main path. The worked example is done in the browser, and the `examples` page gives you a first configuration.
 - Optionally, a terminal in the APEX folder, for the steps marked optional. `apex` is not on the PATH after the README's installation, so every command on this page is written `uv run apex ...` and is typed from the APEX folder.
-- Work is started from the web UI itself (the `editor` page's *submit*). The `jobs` page lists only jobs you submitted from the web UI. A run started in a terminal with `uv run apex run` is not a job, and `uv run apex submit` from a terminal is not listed either.
+- Work is started from the web UI itself (the `editor` page's *submit*). The `jobs` page lists only jobs you submitted from the web UI. Work started from a terminal is not listed: not a run started with `uv run apex run`, and not one handed over with `uv run apex submit`.
 
 The pages `jobs`, `runs`, `optimizations` and `studies` list only what you submitted or can see, so they are empty until work has been submitted.
 
@@ -55,15 +64,15 @@ The pages `jobs`, `runs`, `optimizations` and `studies` list only what you submi
 - **Workspace folder**: the folder that holds your configurations. The `editor` page lists the configurations in it, and `examples` copies files into it.
 - **Workflow**: the kind of work a configuration is for, for example a history-matching run or a prediction. The `examples` page groups its catalogue by workflow, and the `plugins` page also groups plugins by workflow.
 - **Registry**: a named group of plugins within a workflow, as the `plugins` page shows them. For example, `file` is a plugin of the `priors` registry (it reads a stored ensemble from an `.npz` file), and `full` is a plugin of the `update_strategies` registry (a full LM update with the prior-increment term).
-- **History-matching run**: a run that adjusts an ensemble of models so that it matches observed data. It proceeds in **analysis steps**. `apex run` starts one in your terminal.
+- **History-matching run**: a run that adjusts an ensemble of models so that it matches observed data. It proceeds in **analysis steps**. `apex run` starts one in your terminal. Its `[method]` section (`history_match:method`) names an ensemble algorithm from the `methods` registry (`esmda`, `gies`, `gn_enrml`, `lm_enrml`) and its strategy.
 - **Data mismatch**: how far the simulated results are from the observed data. A run is doing its job when the mismatch goes down from step to step.
 - **Checkpoint**: a point where a run can be stopped and later continued. You see its effect when a stop request takes effect.
 - **Run directory**: the directory of one run. The commands `apex stop`, `apex resume` and `apex report` take it as an argument. `apex summary` takes run directories, or folders holding runs, which it searches. The web UI does not need you to know it.
-- **Prediction**: a forecast of the ensembles of a history-matching run beyond the history. `apex predict` makes one.
+- **Prediction**: a forecast of the ensembles of a history-matching run beyond the history. `apex predict` makes one from a configuration whose `[prediction]` section (`prediction:prediction`) names the `run_dir` to forecast from, the `ensembles` to forecast (`posterior`, `prior`, `iteration:<k>` and, in synthetic cases, `truth`) and the `vectors` to output. `percentile_convention` chooses between `percentile` and `exceedance` labels.
 - **Optimization**: work that improves an objective over several steps. `apex optimize` runs one in a terminal. An optimization configuration can list several objectives in its `optimization:objectives` entry, each a plugin with options and an optional label. The `optimization` page shows the objective over its steps, and its front when there are several objectives.
 - **Study**: a set of variants that you compare. `apex study compare NAME` compares a study's variants at each run's posterior. The `studies` page lists your studies and their state. `apex validate` accepts a study configuration.
 - **Job**: a unit of submitted work. It has a kind, a state and progress.
-- **Approval**: a large submission is held until it is approved. The editor then shows an `apex approve TOKEN` command. `apex approve` takes the pending approval's token (and `--root` for the services root). After approval, submit again.
+- **Approval**: a large submission is held until a person approves it. The `approval` section of the service configuration (`service:approval`) sets when: `max_simulator_runs` (default `20000`) and `max_runs` (default `20`). The editor then shows an `apex approve TOKEN` command. `apex approve` takes the pending approval's token (and `--root` for the services root). After approval, submit again.
 
 How to configure and start optimizations and studies is covered in later lessons. `apex summary` already reports optimization steps.
 
@@ -96,7 +105,7 @@ The picture above was taken with some optional add-on packages installed, so its
 
 | Page | Route | What it shows |
 |---|---|---|
-| `jobs` | `#/jobs` | Every job you submitted from the web UI: its kind, state, progress and when it ran. Open one to follow it. |
+| `jobs` | `#/jobs` | Every job you submitted from the web UI (the editor's submit, the assistant's launches): its kind, state, progress and when it ran. Open one to follow it. |
 | `job` | `#/jobs/{job}` | One job's live events and progress, with Stop and Resume, and links to its runs. |
 
 ![The jobs page](img/webui-jobs.png)
@@ -144,12 +153,19 @@ The picture above was taken with some optional add-on packages installed, so its
    ```
 
    Replace `config.toml` with the path of your file. `apex validate` accepts a run, prediction, optimization, study or surrogate build configuration, reports any problem it finds, and plans the cost without simulating anything. Add `--json` to get the result as JSON, and `--root` to name the services root.
-5. Start the work from the `editor`: save the file, then press *submit*. The service runs it as a job, whatever its kind. If the submission is large, the editor shows an `apex approve TOKEN` command instead of starting it: the submission is waiting for approval. Run that command (`uv run apex approve TOKEN`), then submit again. (In a terminal, `uv run apex run config.toml` runs a history match in that terminal, without a job, and `uv run apex submit config.toml` hands a configuration to the job service in the background. Neither appears in the web UI.)
+5. Start the work from the `editor`: save the file, then press *submit*. The service runs it as a job, whatever its kind. If the submission is large, the editor shows an `apex approve TOKEN` command instead of starting it: the submission is waiting for approval. Run that command (`uv run apex approve TOKEN`), then submit again.
 6. Find your work in `jobs` and open it to reach `job`, where you can watch live events and progress.
 7. From `job`, follow the links to its runs, then open a run in `run` to see its charts.
 8. For other kinds of results, use `optimizations` (then `optimization`), `studies` and `prediction`.
    - The route of `prediction` has no item. Open the page at `#/prediction`; it shows a prediction's percentiles and forecast scores.
    - To inspect a prediction you made with `apex predict` from the terminal, give its directory to `apex report`, which accepts the directory of a run or of a prediction.
+
+### Starting work from a terminal instead
+
+Work started in a terminal does not show in `jobs`, but you may want it for scripts:
+
+- `uv run apex run config.toml` runs a history match in that terminal, without a job. `--max-steps N` stops it after N analysis steps and `uv run apex resume RUN_DIR` continues it.
+- `uv run apex submit config.toml` hands a run, prediction, optimization or surrogate build to the job service in the background. Useful options: `--wait` waits for the job to end, `--priority` takes `high`, `normal` (the default) or `low`, `--force-new` runs again even if an identical run exists, and `--annotation key=value` (repeatable) attaches an annotation. A large job asks for approval: `--yes` approves it without asking, or approve a token with `uv run apex approve TOKEN` and then pass it as `--approval-token TOKEN`.
 
 ## Worked example: from an example to a result
 
@@ -161,9 +177,18 @@ This example takes you from the catalogue to the charts of a history-matching ru
    - On `plugins`, `energy` of `full` is a number in `(0, 1]` with default `0.98`: the fraction of the singular-value sum kept. Any value in that range keeps the run the same size.
    - If the `energy` line is already in the section, change its value; if not, add the line to the section.
 
-   ```text
-   before:  energy = 0.98      (or no energy line at all)
-   after:   energy = 0.95
+   The relevant part of the file looks like this after the change (your file has other sections too, which you leave as they are):
+
+   ```toml
+   [method]
+   name = "gies"
+   max_iterations = 10
+
+   [method.strategy]
+   name = "full"
+
+   [method.strategy.options]
+   energy = 0.95
    ```
 
    Avoid options that set sizes, such as an ensemble size: a large value can make the run much longer. `full` only works with the methods `gies`, `lm_enrml` and `gn_enrml`; with `esmda` it is refused, so keep the strategy the example already uses if it is not `full`.

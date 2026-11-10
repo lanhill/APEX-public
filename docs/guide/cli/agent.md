@@ -19,22 +19,36 @@ items:
   - cli:apex agent providers
   - cli:apex agent report
   - cli:apex approve
+  - cli:apex ert import
   - cli:apex optimize
+  - cli:apex pet-import
+  - cli:apex predict
   - cli:apex report
   - cli:apex resume
   - cli:apex run
   - cli:apex stop
   - cli:apex submit
+  - cli:apex summary
+  - config:history_match:prior
   - config:optimization_study:study
+  - config:prediction:prediction
   - config:service:service
   - config:study:study
+  - plugin:executors:ert
+  - plugin:figure_presets:brugge_classic
+  - plugin:metrics:model_change
+  - plugin:optimizers:enopt
+  - plugin:response_objectives:npv
+  - plugin:simulators:ert
+  - plugin:simulators:opm_flow
+  - plugin:surrogate_designs:run
 ---
 
 # The `apex agent` commands
 
 ## Goal
 
-By the end of this lesson you will know what each `apex agent` command does, which ones can run on rules alone (no model), and how to use them to ask questions, check runs, understand failures, draw figures, write reports, plan studies, convert cases, give a case a prior and draft optimizations. You will also meet the commands that work alongside them: `apex run`, `apex resume`, `apex stop`, `apex submit`, `apex approve`, `apex optimize` and `apex report`.
+By the end of this lesson you will know what each `apex agent` command does and which ones can run on rules alone, with no model. You will use them to ask questions, check runs, understand failures, draw figures, write reports, plan studies, convert cases, give a case a prior and draft optimizations. You will also meet the commands that work alongside them: `apex run`, `apex resume`, `apex stop`, `apex submit`, `apex approve`, `apex optimize` and `apex report`.
 
 The agent commands are `apex agent ask`, `apex agent monitor`, `apex agent diagnose`, `apex agent plot`, `apex agent report`, `apex agent plan`, `apex agent draft-optimization`, `apex agent geomodel`, `apex agent providers`, and the converters `apex agent convert create`, `apex agent convert from`, `apex agent convert from-pet`, `apex agent convert import`, `apex agent convert observe`, `apex agent convert skills`, `apex agent convert to` and `apex agent convert to-pet`.
 
@@ -43,7 +57,7 @@ The lesson also shows three configuration sections: `study:study` (the `[study]`
 ## Prerequisites
 
 - A working `apex` installation. Type every command from the APEX folder as `uv run apex ...`.
-- A services root. By default this is `$APEX_HOME`, otherwise `~/.apex/service`. Most agent commands accept `--root` to point somewhere else (see the note under Step 2).
+- A services root. By default this is `$APEX_HOME`, otherwise `~/.apex/service`. `service.toml` lives there. Most agent commands accept `--root` to point somewhere else (see the note under Step 2).
 - For the commands that consult a model: a provider and a model. Unless you pass `--provider` and `--model`, APEX uses the `provider` and `model` options in the `[agents.llm]` section of your configuration.
 - For the commands that look at a run: a run directory, a run id or a job id. You get a run by starting one with `uv run apex run CONFIG`, or in the background with `uv run apex submit CONFIG`.
 
@@ -69,7 +83,7 @@ Most agent commands share the same model options:
 
 The commands `apex agent convert create`, `apex agent convert import`, `apex agent diagnose`, `apex agent geomodel`, `apex agent monitor`, `apex agent plan`, `apex agent plot` and `apex agent report` also accept `--no-llm`. It means rules only: no model is asked. Default: off, so a model is asked. `apex agent draft-optimization` never uses a model.
 
-**What the model receives.** An agent sends the model facts computed from your runs and cases: configuration settings, data-mismatch and metric values, well and data-type names, and paths. A hosted provider (`anthropic`, `claude_code`, or a `--base-url` outside your own machines) receives them on its servers, under its terms; a local server (Ollama, vLLM, llama.cpp on `localhost` or your network) keeps them on your machines, and `--no-llm` sends nothing. See [what a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
+**What the model receives.** An agent sends the model facts computed from your runs and cases: configuration settings, data-mismatch and metric values, well and data-type names, and paths. A hosted provider (`anthropic`, `claude_code`, or a `--base-url` outside your own machines) receives them on its servers, under its terms. A local server (Ollama, vLLM, llama.cpp on `localhost` or your network) keeps them on your machines, and `--no-llm` sends nothing. See [what a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
 
 **About `--root`.** All agent commands accept `--root` except `apex agent providers` and `apex agent convert skills`. Of the other commands in this lesson, `apex submit` and `apex approve` accept it too, but `apex run`, `apex resume`, `apex stop`, `apex optimize` and `apex report` do not: they work on the directory or configuration you give them.
 
@@ -86,16 +100,26 @@ The `question` argument is required. The agent may use APEX's tools to answer.
 - `--client` is the client name used for quotas and the call log. Default: `agent`.
 - `--root`, `--provider`, `--model`, `--base-url`, `--api-key-env` and `--no-tool-calls` work as described above.
 
-## Step 4: Check a run with `apex agent monitor`
+## Step 4: Check health with `apex agent monitor`
 
 ```bash
 uv run apex agent monitor RUN_ID
 ```
 
-`apex agent monitor` checks a run's health. It applies rules to the run's facts and adds a model's judgement (with `--no-llm`, only the rules). The `target` is a run directory, a run id or a job id; the path of the run's directory (the one you would give to `apex resume`) always works. Read the result as an assessment of whether the run looks healthy. For a running iterative run (a run that proceeds in iterations), it also says whether stopping is recommended.
+`apex agent monitor` checks the health of a run, an optimization or a surrogate build. It applies rules and adds a model's judgement (with `--no-llm`, only the rules). The `target` is a run directory, a run id or a job id; the path of the run's directory (the one you would give to `apex resume`) always works.
 
-- `--watch` checks again whenever a new forecast is scored, until the job ends. `--interval` sets the seconds between looks (default 60) and only matters together with `--watch`. `--no-watch` turns watching off.
-- `--act` offers to stop the job when the check recommends a stop. This applies to running iterative runs only, and you are asked to confirm first. `--no-act` turns it off. Default: off.
+Read the result as an assessment of whether the job looks healthy. For a running iterative run (a run that proceeds in iterations), it also says whether stopping is recommended.
+
+What to do next:
+
+- If the job looks healthy, let it finish.
+- If it does not, run `apex agent diagnose` (Step 5) to learn what to change.
+- If it recommends a stop, stop the run (see below). Change the configuration if needed, then continue with `apex resume` or start again with `apex run`.
+
+Options:
+
+- `--watch` checks again whenever a new forecast is scored, until the job ends. `--interval` sets the seconds between looks (default 60) and only matters together with `--watch`. `--no-watch` turns watching off (the default).
+- `--act` offers to stop the job when the check recommends a stop. This applies to running iterative runs only, and you are asked to confirm first. `--no-act` turns it off (the default).
 - `--no-llm` gives a rules-only check.
 - `--json` prints the result as JSON, which is handy for scripts.
 
@@ -132,6 +156,8 @@ uv run apex agent plot RUN_ID --preset brugge_classic
 
 Figures go to `RUN/report/plots` unless you set `--output`. `--no-llm` gives a rules-only run.
 
+The `brugge_classic` preset is the classic figure set of an ensemble history-matching study. Its options are `histogram_variable` (the state variable of the `nn_hist/` figures; default `nn_params`), `normalized` (also draw `normalized_data_mismatch`; default false) and `model_change` (also draw `model_change`; default false). The `model_change` figure comes from the `model_change` metric, which scores the change of each member's parameters since the ensemble it was updated from.
+
 A related command is `apex report RUN_DIR`. It prints the data mismatch history and performance metrics of a run or a prediction. With `--plots` it also writes the figures (PNG and PDF) to `--output` (default `RUN_DIR/report`); `--no-plots` turns that off (the default), and `--font-size` sets the font in points (default 12.0).
 
 ```bash
@@ -144,13 +170,17 @@ uv run apex report RUN_DIR --plots --font-size 14
 uv run apex agent report RUN_ID --out report.md
 ```
 
-`apex agent report` writes a narrative report, in Markdown, of a run or a study.
+`apex agent report` writes a narrative report, in Markdown, of a run, an optimization, a surrogate build or a study.
 
-- Give a `target` (run directory, run id or job id) to report on a run, or `--study` to report on a study instead. Both are optional on the command line, but you need one of them.
+- Give a `target` (a run, optimization or surrogate build directory, a run id or a job id) to report on one of those, or `--study` to report on a study instead. Both are optional on the command line, but you need one of them.
 - `--out` says where to write the Markdown.
 - `--no-llm` gives a rules-only report.
 
-A study is described in the `[study]` section; see Step 8 for how to write one.
+To report on a study, write the study first (Step 8 shows how to write one) and then point `--study` at it:
+
+```bash
+uv run apex agent report --study study.toml --out study_report.md
+```
 
 ## Step 8: Plan a study with `apex agent plan`
 
@@ -162,19 +192,19 @@ uv run apex agent plan case.toml --goal "Find out which parameters the history c
 
 - `config` (required) is the case: a history-matching or optimization configuration.
 - `--goal` (required) states what the experiment should find out.
-- `--budget` is the number of simulator runs for the whole study. By default it is the approval limit of `service.toml`.
+- `--budget` is the number of simulator runs for the whole study. By default it is the approval limit of `service.toml`, the file in your services root. A submission above that limit needs approval before it starts.
 - `--out` is where the study is written. By default it goes beside the case.
-- `--submit` submits the study after you confirm, through APEX's tools and with an approval token. `--no-submit` turns it off (the default).
-- `--approval-token` submits with a token approved by `apex approve` after an earlier `--submit` was pending. It implies `--submit`.
+- `--submit` submits the study after you confirm, through APEX's tools. `--no-submit` turns it off (the default).
+- `--approval-token` submits with a token that `apex approve` approved after an earlier `--submit` was left pending. It implies `--submit`.
 - `--no-llm` and `--json` are also available.
 
 ### The approval sequence
 
-A submission can be held until someone approves it, for example a large job. A held submission stays pending instead of starting, and you get a token for it. The sequence is:
+The first `--submit` needs no token. If the submission needs no approval, it starts right after you confirm. If it does need approval (for example, the budget is above the approval limit), it is left pending instead of starting, and you get a token for it. The sequence is then:
 
-1. Run `apex agent plan` with `--submit` and confirm when asked. If approval is needed, the submission is left pending and you get a token.
+1. Run `apex agent plan` with `--submit` and confirm when asked. The pending submission and its token are reported.
 2. Approve it with `apex approve TOKEN`.
-3. Submit again with the token.
+3. Submit again with `--approval-token TOKEN`.
 
 ```bash
 uv run apex agent plan case.toml --goal "Find out which parameters the history constrains" --submit
@@ -182,15 +212,46 @@ uv run apex approve TOKEN
 uv run apex agent plan case.toml --goal "Find out which parameters the history constrains" --approval-token TOKEN
 ```
 
-The plain `apex submit` command works the same way. It runs a configuration, or resumes a run with `--resume`, in the job service's background. Useful options are `--kind` (`run`, `prediction` or `optimization`; default: from the file), `--max-steps`, `--priority` (`high`, `normal` or `low`; default `normal`), `--yes` (approve a large job without asking), `--approval-token` (a token approved with `apex approve`), `--wait` / `--no-wait` (wait for the job to end; default off), `--force-new` / `--no-force-new` (run again even if an identical run exists; default off), `--client` (default `user`), `--annotation key=value` (repeatable) and `--root`.
+The plain `apex submit` command works the same way. It runs a configuration, or resumes a run with `--resume`, in the job service's background. Useful options:
+
+- `--kind`: `run`, `prediction`, `optimization` or `surrogate` (default: by the file).
+- `--max-steps`: stop after this many steps (iterations of an optimization, member runs of a surrogate build).
+- `--code`: `live`, `frozen` (the last commit; for a resume, the run's own) or a commit. Default: `cli_code` in `[jobs]`, which is `frozen`.
+- `--priority`: `high`, `normal` or `low`. Default `normal`.
+- `--yes`: approve a large job without asking.
+- `--approval-token`: a token approved with `apex approve`.
+- `--wait` / `--no-wait`: wait for the job to end. Default off.
+- `--force-new` / `--no-force-new`: run again even if an identical run exists. Default off.
+- `--client`: the client name, for quotas and grants. Default `user`.
+- `--annotation key=value`: repeatable; `experiment=NAME` lets a grant of `--client` for that experiment approve the job.
+- `--root`.
 
 ```bash
 uv run apex submit case.toml --priority low --wait
 ```
 
+A surrogate build can use the `run` surrogate design, which takes the forecasts a history-matching run already holds (its `run_dir`), so no simulator runs.
+
 ### What a study file looks like
 
-A study is described by a `[study]` section. It needs a `name`, at least one case under `cases` (name to history-matching configuration) and at least one `[[study.variants]]` entry (a change applied to every case, optionally with a `patch`). Other options are `seed` (default 0), `replicates` (default 1), `metrics`, `simulator`, `methods` and `predictions`. A budget goes in `[study.budget]`: it is refused before anything runs when the plan exceeds `max_simulator_runs`.
+A study is described by a `[study]` section. It needs:
+
+- a `name`;
+- at least one case under `cases` (a case name mapped to a history-matching configuration);
+- at least one `[[study.variants]]` entry. A variant is one change applied to every case. Its optional `patch` is a JSON merge patch laid over each case's configuration.
+
+Other options:
+
+- `seed` (default 0): the seeds of replicates 1, 2, ... derive from it.
+- `replicates` (default 1): seeds per case and variant.
+- `metrics`: a list of `'metric:label'` to compare at each run's posterior.
+- `simulator`: `opm_flow` or `eclipse`; runs every case's deck on that simulator instead of the case's own.
+- `methods`: a name mapped to a complete algorithm. Without it, each case keeps its own.
+- `predictions`: prediction configurations without `run_dir`, run after each run.
+
+A budget goes in `[study.budget]`: the study is refused before anything runs when the plan exceeds `max_simulator_runs`.
+
+This study runs one case twice with its own settings (`base`) and again with a patch that limits the method to 5 iterations (`short`):
 
 ```toml
 [study]
@@ -206,6 +267,10 @@ case_a = "case/config.toml"
 
 [[study.variants]]
 name = "base"
+
+[[study.variants]]
+name = "short"
+patch = { method = { max_iterations = 5 } }
 ```
 
 An optimization study is the same `[study]` section with `kind = "optimization"`. Its cases are optimization configurations, its `metrics` are such as `objective:final`, `objective:best`, `evaluations:all` and `iterations:all`, and its `methods` are complete `[optimizer]`-style sections.
@@ -257,6 +322,8 @@ uv run apex agent convert skills
 uv run apex agent convert create --out synthetic_case --no-llm --yes
 ```
 
+The simulators a converted case can name include `opm_flow` (it needs a `deck_template_file`) and `ert` (it needs a `case_file`, `fields` and `eclbase`); an `ert` case runs through the `ert` executor, which runs a forecast's members as one ERT ensemble experiment, locally.
+
 ## Step 10: Give a case a prior with `apex agent geomodel`
 
 ```bash
@@ -277,9 +344,9 @@ uv run apex agent geomodel config.toml --request "Smooth permeability with a lon
 **Inputs.**
 
 - `case` (required): the history-matching case, a deck simulator, with a finished history match (its posterior is the model). You need a deck; if you have none, create a case with `apex agent convert create` (Step 9), which also observes its truth; if you passed `--no-observe` or declined its question, run `apex agent convert observe` next. Then run its history match.
-- `--forecast-end` (required): the last date of the forecast, in ISO form (`YYYY-MM-DD`). It must come after the history, so look at the dates in your deck for where the history ends and choose a later date.
+- `--forecast-end` (required): the last date of the forecast, in ISO form (`YYYY-MM-DD`). It must come after the history. The history ends at the last date of the deck's `WCONHIST`/`WCONINJH` data (or of the observed data the case was built with); choose a later date.
 
-**Economics.** APEX has no default for prices, so choose them yourself. Use your deck's units for volumes and your own currency:
+**Economics.** APEX has no default for prices, so choose them yourself. Use your deck's units for volumes and your own currency. These match the `wop`, `wgp`, `wwp`, `wwi`, `disc` and `obj_scaling` options of the `npv` response objective:
 
 - `--wop`: oil price per unit of FOPT, the cumulative oil produced.
 - `--wwp`: cost per unit of produced water.
@@ -295,11 +362,11 @@ uv run apex agent geomodel config.toml --request "Smooth permeability with a lon
 - `--control-periods`: the number of periods the forecast is split into. Default: 4.
 - `--run`: the history-matching run whose posterior is the model (id, name or path). The posterior holds the model realisations that agree with the history after matching. Without it, the case's latest finished run is used; with none, the draft is refused.
 - `--members`: how many posterior members are used. Default: 10.
-- `--optimizer`: the optimizer plugin. Default: `enopt`.
+- `--optimizer`: the optimizer plugin. Default: `enopt`, which steps along an ensemble estimate of the gradient.
 
 **Output.** `--name` names the draft (default `<run>_npv`), `--out` sets the folder (default: beside the case), and `--json` prints the result as JSON.
 
-Open the draft in its folder and review the economics and bounds. Then pass its optimization configuration to `apex optimize`:
+Open the draft in its folder and review the economics and bounds. Then pass the draft's optimization configuration (the `.toml` it wrote there) to `apex optimize`:
 
 ```bash
 uv run apex optimize OPTIMIZATION_CONFIG --max-iterations 5
@@ -332,13 +399,13 @@ Suppose a history-matching run `hm_run` has finished and you want to review it, 
 4. Draw the classic figures:
 
    ```bash
-   uv run apex agent plot hm_run --preset brugge_classic
+   uv run apex agent plot hm_run --preset brugge_classic --no-llm
    ```
 
 5. Write the report:
 
    ```bash
-   uv run apex agent report hm_run --out hm_run_report.md
+   uv run apex agent report hm_run --out hm_run_report.md --no-llm
    ```
 
 6. Draft an optimization using the run's posterior. Here the history is assumed to end before 2032, and the pressure bounds 100,250 are assumed to suit the deck's pressure unit; adjust both:
@@ -362,6 +429,8 @@ Suppose a history-matching run `hm_run` has finished and you want to review it, 
 
    Continue it later with `uv run apex optimize --resume DIR`.
 
+Every agent command above ran with `--no-llm` or without a model, so nothing left your machine. Drop `--no-llm` to get the model's judgement; then the model receives facts from your runs (see Step 2).
+
 ## Pitfalls
 
 - **Passing the key itself.** `--api-key-env` takes the name of a variable, never the key.
@@ -371,6 +440,7 @@ Suppose a history-matching run `hm_run` has finished and you want to review it, 
 - **Forgetting `--forecast-end`.** `apex agent draft-optimization` requires it, and the date must come after the history.
 - **Using `--producer-bhp` with `oil_rate` control.** The bounds are for bhp control.
 - **Expecting `apex agent plan` to submit by itself.** It submits only after you confirm, and only with `--submit` or `--approval-token`.
+- **Looking for a token that never came.** A token exists only when the submission needed approval; otherwise the first `--submit` already started the study.
 - **Using `--act` outside its scope.** It only offers to stop running iterative runs, and asks you first.
 - **Treating the advice as final.** `apex agent diagnose` is advisory.
 - **Using `--interval` alone.** It only matters together with `--watch`.
@@ -382,3 +452,4 @@ Suppose a history-matching run `hm_run` has finished and you want to review it, 
 - The pages on history matching and optimization, to prepare the cases that `plan` and `draft-optimization` work on, and on `apex run` and `apex optimize`.
 - The page on the service configuration, for the `[agents.llm]` section, the `[service]` section and the approval limit in `service.toml`.
 - The page on approvals, for `apex approve` and how a pending submission is approved.
+- [What a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local), before you point an agent at a hosted model.
