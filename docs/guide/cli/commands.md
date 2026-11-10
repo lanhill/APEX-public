@@ -21,11 +21,13 @@ items:
   - cli:apex validate
   - cli:apex version
   - config:history_match:validation
+  - config:prediction:prediction
   - config:service:approval
   - config:service:chat
   - config:service:guests
   - config:service:service
   - plugin:simulators:opm_flow
+  - plugin:surrogate_designs:run
 ---
 
 # The apex commands
@@ -53,6 +55,7 @@ This page is a tour of the `apex` commands: `apex approve`, `apex data-split`, `
 - **Checkpoint**: a point from which a run can be continued. `apex stop` and `apex resume` work with checkpoints.
 - **Iterate**: the state of the run at one iteration. The **posterior** is the result of the run, and it is what `apex qaqc` checks unless you ask for another iterate.
 - **Accepted iteration**: an iteration of an optimization that the optimizer accepted. `--max-iterations` of `apex optimize` counts these.
+- **Iterative method**: a history-matching method that improves the ensemble over several iterations, such as GIES. ES-MDA is not iterative in this sense: it follows a fixed schedule.
 - **ES**: ensemble smoother, the update that `apex qaqc` uses when its damping is `0`.
 - **PET**: the toolkit whose history-matching configurations `apex pet-import` converts, and whose optimizers `apex optimize` uses. The QA/QC checks of `apex qaqc` are PET's.
 
@@ -126,10 +129,10 @@ Runs a configuration, or resumes a run, in the background of the job service, so
 
 `apex submit` prints the run directory (`folder: ...`). Use `apex report` on that directory to look at the result, or point `apex summary` at the folder where you keep your runs: it searches folders for runs.
 
-- `config` (optional): a run, prediction or optimization configuration.
-- `--resume`: resume this run directory instead of starting a configuration.
-- `--kind`: `run`, `prediction` or `optimization`. Default: taken from the file.
-- `--max-steps`: stop after this many steps (iterations of an optimization). For a run these are analysis steps. To stop an optimization after a number of accepted iterations, run it with `apex optimize --max-iterations` instead.
+- `config` (optional): a run, prediction, optimization or surrogate build.
+- `--resume`: resume this run, optimization or build directory instead of starting a configuration.
+- `--kind`: `run`, `prediction`, `optimization` or `surrogate`. Default: taken from the file.
+- `--max-steps`: stop after this many steps. What a step is depends on the job: an analysis step for a run, an iteration for an optimization, a member run for a surrogate build.
 - `--code`: which copy of the APEX code the job runs with. It takes one value: `live`, `frozen` or a commit. `live` uses the code as it is now. `frozen` uses the copy of the last commit (for a resume, the run's own copy), so later edits do not affect the job. A commit uses the code of that commit. Default: the `[jobs]` setting `cli_code`, which is `frozen`.
 - `--priority`: `high`, `normal` or `low`. Default: `normal`.
 - `--yes`: approve a large job without asking.
@@ -147,7 +150,7 @@ uv run apex submit case/run.toml --code live
 
 The first command submits the run in `case/run.toml` with low priority and waits for the job to end. The second runs the job with the code as it is now instead of the frozen copy.
 
-The job service itself is set up in the `[service]` section of the service configuration (see `apex approve` below for where that file lives). Its options are `max_concurrent_jobs` (integer, at least 1, default `2`), `poll_s` (number greater than 0, default `1.0`), `max_retries` (integer, at least 0, default `2`) and `routines` (boolean, default `true`).
+The job service itself is set up in the `[service]` section of the service configuration, which lives in the services root (see `apex approve` below). Its options are `max_concurrent_jobs` (integer, at least 1, default `2`), `poll_s` (number greater than 0, default `1.0`), `max_retries` (integer, at least 0, default `2`) and `routines` (boolean, default `true`).
 
 ```toml
 [service]
@@ -173,12 +176,35 @@ Continues a stopped or interrupted run from its last checkpoint.
 
 ### `apex predict`
 
-Forecasts the ensembles of a history-matching run beyond history. Do the history matching first with `apex run`, because the forecast is of such a run. The prediction configuration identifies the run to forecast; the output of `apex schema prediction` shows which fields it takes.
+Forecasts the ensembles of a history-matching run beyond history. Do the history matching first with `apex run`, because the forecast is of such a run.
 
 - `config` (required): the prediction configuration (TOML).
 - `--progress` / `--no-progress`: show or hide progress (default: on).
 
-Save your file (below it is called `case/predict.toml`), check it, then forecast:
+The prediction configuration has a `[prediction]` section and a `[prediction.outputs]` section. The required options are `name`, `run_dir` (the history-matching run to forecast from), and in `[prediction.outputs]` the `vectors` (summary vectors or shell-style patterns such as `WOPR:*`). Other options of `[prediction]` are:
+
+- `ensembles`: which ensembles to forecast: `posterior`, `prior`, `iteration:<k>` and, in synthetic cases, `truth`. At least one.
+- `include_mean_model`: also forecast each ensemble's mean model. Default: `false`.
+- `check_history`: fail unless the forecast reproduces the run's stored forecasts over the history period. Default: `true`.
+- `percentile_convention`: `percentile` (p10 is the 10th percentile, the default) or `exceedance` (SPE-PRMS labels: P90 is the value exceeded with 90 % probability, the 10th percentile).
+- `output_dir`: default `<run_dir>/predictions/<name>`.
+- `seed`: the seed of the prediction's own draws, when something in the prediction draws.
+
+`[prediction.outputs]` also takes `times`: `report` (every report time, the default) or a list of ISO dates.
+
+A minimal file, saved as `case/predict.toml`:
+
+```toml
+[prediction]
+name = "forecast1"
+run_dir = "runs/case_run"
+ensembles = ["posterior", "prior"]
+
+[prediction.outputs]
+vectors = ["WOPR:*"]
+```
+
+This forecasts the posterior and prior ensembles of the run in `runs/case_run` for every oil-rate vector of the wells, at every report time. Replace `run_dir` with the directory of your own run. Then check the file and forecast:
 
 ```bash
 uv run apex schema prediction
@@ -186,11 +212,11 @@ uv run apex validate case/predict.toml
 uv run apex predict case/predict.toml
 ```
 
-The first command shows what a prediction configuration accepts, the second checks your file and plans its cost, and the third makes the forecast. `apex report` also accepts the directory of a prediction, so you can look at the result with it.
+The first command shows everything a prediction configuration accepts, the second checks your file and plans its cost, and the third makes the forecast. `apex report` also accepts the directory of a prediction, so you can look at the result with it.
 
 ### `apex optimize`
 
-Minimises an objective with one of PET's optimizers (EnOpt, GenOpt, SmcOpt, ...). The optimization configuration (TOML) is where you set up the problem; `apex schema optimization` prints what it accepts.
+Minimises an objective with one of PET's optimizers (EnOpt, GenOpt, SmcOpt, ...). The optimization configuration (TOML) is where you set up the problem; `uv run apex schema optimization` prints what it accepts.
 
 - `config` (optional): the optimization configuration (TOML).
 - `--resume`: continue the optimization run in this directory.
@@ -256,7 +282,7 @@ Explores how to split production data for cross validation. In cross validation 
 
 - `config` (required): the run configuration (TOML) of the case.
 - `--prior-run`: optional. A run of the same case that has a prior forecast, used for ensemble redundancy, that is, how much the ensemble members repeat each other.
-- `--max-cv`: optional, with no default. The largest candidate CV set, in wells.
+- `--max-cv`: optional. The largest candidate CV set, in wells. If you leave it out, you set no cap of your own; for a small first exploration, start with `--max-cv 3`.
 - `--output`: the directory for the results. Default: `CONFIG dir/data_split`, that is, a `data_split` folder in the directory of the configuration.
 - `--font-size`: font size of the figures in points. Default: `12.0`.
 
@@ -267,7 +293,16 @@ uv run apex data-split case/run.toml --prior-run runs/prior_forecast --max-cv 3
 
 The first command explores candidate splits of at most 3 wells for the case in `case/run.toml` and writes results and figures (font size 14) to `case/split`. The second also passes a run with a prior forecast; replace `runs/prior_forecast` with the directory of your own such run.
 
-Once you have chosen a split, you apply it in the `[validation]` section of the run configuration (for example `case/run.toml`). The section selects the cross-validation data (`cv`), the data only scored (`test`) and the data matched (`history_matching`). Each is a data selection with `wells`, `datatypes`, `keywords` and optionally `times`; at least one of `wells`, `datatypes` and `keywords` must be given. The `stopping` option sets the CV stopping rule; its default is the `patience` rule with `patience = 2`, and `"select"` runs to the usual criteria. It needs `cv`. Only iterative methods take CV. Field data, such as seismic, are always history-matching data. Add a section like this to hold back one well:
+Once you have chosen a split, you apply it in the `[validation]` section of the run configuration (for example `case/run.toml`). The section has these options:
+
+- `cv`: the cross-validation data. They are forecast at every iteration but never matched; their mean-square normalized data mismatch picks the posterior (the iterate where it is lowest).
+- `test`: data that are only scored, never matched and never used to stop, to check that cross validation works.
+- `history_matching`: the data that are matched. By default, every scalar datum that is in neither `cv` nor `test`.
+- `stopping`: the rule that stops the run early. It only works when `cv` is set. The default is the `patience` rule with `patience = 2`: the run stops early once the CV mismatch stops improving, and `patience` sets how many iterations it tolerates. `"select"` turns early stopping off: the run goes on to its usual end, and the posterior is still the iterate with the lowest CV mismatch.
+
+Each of `cv`, `test` and `history_matching` is a data selection with `wells`, `datatypes`, `keywords` and optionally `times`; at least one of `wells`, `datatypes` and `keywords` must be given. Only iterative methods (for example GIES) take CV; ES-MDA's fixed schedule does not. Field data, such as seismic, are always history-matching data and cannot be put in `cv` or `test`. Without `cv` the method runs unchanged.
+
+Add a section like this to hold back one well:
 
 ```toml
 [validation]
@@ -275,6 +310,8 @@ cv = { wells = ["PRO3"] }
 ```
 
 This is only the `[validation]` part; the rest of the run configuration stays as it is.
+
+The `patience` rule assumes a roughly V-shaped CV curve. If the CV mismatch may first rise and then fall, use `stopping = "select"` or a larger patience; otherwise the run stops early and keeps the prior.
 
 ### `apex pet-import`
 
@@ -298,6 +335,8 @@ This reads `pet/config.toml`, fixes the seed at 7 and writes the APEX case to `a
 
 The simulator `opm_flow` runs OPM Flow for one member in its work directory. Its one required option is `deck_template_file`, the Mako template of the `.DATA` deck. Others include `executable` (default `flow`), `flow_args`, `timeout_s` (default `3600.0`) and `keep_files` (default `true`). Print every plugin option with `uv run apex plugins`.
 
+The surrogate-design plugin `run` is a related plugin you may meet in that list: it uses the forecasts a history-matching run already holds (`run_dir`), so it needs no simulator runs.
+
 ## Housekeeping and integration
 
 ### `apex approve`
@@ -307,12 +346,12 @@ Approves a pending submission. Afterwards you submit it again with its token.
 - `token` (required): the pending approval's token. It identifies the submission that is waiting for approval.
 - `--root`: the services root.
 
-Some submissions need a person's approval before they run. The `[approval]` section of the service configuration sets when. It has two options, both integers of at least 1:
+Some submissions need a person's approval before they run. The `[approval]` section of the service configuration decides when. It has two options, both integers of at least 1:
 
-- `max_runs`: a limit on the number of runs in a submission. Default: `20`.
-- `max_simulator_runs`: a limit on the number of simulator runs in a submission. Default: `20000`.
+- `max_runs`: a limit on the number of runs. Default: `20`.
+- `max_simulator_runs`: a limit on the number of simulator runs. Default: `20000`.
 
-A submission that goes beyond these limits counts as a large job and waits for approval. The sections the service configuration accepts are printed by `uv run apex schema service`. The service configuration is `service.toml` in the services root: by default `~/.apex/service/service.toml`, or `$APEX_HOME/service.toml` when `APEX_HOME` is set (see [Studies, the job service and approvals](../../getting_started/studies_and_approvals.md)).
+The service configuration is `service.toml` in the services root (`~/.apex/service`, or `$APEX_HOME` when it is set). The sections it accepts are printed by `uv run apex schema service`. See [Studies, the job service and approvals](../../getting_started/studies_and_approvals.md) for how the service works.
 
 ```toml
 [approval]
@@ -386,19 +425,20 @@ Prints the REST API's bearer token. The token is created on first use and readab
 
 - `--root`: the services root.
 - `--rotate` / `--no-rotate`: replace the token; old clients are refused. Default: off.
-- `--ui`: print a guest's web-UI token instead. A guest sees only their own work, within `<root>/ui_access.toml`. Default: off.
-- `--guest`: the guest, used with `--ui`; each guest has a token of their own. Default: `guest`.
-- `--revoke` / `--no-revoke`: delete the guest's token (with `--ui`); it is refused at once. Default: off.
+- `--ui`: print a guest's web-UI token instead of the API token. The guest sees only their own work, within the limits in `<root>/ui_access.toml`. Default: off.
+- `--guest`: with `--ui`, the guest whose token you want; each guest has a token of their own. Default: `guest`.
+- `--revoke` / `--no-revoke`: with `--ui`, delete the guest's token; it is refused at once. Default: off.
 - `--list-guests`: list the guests who have a token, and when each expires.
-- `--owner`: with `--ui`, print the owner's web-UI token. It expires, unlike the API token, which the web UI refuses. Default: off.
+- `--owner`: with `--ui`, print the owner's web-UI token instead of a guest's. The web UI does not accept the API token, so the owner needs this one. It expires, unlike the API token. Default: off.
 
 ```bash
 uv run apex service token
 uv run apex service token --ui --guest alice
+uv run apex service token --ui --owner
 uv run apex service token --list-guests
 ```
 
-The first command prints the API token. The second prints the web-UI token of the guest `alice`. The third lists the guests who have a token.
+The first command prints the API token. The second prints the web-UI token of the guest `alice`. The third prints the owner's web-UI token. The fourth lists the guests who have a token.
 
 ### `apex mcp`
 
@@ -443,12 +483,13 @@ If a run is still going and you want it to pause, use `apex stop runs/case_run`,
 - Positional arguments are required where listed: for example `config` for `apex run`, `apex predict`, `apex validate` and `apex data-split`, and both `pet_config` and `output_dir` for `apex pet-import`.
 - `apex optimize` and `apex submit` take `config` as optional, because you can continue with `--resume` instead.
 - `--pet-geometry` and `--intended-geometry`, like `--chats` and `--no-chats`, are the on and off positions of one switch, not aliases.
-- `--max-steps` and `--max-iterations` only pause the work. Continue with `apex resume` or `apex optimize --resume`.
+- `--max-steps` and `--max-iterations` only pause the work. Continue with `apex resume`, `apex optimize --resume` or `apex submit --resume`.
 - `apex stop` stops the run at its next checkpoint, so the run may continue for a while after you ask.
 - `apex gc` switches `--chats`, `--guests` and `--code` are off unless you ask for them; use `--dry-run` with `--code` to look before you remove.
 - `--dry-run` only has an effect together with `--code`.
 - `--code` of `apex submit` takes one value (`live`, `frozen` or a commit); it is not the same switch as `--code` of `apex gc`.
 - `--max-cv` counts wells, not data points.
+- `stopping` in `[validation]` needs `cv`, and `cv` needs an iterative method; ES-MDA cannot use it.
 - `--rotate` of `apex service token` refuses every client that still uses the old token.
 - `--truth` is for synthetic cases and expects one array per variable.
 - `--avo-angles-checked` is only for data you know holds each angle's own traces. Leave it off for SimulatorWrap's data.
