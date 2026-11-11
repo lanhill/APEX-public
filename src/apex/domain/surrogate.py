@@ -204,6 +204,12 @@ class SnapshotSet:
     coarse_only_outputs
         ``(n_keys, n_coarse_only)``: their coarse values at ``keys``; given with
         ``coarse_only_inputs`` and only with ``coarse_outputs``.
+    calibration_inputs, calibration_outputs, calibration_ids
+        Optional full runs for calibrating a surrogate's spread only (``[design]
+        calibration``; the Laplace spread's two scales): ``{variable: (size, n_calibration)}``,
+        ``(n_keys, n_calibration)`` and their member ids. Never trained on nor gated on: like
+        the coarse-only members they are not runs of the set, and :meth:`columns` keeps them
+        whole. :meth:`calibration_runs` returns them as a set of their own.
     """
 
     layout: StateLayout
@@ -218,6 +224,9 @@ class SnapshotSet:
     coarse_outputs: NDArray[np.float64] | None = None
     coarse_only_inputs: Mapping[str, NDArray[np.float64]] | None = None
     coarse_only_outputs: NDArray[np.float64] | None = None
+    calibration_inputs: Mapping[str, NDArray[np.float64]] | None = None
+    calibration_outputs: NDArray[np.float64] | None = None
+    calibration_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         """Check every shape against the layout, the keys and the runs; copy the arrays."""
@@ -255,6 +264,7 @@ class SnapshotSet:
                     f"coarse outputs must be the outputs' {outputs.shape}, got {coarse.shape}"
                 )
         only_inputs, only_outputs = self._coarse_only(coarse, len(self.keys))
+        calibration_inputs, calibration_outputs = self._calibration(n_runs)
         if self.fields and not self.field_times:
             raise ValueError("field snapshots need their field_times")
         fields: dict[str, NDArray[np.float64]] = {}
@@ -278,6 +288,68 @@ class SnapshotSet:
         object.__setattr__(self, "coarse_outputs", coarse)
         object.__setattr__(self, "coarse_only_inputs", only_inputs)
         object.__setattr__(self, "coarse_only_outputs", only_outputs)
+        object.__setattr__(self, "calibration_inputs", calibration_inputs)
+        object.__setattr__(self, "calibration_outputs", calibration_outputs)
+        object.__setattr__(self, "calibration_ids", tuple(int(i) for i in self.calibration_ids))
+
+    def _calibration(
+        self, n_runs: int
+    ) -> tuple[Mapping[str, NDArray[np.float64]] | None, NDArray[np.float64] | None]:
+        """Check and copy the calibration runs (inputs, outputs and ids together, or none)."""
+        given = (self.calibration_inputs is not None, self.calibration_outputs is not None,
+                 bool(self.calibration_ids))  # fmt: skip
+        if not any(given):
+            return None, None
+        if not all(given) or self.calibration_inputs is None or self.calibration_outputs is None:
+            raise ValueError("calibration runs need their inputs, outputs and ids together")
+        ids = tuple(int(i) for i in self.calibration_ids)
+        if len(set(ids)) != len(ids):
+            raise ValueError("calibration run ids must be unique")
+        if set(ids) & ({int(i) for i in self.run_ids} | {int(i) for i in self.failed}):
+            raise ValueError("a calibration run cannot also be a run of the set or failed")
+        outputs = _array(self.calibration_outputs, "calibration outputs", 2)
+        if outputs.shape != (len(self.keys), len(ids)):
+            raise ValueError(
+                f"calibration outputs must be ({len(self.keys)}, {len(ids)}), got {outputs.shape}"
+            )
+        if set(self.calibration_inputs) != set(self.layout.names):
+            raise ValueError(
+                f"calibration inputs {sorted(self.calibration_inputs)} must be the layout's "
+                f"variables {sorted(self.layout.names)}"
+            )
+        inputs: dict[str, NDArray[np.float64]] = {}
+        for variable in self.layout.variables:
+            name = variable.name
+            array = _array(self.calibration_inputs[name], f"calibration input {name!r}", 2)
+            if array.shape != (variable.size, len(ids)):
+                raise ValueError(
+                    f"calibration input {name!r} must be ({variable.size}, {len(ids)}), "
+                    f"got {array.shape}"
+                )
+            inputs[name] = array
+        return MappingProxyType(inputs), outputs
+
+    @property
+    def n_calibration(self) -> int:
+        """Number of calibration runs (0 without them)."""
+        return len(self.calibration_ids)
+
+    def calibration_runs(self) -> "SnapshotSet | None":
+        """Return the calibration runs as a set of their own (``None`` without them).
+
+        Their keys, layout and provenance are the set's; fields and coarse values are not
+        kept (the calibration uses the scalar data only).
+        """
+        if self.calibration_inputs is None or self.calibration_outputs is None:
+            return None
+        return SnapshotSet(
+            layout=self.layout,
+            inputs=self.calibration_inputs,
+            keys=self.keys,
+            outputs=self.calibration_outputs,
+            run_ids=self.calibration_ids,
+            provenance=self.provenance,
+        )
 
     def _coarse_only(
         self, coarse: NDArray[np.float64] | None, n_keys: int
@@ -342,6 +414,9 @@ class SnapshotSet:
             coarse_outputs=None if self.coarse_outputs is None else self.coarse_outputs[:, index],
             coarse_only_inputs=self.coarse_only_inputs,
             coarse_only_outputs=self.coarse_only_outputs,
+            calibration_inputs=self.calibration_inputs,
+            calibration_outputs=self.calibration_outputs,
+            calibration_ids=self.calibration_ids,
         )
 
     def digest(self) -> str:
@@ -384,6 +459,13 @@ class SnapshotSet:
             for variable in self.layout.variables:
                 array(self.coarse_only_inputs[variable.name])
             array(self.coarse_only_outputs)
+        if self.calibration_inputs is not None and self.calibration_outputs is not None:
+            # Likewise: sets without calibration runs keep their digests.
+            text("calibration")
+            text(repr(self.calibration_ids))
+            for variable in self.layout.variables:
+                array(self.calibration_inputs[variable.name])
+            array(self.calibration_outputs)
         return digest.hexdigest()
 
 
@@ -1043,6 +1125,15 @@ class DesignSection(_Frozen):
         description="Members run on the [coarse] stack only, drawn after the others (for "
         "surrogates pretrained on coarse runs).",
     )
+    calibration: int | None = Field(
+        default=None,
+        ge=0,
+        description="Extra full runs for the surrogate's spread only (a plugin that declares "
+        "uses_calibration_runs: a Laplace spread, an ensemble's), drawn last; never trained or "
+        "gated on. Unset: automatic for such a plugin (30 runs for a grid of up to 20,000 "
+        "cells, 20 above), none otherwise; 0: none (the spread is calibrated on the "
+        "validation runs, with a warning).",
+    )
 
     @model_serializer(mode="wrap")
     def _without_absent_coarse_only(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -1051,6 +1142,10 @@ class DesignSection(_Frozen):
         document: dict[str, Any] = handler(self)
         if not document.get("coarse_only"):
             document.pop("coarse_only", None)
+        # Likewise the calibration runs when not given (automatic): builds without them keep
+        # their bytes (the automatic count enters the build's identity on its own).
+        if document.get("calibration") is None:
+            document.pop("calibration", None)
         return document
 
     @model_validator(mode="after")
@@ -1229,6 +1324,15 @@ class SurrogateBuildPlan(_Frozen):
     held_out: int
     simulator_runs: int = Field(description="Full runs the design needs (0 for plan 'run').")
     coarse_only: int = Field(default=0, description="Of them, runs on the coarse stack only.")
+    calibration: int = Field(
+        default=0,
+        description="Of them, the extra calibration runs of the surrogate's spread ([design] "
+        "calibration, automatic for a plugin that declares uses_calibration_runs).",
+    )
+    calibration_rule: str | None = Field(
+        default=None,
+        description="How the calibration runs' count was chosen (the rule and what it read).",
+    )
     keys: int = Field(description="The keys the surrogate answers.")
     datatypes: list[str]
     measure: GateMeasure
@@ -1271,6 +1375,18 @@ class SurrogateBuildSummary(_Frozen):
         default_factory=list,
         description="Coarse-only members whose run failed; ``failed`` lists only the "
         "training and held-out runs that failed.",
+    )
+    calibration_runs: int = Field(
+        default=0,
+        description="Successful calibration runs of the surrogate's spread ([design] calibration).",
+    )
+    calibration_failed: list[int] = Field(
+        default_factory=list, description="Calibration members whose run failed."
+    )
+    calibration_fallback: str | None = Field(
+        default=None,
+        description="Why the calibration runs were not used (too many failed): the spread is "
+        "then calibrated on the validation runs.",
     )
     keys: int
     datatypes: list[str]

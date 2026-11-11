@@ -28,6 +28,10 @@ Optional capabilities, read with ``getattr`` as the simulators' are:
   ``[coarse]`` stack's runs in training only (``SnapshotSet.coarse_outputs`` and the
   coarse-only members decision 13; e.g. pretraining on them) and predicts without
   a coarse forecast, so history matching runs no coarse stack for it;
+- ``uses_calibration_runs``, a ``bool`` of the instance (``False`` by default): the plugin
+  calibrates its spread on runs of their own (``SnapshotSet.calibration_runs()``, ``[design]
+  calibration``, drawn automatically when unset), e.g. a Laplace posterior's two scales, and
+  on its validation share without them;
 - ``requires``, a ``tuple[str, ...]`` of simulator capabilities the plugin needs to be
   trained (the intrusive reduced models); none by default;
 - ``version``, a ``str`` recorded in the manifest.

@@ -15,8 +15,9 @@ gates of designs of different sizes compare like with like.
   existing run holds), the held-out columns chosen at random first.
 
 A design may also have **coarse-only** runs (``n_coarse_only``: members a build runs on its
-coarse stack only), drawn last, after the training runs, so that a design without them is
-drawn exactly as before.
+coarse stack only), drawn after the training runs, and **calibration** runs
+(``n_calibration``: full runs a surrogate calibrates its spread on, never trained or gated
+on), drawn last of all; a design without either is drawn exactly as before.
 
 Arrays are ``{variable: (size, n_runs)}``, C-contiguous, the run axis last.
 """
@@ -92,6 +93,9 @@ class Design:
         ``{variable: (size, n_coarse_only)}``, the coarse-only runs; ``None`` without them.
     coarse_only_columns
         For a design taken from a given ensemble, their columns; else ``None``.
+    calibration, calibration_columns
+        ``{variable: (size, n_calibration)}``, the calibration runs, and (from a given
+        ensemble) their columns; ``None`` without them.
     """
 
     plan: DesignPlan
@@ -101,6 +105,8 @@ class Design:
     held_out_columns: tuple[int, ...] | None = None
     coarse_only: Mapping[str, NDArray[np.float64]] | None = None
     coarse_only_columns: tuple[int, ...] | None = None
+    calibration: Mapping[str, NDArray[np.float64]] | None = None
+    calibration_columns: tuple[int, ...] | None = None
 
 
 def _counts(n_training: int, n_held_out: int) -> None:
@@ -161,12 +167,14 @@ def lhs_design(
     n_held_out: int,
     rng: np.random.Generator,
     n_coarse_only: int = 0,
+    n_calibration: int = 0,
 ) -> Design:
     """Return a Latin-hypercube design over a box of inputs.
 
     ``box`` is ``{variable: (lower (size,), upper (size,))}``; every entry of every variable is
     a coordinate. The held-out runs are one hypercube, drawn first; the training runs another,
-    and the ``n_coarse_only`` coarse-only runs a third (none drawn when 0).
+    the ``n_coarse_only`` coarse-only runs a third and the ``n_calibration`` calibration runs
+    a fourth (none drawn when 0).
     """
     _counts(n_training, n_held_out)
     lows, highs, sizes = [], [], {}
@@ -188,11 +196,17 @@ def lhs_design(
         if n_coarse_only > 0
         else None
     )
+    calibration = (
+        _split(latin_hypercube(lower, upper, n_calibration, rng), sizes)
+        if n_calibration > 0
+        else None
+    )
     return Design(
         plan="lhs",
         training=_split(training, sizes),
         held_out=_split(held_out, sizes),
         coarse_only=coarse_only,
+        calibration=calibration,
     )
 
 
@@ -249,11 +263,13 @@ def sampled_design(
     n_held_out: int,
     rng: np.random.Generator,
     n_coarse_only: int = 0,
+    n_calibration: int = 0,
 ) -> Design:
     """Return a design drawn from a generator, e.g. the case's prior (plan ``prior``).
 
     ``draw(n_held_out, rng)`` is called first, then ``draw(n_training, rng)``, then (if
-    ``n_coarse_only > 0``) ``draw(n_coarse_only, rng)``.
+    ``n_coarse_only > 0``) ``draw(n_coarse_only, rng)``, then (if ``n_calibration > 0``)
+    ``draw(n_calibration, rng)``.
 
     Raises
     ------
@@ -273,7 +289,15 @@ def sampled_design(
         )
         if set(coarse_only) != set(training):
             raise ValueError("the draws gave different variables")
-    return Design(plan="prior", training=training, held_out=held_out, coarse_only=coarse_only)
+    calibration = None
+    if n_calibration > 0:
+        calibration = _checked(
+            draw(n_calibration, rng), n_calibration, "the drawn calibration input"
+        )
+        if set(calibration) != set(training):
+            raise ValueError("the draws gave different variables")
+    return Design(plan="prior", training=training, held_out=held_out, coarse_only=coarse_only,
+                  calibration=calibration)  # fmt: skip
 
 
 def ensemble_design(
@@ -283,12 +307,14 @@ def ensemble_design(
     rng: np.random.Generator,
     n_training: int | None = None,
     n_coarse_only: int = 0,
+    n_calibration: int = 0,
 ) -> Design:
     """Return a design from the columns of a given ensemble ``{variable: (size, n_columns)}``.
 
     The columns are permuted once: the first ``n_held_out`` of the permutation are held out,
-    the next ``n_training`` (all the others if ``None``) train, and the next
-    ``n_coarse_only`` are the coarse-only runs.
+    the next ``n_training`` (all the others if ``None``, which leaves no columns for
+    calibration runs) train, the next ``n_coarse_only`` are the coarse-only runs and the next
+    ``n_calibration`` the calibration runs.
 
     Raises
     ------
@@ -302,12 +328,11 @@ def ensemble_design(
     blocks = _checked(ensemble, n_columns, "the ensemble's")
     wanted = n_columns - n_held_out if n_training is None else n_training
     _counts(wanted, n_held_out)
-    if n_held_out + wanted + n_coarse_only > n_columns:
-        asked = (
-            f"{n_held_out} held-out, {wanted} training and {n_coarse_only} coarse-only"
-            if n_coarse_only
-            else f"{n_held_out} held-out and {wanted} training"
-        )
+    if n_held_out + wanted + n_coarse_only + n_calibration > n_columns:
+        parts = [f"{n_held_out} held-out", f"{wanted} training"]
+        parts += [f"{n_coarse_only} coarse-only"] if n_coarse_only else []
+        parts += [f"{n_calibration} calibration"] if n_calibration else []
+        asked = ", ".join(parts[:-1]) + " and " + parts[-1]
         raise ValueError(
             f"the ensemble has {n_columns} columns, fewer than the {asked} runs asked for"
         )
@@ -319,6 +344,8 @@ def ensemble_design(
     _refuse_repeats(held_out, training)
     start = n_held_out + wanted
     only = order[start : start + n_coarse_only]
+    start += n_coarse_only
+    calibrating = order[start : start + n_calibration]
     return Design(
         plan=plan,
         training=training,
@@ -329,4 +356,8 @@ def ensemble_design(
         if n_coarse_only > 0
         else None,
         coarse_only_columns=tuple(int(i) for i in only) if n_coarse_only > 0 else None,
+        calibration={k: np.ascontiguousarray(v[:, calibrating]) for k, v in blocks.items()}
+        if n_calibration > 0
+        else None,
+        calibration_columns=tuple(int(i) for i in calibrating) if n_calibration > 0 else None,
     )

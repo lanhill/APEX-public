@@ -34,6 +34,8 @@ def surrogate_plan_lines(plan: SurrogateBuildPlan) -> list[str]:
     runs = "none (the run's stored forecasts)" if plan.plan == "run" else f"{plan.simulator_runs:,}"
     if plan.coarse_only:
         runs += f", {plan.coarse_only:,} of them coarse-only"
+    if plan.calibration and plan.plan != "run":
+        runs += f", {plan.calibration:,} of them for the spread's calibration"
     lines = [
         f"surrogate {plan.name}: {plan.model} on a {plan.plan} design of {plan.training} "
         f"training and {plan.held_out} held-out runs",
@@ -73,6 +75,11 @@ def _summary_lines(path: Path, summary: SurrogateBuildSummary) -> list[str]:
         + (
             f", with {summary.coarse_only_runs} coarse-only runs"
             if summary.coarse_only_runs
+            else ""
+        )
+        + (
+            f", its spread calibrated on {summary.calibration_runs} more"
+            if summary.calibration_runs
             else ""
         )
     ]

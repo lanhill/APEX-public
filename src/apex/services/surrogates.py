@@ -1170,15 +1170,212 @@ def design_plan(config: SurrogateConfig) -> BuiltinDesign | AdaptiveDesign:
     return plan
 
 
+#: The automatic calibration runs of a surrogate's spread (the user, 2026-11-10): a case of
+#: up to SMALL_CASE_CELLS grid cells gets CALIBRATION_RUNS_SMALL, a larger one (dearer runs)
+#: CALIBRATION_RUNS_LARGE. Measured on a known response (2026-11-10): z RMS on new runs
+#: 0.84-1.50 (10th-90th percentile) with 10 runs, 0.91-1.27 with 30, where the validation runs
+#: left the spread about 20 % too narrow.
+SMALL_CASE_CELLS = 20_000
+CALIBRATION_RUNS_SMALL = 30
+CALIBRATION_RUNS_LARGE = 20
+
+
+@dataclass(frozen=True)
+class CalibrationCount:
+    """How many calibration runs a build draws (``[design] calibration``), and why.
+
+    Attributes
+    ----------
+    runs
+        The count (0: none; a plugin that wants them then calibrates on its validation runs).
+    rule
+        How it was chosen, for the plan and the log (``None`` when the plugin takes none).
+    automatic
+        Whether ``[design]`` left it unset (the count then enters the build's identity).
+    wanted
+        Whether the plugin calibrates its spread on such runs (``uses_calibration_runs``):
+        a Laplace spread's scales or an ensemble's factors, say.
+    known
+        Whether the plugin could be asked (``False``: not installed; a complete build is
+        then taken as made).
+    free
+        Whether they are taken from stored forecasts (plan ``run``): no simulator runs.
+    """
+
+    runs: int
+    rule: str | None
+    automatic: bool
+    wanted: bool
+    known: bool = True
+    free: bool = False
+
+    def notice(self) -> str | None:
+        """Return the line the plan and the build's log state (``None`` without the runs)."""
+        if not self.wanted:
+            return None
+        if self.runs == 0:
+            return (
+                "no calibration runs: the surrogate's spread is calibrated on its validation "
+                "runs, which also chose its training's stopping (a Laplace spread is then about "
+                f"20 % too narrow on new runs); set [design] calibration = {CALIBRATION_RUNS_SMALL}"
+                f" (small cases) or {CALIBRATION_RUNS_LARGE} (large ones) to add runs for it"
+                + (f" ({self.rule})" if self.rule else "")
+            )
+        what = (
+            f"{self.runs} calibration runs from the run's stored forecasts (no simulator runs)"
+            if self.free
+            else f"{self.runs} extra calibration runs"
+        )
+        return (
+            f"{what} for the surrogate's spread ({self.rule}); set [design] calibration = K to "
+            "change, 0 to calibrate on the validation runs instead"
+        )
+
+
+def _wants_calibration(config: SurrogateConfig) -> bool | None:
+    """Whether the configured plugin calibrates its spread on runs of their own.
+
+    ``None`` when it cannot be told because the plugin is not installed (a complete build
+    needs no plugin). Other failures of its creation are not hidden: a plugin refusing its
+    options is a :class:`ConfigError` with its message, as the build gives; anything else
+    propagates.
+
+    Raises
+    ------
+    ConfigError
+        If the plugin refuses its options (``TypeError``, ``ValueError``).
+    """
+    try:
+        model = surrogate_models.create(config.surrogate.model, **config.surrogate.options)
+    except (PluginError, ImportError):
+        return None
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"[surrogate] {config.surrogate.model}: {error}") from error
+    return bool(getattr(model, "uses_calibration_runs", False))
+
+
+def _spare_columns(config: SurrogateConfig, case: SurrogateCase) -> int | None:
+    """Return the columns a finite ensemble leaves after the other runs (``None``: drawn).
+
+    Plans ``file`` (its ensemble's columns) and ``run`` (its members with finite forecasts),
+    after the held-out, training and coarse-only runs; never below zero.
+    """
+    section = config.design
+    if section.plan == "file" and section.ensemble_file is not None:
+        layout = (
+            StateLayout([v for v in case.layout.variables if v.name not in case.realizations])
+            if case.optimization
+            else case.layout
+        )
+        columns = next(iter(_ensemble_file(section.ensemble_file, layout).values())).shape[-1]
+    elif section.plan == "run" and section.run_dir is not None:
+        _, _, finite = _run_columns(section.run_dir, section.iterations, case)
+        columns = int(np.count_nonzero(finite))
+    else:
+        return None
+    return max(int(columns) - section.training - section.held_out - section.coarse_only, 0)
+
+
+def _case_cells(case: SurrogateCase) -> tuple[int, str]:
+    """Return the case's size in cells for the calibration rule, and what it was read from.
+
+    The deck's grid (``DIMENS``/``SPECGRID``, every cell, active or not: ``ACTNUM`` often sits
+    in includes); without one, the largest state variable (a field has one entry per cell).
+    """
+    simulator = case.config.simulator
+    options = {} if simulator is None else simulator.options
+    template = options.get("deck_template_file")
+    if template is not None:
+        case_dir = options.get("case_dir")
+        try:
+            found = deck_layout(
+                Path(str(template)), None if case_dir is None else Path(str(case_dir))
+            ).get("grid")
+        except (OSError, ValueError):
+            found = None
+        if isinstance(found, list | tuple) and found:
+            dims = [int(v) for v in found]
+            return int(np.prod(dims)), "grid " + " x ".join(str(d) for d in dims) + " ="
+    largest = max((v.size for v in case.layout.variables), default=1)
+    return int(largest), "the largest state variable,"
+
+
+def calibration_count(config: SurrogateConfig, case: SurrogateCase) -> CalibrationCount:
+    """Return the build's calibration runs: ``[design] calibration``, else automatic.
+
+    Automatic (unset) with a plugin that uses them: :data:`CALIBRATION_RUNS_SMALL` for a case
+    of up to :data:`SMALL_CASE_CELLS` cells (:func:`_case_cells`), else
+    :data:`CALIBRATION_RUNS_LARGE`; none for an adaptive plan (its runs are chosen by the
+    surrogate; not supported yet). Without such a plugin, none. Deterministic from the
+    configuration and the case, so a resume draws the same.
+
+    Raises
+    ------
+    ConfigError
+        If ``calibration > 0`` is given for a plugin that does not use the runs, or with an
+        adaptive plan.
+    """
+    given = config.design.calibration
+    told = _wants_calibration(config)
+    wanted = bool(told)
+    adaptive = config.design.plan not in BUILTIN_PLANS
+    if given is not None:
+        if given > 0 and told is False:
+            raise ConfigError(
+                f"[design] calibration = {given}: the surrogate {config.surrogate.model!r} "
+                "does not calibrate a spread on runs of their own with these options "
+                "(uses_calibration_runs), so they would not be used: remove calibration"
+            )
+        if given > 0 and adaptive:
+            raise ConfigError(
+                f"[design] calibration = {given} with the adaptive plan "
+                f"{config.design.plan!r} is not supported yet: give calibration = 0 (the "
+                "spread is then calibrated on the validation runs) or a core plan"
+            )
+        spare = _spare_columns(config, case) if given > 0 else None
+        if spare is not None and given > spare:
+            raise ConfigError(
+                f"[design] calibration = {given}: the design's ensemble leaves {spare} "
+                "column(s) after the held-out, training and coarse-only runs; give at most "
+                f"{spare}, or 0"
+            )
+        return CalibrationCount(given, f"[design] calibration = {given}", False, wanted,
+                                told is not None, config.design.plan == "run")  # fmt: skip
+    if not wanted:
+        return CalibrationCount(0, None, True, False, told is not None)
+    if adaptive:
+        return CalibrationCount(
+            0, f"the adaptive plan {config.design.plan!r} takes none yet", True, True
+        )
+    cells, source = _case_cells(case)
+    small = cells <= SMALL_CASE_CELLS
+    runs = CALIBRATION_RUNS_SMALL if small else CALIBRATION_RUNS_LARGE
+    rule = (
+        f"{source} {cells:,} cells {'<=' if small else '>'} {SMALL_CASE_CELLS:,}: "
+        f"{runs} runs ({'small' if small else 'large'} case)"
+    )
+    spare = _spare_columns(config, case)
+    if spare is not None and spare < runs:
+        # A finite ensemble (plans file, run): the automatic count takes what it leaves, so
+        # a design that fitted before still does.
+        rule += f", capped at the {spare} column(s) the design's ensemble leaves"
+        runs = spare
+    return CalibrationCount(runs, rule, True, True, True, config.design.plan == "run")
+
+
 def draw_design(
-    config: SurrogateConfig, case: SurrogateCase, rng: np.random.Generator
+    config: SurrogateConfig,
+    case: SurrogateCase,
+    rng: np.random.Generator,
+    counted: CalibrationCount | None = None,
 ) -> StoredDesign:
     """Draw the design ``[design]`` describes, from the stream ``design``.
 
     Member ids: for drawn designs, the held-out runs are ``0..H-1``, the training runs
-    ``H..H+T-1`` and the coarse-only ones (``[design] coarse_only = N``) ``H+T..H+T+N-1``;
-    for ``file`` and ``run``, the ensemble's columns. The coarse-only members are drawn last,
-    so the others are those of a design without them.
+    ``H..H+T-1``, the coarse-only ones (``[design] coarse_only = N``) ``H+T..H+T+N-1`` and
+    the calibration runs (:func:`calibration_count`, ``C``) ``H+T+N..H+T+N+C-1``; for
+    ``file`` and ``run``, the ensemble's columns. The coarse-only and then the calibration
+    members are drawn last, so the others are those of a design without them.
 
     Raises
     ------
@@ -1187,12 +1384,13 @@ def draw_design(
     """
     section = config.design
     n_train, n_held, n_only = section.training, section.held_out, section.coarse_only
+    n_cal = (calibration_count(config, case) if counted is None else counted).runs
     layout = case.layout
     if case.optimization:
-        return _control_design(config, case, rng)
+        return _control_design(config, case, rng, n_cal)
     try:
         if section.plan == "prior":
-            design = sampled_design(_prior_draw(case, "prior"), n_train, n_held, rng, n_only)
+            design = sampled_design(_prior_draw(case, "prior"), n_train, n_held, rng, n_only, n_cal)
         elif section.plan == "lhs":
             box = {}
             for variable in layout.variables:
@@ -1203,11 +1401,11 @@ def draw_design(
                         f"bounds [{lower}, {upper}]; give [design.box] {variable.name} = [lo, hi]"
                     )
                 box[variable.name] = (np.full(variable.size, lower), np.full(variable.size, upper))
-            design = lhs_design(box, n_train, n_held, rng, n_only)
+            design = lhs_design(box, n_train, n_held, rng, n_only, n_cal)
         elif section.plan == "file":
             assert section.ensemble_file is not None
             ensemble = _ensemble_file(section.ensemble_file, layout)
-            design = ensemble_design("file", ensemble, n_held, rng, n_train, n_only)
+            design = ensemble_design("file", ensemble, n_held, rng, n_train, n_only, n_cal)
         else:
             assert section.run_dir is not None
             ensemble, outputs, finite = _run_columns(section.run_dir, section.iterations, case)
@@ -1215,12 +1413,14 @@ def draw_design(
             # pooled columns, so the others are recorded as failed by theirs.
             usable = np.flatnonzero(finite)
             design = ensemble_design(
-                "run", {k: v[:, usable] for k, v in ensemble.items()}, n_held, rng, n_train
-            )
+                "run", {k: v[:, usable] for k, v in ensemble.items()}, n_held, rng, n_train,
+                n_calibration=n_cal,
+            )  # fmt: skip
             assert design.training_columns is not None
             assert design.held_out_columns is not None
             held = [int(usable[c]) for c in design.held_out_columns]
             train = [int(usable[c]) for c in design.training_columns]
+            calibrating = [int(usable[c]) for c in design.calibration_columns or ()]
             return StoredDesign(
                 plan="run",
                 held_out_ids=tuple(held),
@@ -1230,6 +1430,12 @@ def draw_design(
                 held_out_outputs=np.ascontiguousarray(outputs[:, held]),
                 training_outputs=np.ascontiguousarray(outputs[:, train]),
                 failed_ids=tuple(int(i) for i in np.flatnonzero(~finite)),
+                # The run's forecasts again (free): further members, none trained or gated on.
+                calibration_ids=tuple(calibrating),
+                calibration=design.calibration,
+                calibration_outputs=np.ascontiguousarray(outputs[:, calibrating])
+                if calibrating
+                else None,
             )
     except ValueError as error:
         raise ConfigError(f"the design cannot be drawn: {error}") from error
@@ -1243,6 +1449,10 @@ def draw_design(
         only_ids = design.coarse_only_columns or tuple(
             range(n_held + n_train, n_held + n_train + n_only)
         )
+    calibration_ids: tuple[int, ...] = ()
+    if design.calibration is not None:
+        first = n_held + n_train + n_only
+        calibration_ids = design.calibration_columns or tuple(range(first, first + n_cal))
     return StoredDesign(
         plan=section.plan,
         held_out_ids=held_ids,
@@ -1251,11 +1461,13 @@ def draw_design(
         training=design.training,
         coarse_only_ids=only_ids,
         coarse_only=design.coarse_only,
+        calibration_ids=calibration_ids,
+        calibration=design.calibration,
     )
 
 
 def _control_design(
-    config: SurrogateConfig, case: SurrogateCase, rng: np.random.Generator
+    config: SurrogateConfig, case: SurrogateCase, rng: np.random.Generator, n_cal: int = 0
 ) -> StoredDesign:
     """Draw an optimization's design over its controls, from the stream ``design``.
 
@@ -1292,11 +1504,13 @@ def _control_design(
                         f"{variable.name} = [lo, hi]"
                     )
                 box[variable.name] = (np.full(variable.size, lower), np.full(variable.size, upper))
-            design = lhs_design(box, section.training, section.held_out, rng)
+            design = lhs_design(box, section.training, section.held_out, rng, n_calibration=n_cal)
         else:
             assert section.ensemble_file is not None
             ensemble = _ensemble_file(section.ensemble_file, StateLayout(controls))
-            design = ensemble_design("file", ensemble, section.held_out, rng, section.training)
+            design = ensemble_design(
+                "file", ensemble, section.held_out, rng, section.training, n_calibration=n_cal
+            )
     except ValueError as error:
         raise ConfigError(f"the design cannot be drawn: {error}") from error
     if design.held_out_columns is not None and design.training_columns is not None:
@@ -1304,12 +1518,20 @@ def _control_design(
     else:
         held_ids = tuple(range(section.held_out))
         train_ids = tuple(range(section.held_out, section.held_out + section.training))
+    calibration_ids: tuple[int, ...] = ()
+    if design.calibration is not None:
+        first = section.held_out + section.training
+        calibration_ids = design.calibration_columns or tuple(range(first, first + n_cal))
     return StoredDesign(
         plan=section.plan,
         held_out_ids=held_ids,
         training_ids=train_ids,
         held_out=case.with_realizations(held_ids, design.held_out),
         training=case.with_realizations(train_ids, design.training),
+        calibration_ids=calibration_ids,
+        calibration=None
+        if design.calibration is None
+        else case.with_realizations(calibration_ids, design.calibration),
     )
 
 
@@ -1348,6 +1570,11 @@ def fingerprint_parts(
     parts |= {f"stack.{name}": str(value) for name, value in sorted(stack.items())}
     parts["keys"] = _digest([key_document(k) for k in case.keys])
     design = json.loads(config.design.model_dump_json())
+    # The calibration runs are never in the fingerprint: drawn after every other run, they
+    # change none of them, and the build reconciles its saved design with the count instead
+    # (:func:`_reconciled_design`), so the fingerprint needs no plugin (a complete build is
+    # found without it) and builds without calibration runs keep theirs.
+    design.pop("calibration", None)
     if not design.get("options"):
         # Absent before the plans' options existed: builds keep their digest.
         design.pop("options", None)
@@ -1494,7 +1721,13 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         raise ConfigError("\n".join(problems))
     assert config.surrogate.output_dir is not None
     case = _build_case(config, loaded)
+    counted = calibration_count(config, case)
     warnings = []
+    notice = counted.notice()
+    if notice is not None:
+        # The extra runs' cost (or the calibration without them), stated wherever the plan is
+        # read: apex validate, REST, the web UI, the assistant's tools and the planner.
+        warnings.append(notice)
     if config.design.plan == "lhs" and case.layout.n_state > 50:
         warnings.append(
             f"a Latin hypercube over {case.layout.n_state} state entries spreads few runs over "
@@ -1504,16 +1737,23 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         assert config.design.run_dir is not None
         _, _, finite = _run_columns(config.design.run_dir, config.design.iterations, case)
         available = int(np.count_nonzero(finite))
-        if available < config.design.training + config.design.held_out:
+        wanted = config.design.training + config.design.held_out + counted.runs
+        if available < wanted:
             raise ConfigError(
                 f"{config.design.run_dir} holds {available} members with finite forecasts, "
-                "fewer than the "
-                f"{config.design.training + config.design.held_out} the design asks for"
+                f"fewer than the {wanted} the design asks for"
+                + (f" (with {counted.runs} calibration runs)" if counted.runs else "")
             )
-    runs = 0 if config.design.plan == "run" else config.design.training + config.design.held_out
+    runs = (
+        0
+        if config.design.plan == "run"
+        else config.design.training + config.design.held_out + counted.runs
+    )
     if config.coarse is not None:
-        runs *= 2  # every run also on the coarse stack
-        runs += config.design.coarse_only  # and the members run on it only
+        # Every run also on the coarse stack, the calibration runs excepted
+        # (their spread is the fine model's), and the members run on it only.
+        runs = 2 * runs - (0 if config.design.plan == "run" else counted.runs)
+        runs += config.design.coarse_only
     return SurrogateBuildPlan(
         name=config.surrogate.name,
         model=config.surrogate.model,
@@ -1522,6 +1762,8 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         held_out=config.design.held_out,
         simulator_runs=runs,
         coarse_only=config.design.coarse_only,
+        calibration=counted.runs,
+        calibration_rule=counted.rule,
         keys=len(case.keys),
         datatypes=sorted({k.datatype for k in case.keys}),
         measure="relative" if case.variances is None else "sigma_ratio",
@@ -1651,12 +1893,15 @@ def _snapshot_set(
     failed: Sequence[int],
     coarse: Mapping[int, NDArray[np.float64]] | None = None,
     coarse_only: tuple[Mapping[str, NDArray[np.float64]], NDArray[np.float64]] | None = None,
+    calibration: tuple[Mapping[str, NDArray[np.float64]], NDArray[np.float64], tuple[int, ...]]
+    | None = None,
 ) -> SnapshotSet:
     """Return the successful members of ``ids`` as snapshots of the surrogate's inputs.
 
     With ``coarse`` (a coarse stack's values by member), only members with both, and the
     coarse values as the set's ``coarse_outputs``; ``coarse_only`` (the coarse-only
-    members' inputs and outputs, :func:`_coarse_only_snapshots`) goes with the set whole.
+    members' inputs and outputs, :func:`_coarse_only_snapshots`) and ``calibration`` (the
+    calibration runs', :func:`_calibration_snapshots`) go with the set whole.
     """
     columns = [
         j for j, m in enumerate(ids)
@@ -1687,6 +1932,36 @@ def _snapshot_set(
         ),
         coarse_only_inputs=None if coarse_only is None else coarse_only[0],
         coarse_only_outputs=None if coarse_only is None else coarse_only[1],
+        calibration_inputs=None if calibration is None else calibration[0],
+        calibration_outputs=None if calibration is None else calibration[1],
+        calibration_ids=() if calibration is None else calibration[2],
+    )
+
+
+def _calibration_snapshots(
+    case: SurrogateCase, design: StoredDesign, values: Mapping[int, NDArray[np.float64]]
+) -> tuple[dict[str, NDArray[np.float64]], NDArray[np.float64], tuple[int, ...]] | None:
+    """Return the successful calibration runs as the surrogate's inputs, outputs and ids.
+
+    ``({variable: (size, n)}, (n_keys, n), (n,))`` in the design's order, the inputs mapped
+    by the case's parameterizations (the scalar keys only: no fields); ``None`` if none
+    succeeded or there are none.
+    """
+    if design.calibration is None:
+        return None
+    columns = [j for j, m in enumerate(design.calibration_ids) if int(m) in values]
+    if not columns:
+        return None
+    state = {k: np.ascontiguousarray(v[:, columns]) for k, v in design.calibration.items()}
+    inputs = case.properties.ensemble(state)
+    ids = tuple(int(design.calibration_ids[j]) for j in columns)
+    n_keys = len(case.keys)
+    # A run's values cover the run keys (fields after the scalar keys): the scalar ones only.
+    outputs = np.stack([np.asarray(values[m])[:n_keys] for m in ids], axis=-1)
+    return (
+        {k: np.ascontiguousarray(v) for k, v in inputs.items()},
+        np.ascontiguousarray(outputs),
+        ids,
     )
 
 
@@ -1878,6 +2153,150 @@ def _model_files(directory: SurrogateDirectory) -> tuple[Path, Path]:
     return directory.model, directory.model.with_suffix(".npz")
 
 
+def _calibration_digest(design: StoredDesign) -> str:
+    """Return a digest of a design's calibration runs: their ids and inputs, in order."""
+    digest = hashlib.sha256(b"apex-calibration-runs-1\n")
+    digest.update(np.asarray(design.calibration_ids, dtype="<i8").tobytes())
+    for name in sorted(design.calibration or {}):
+        value = np.ascontiguousarray((design.calibration or {})[name], dtype="<f8")
+        digest.update(name.encode() + repr(value.shape).encode() + value.tobytes())
+    return digest.hexdigest()
+
+
+def _reconciled_design(
+    config: SurrogateConfig,
+    case: SurrogateCase,
+    directory: SurrogateDirectory,
+    design: StoredDesign,
+    counted: CalibrationCount,
+) -> StoredDesign:
+    """Return the saved design with ``counted.runs`` calibration runs (saved if it changed).
+
+    The calibration runs are drawn last, so a design with another count has the same other
+    runs: the design is drawn again from the seed (checked to give the same other runs) with
+    the new count, or its calibration runs are dropped (``0``). Members are reused by id, so
+    a drawn plan (``prior``, ``lhs``) refuses the change once a member of the old or the new
+    calibration ids was made (journalled, or saved by a worker before a stop): the id would
+    name other inputs. With ``file`` and ``run`` an id is its ensemble's column, so the
+    change is safe.
+
+    Raises
+    ------
+    ConfigError
+        If the count changes on a drawn plan after calibration runs were made there, or the
+        design drawn again does not give the saved runs.
+    """
+    runs = counted.runs
+    have = len(design.calibration_ids)
+    if have == runs:
+        return design
+    if runs == 0:
+        changed = dataclasses.replace(
+            design, calibration_ids=(), calibration=None, calibration_outputs=None
+        )
+        if have:
+            # What was made, so that drawing the same runs again later is known to be safe.
+            directory.write_state(calibration_dropped=_calibration_digest(design))
+    else:
+        drawn = draw_design(config, case, build_streams(config.surrogate.seed)["design"], counted)
+        same = drawn.held_out_ids == design.held_out_ids and drawn.training_ids == (
+            design.training_ids
+        ) and drawn.coarse_only_ids == design.coarse_only_ids and all(
+            np.array_equal(drawn.held_out[k], design.held_out[k])
+            and np.array_equal(drawn.training[k], design.training[k])
+            for k in design.held_out
+        )  # fmt: skip
+        if not same:
+            raise ConfigError(
+                f"{directory.path}: the design drawn again does not give its saved runs; "
+                "build in another output_dir"
+            )
+        if config.design.plan not in ("file", "run"):
+            journal = directory.journal()
+            ids = set(design.calibration_ids) | set(drawn.calibration_ids)
+            made = sorted(
+                m for m in ids if m in journal or directory.member_file(m).is_file()
+            )  # fmt: skip
+            # The runs dropped before, drawn again exactly (the count they were made with):
+            # their ids name the same inputs.
+            again = not have and directory.read_state().get(
+                "calibration_dropped"
+            ) == _calibration_digest(drawn)
+            if made and not again:
+                raise ConfigError(
+                    f"{directory.path}: calibration runs of another count were made here "
+                    f"(members {', '.join(map(str, made[:5]))}"
+                    + (", ..." if len(made) > 5 else "")
+                    + f"); {runs} would reuse their outputs for other inputs: keep the count "
+                    "they were made with, give [design] calibration = 0, or build in another "
+                    "output_dir"
+                )
+        changed = dataclasses.replace(
+            design, calibration_ids=drawn.calibration_ids, calibration=drawn.calibration,
+            calibration_outputs=drawn.calibration_outputs,
+        )  # fmt: skip
+    directory.save_design(changed, case.layout)
+    logger.info(
+        "the design's calibration runs changed",
+        extra={"event": "surrogate_design_calibration", "before": have, "after": runs},
+    )
+    return changed
+
+
+def _lenient_count(config: SurrogateConfig, case: SurrogateCase) -> CalibrationCount:
+    """Return the calibration count for a completion check, never failing on the plugin.
+
+    A plugin that refuses its options (since the build: say, an update) or a design source
+    that cannot be read (a moved ensemble) leaves the count unknown, so a complete build is
+    still found; a build that has to run reports those failures itself. Any other exception
+    from the plugin's constructor (a ``RuntimeError``, ``KeyError``: a bug) propagates, loudly,
+    as it would in the build. It fails open: a
+    complete build of plan ``run`` whose run directory is gone is returned as made, even one
+    that, read, would now be given calibration runs (``plan_build`` refuses it).
+    """
+    try:
+        return calibration_count(config, case)
+    except (ConfigError, OSError):
+        return CalibrationCount(0, None, True, False, known=False)
+
+
+def _same_calibration(
+    config: SurrogateConfig, directory: SurrogateDirectory, counted: CalibrationCount
+) -> bool:
+    """Whether a complete build's saved design has the calibration runs ``counted`` asks for.
+
+    A plugin that is not installed cannot be asked: a complete build is then taken as made
+    (unless ``[design] calibration`` gives another count than it has). So a Laplace build
+    made before calibration runs existed is not complete once it would get them: its next
+    build adds them and refits, as its plan and charge count them.
+    """
+    design = directory.load_design()
+    have = 0 if design is None else len(design.calibration_ids)
+    if not counted.known:
+        given = config.design.calibration
+        return given is None or given == have
+    return have == counted.runs
+
+
+def runs_made(build_dir: Path) -> int:
+    """Return the simulator runs a build has made of its current design (resume's charge).
+
+    Members journalled whose ids are the saved design's (held-out, training, calibration;
+    the coarse stack's, coarse-only too): runs of a design changed since (calibration runs
+    dropped) are not left to pay for.
+    """
+    directory = SurrogateDirectory(build_dir)
+    design = directory.load_design()
+    if design is None:
+        return 0
+    fine = {*design.held_out_ids, *design.training_ids, *design.calibration_ids}
+    made = sum(1 for m in directory.journal() if m in fine)
+    if (build_dir / COARSE).is_dir():
+        coarse = {*design.held_out_ids, *design.training_ids, *design.coarse_only_ids}
+        made += sum(1 for m in SurrogateDirectory(build_dir / COARSE).journal() if m in coarse)
+    return made
+
+
 def _completed_build(directory: SurrogateDirectory, config: SurrogateConfig) -> BuildResult | None:
     """Return the complete build of ``config`` in ``directory``, read only; else ``None``.
 
@@ -1891,7 +2310,10 @@ def _completed_build(directory: SurrogateDirectory, config: SurrogateConfig) -> 
     saved = directory.read_json(SUMMARY)
     if saved is None or not all(f.is_file() for f in _model_files(directory)):
         return None
-    parts = fingerprint_parts(config, _build_case(config))
+    case = _build_case(config)
+    if not _same_calibration(config, directory, _lenient_count(config, case)):
+        return None
+    parts = fingerprint_parts(config, case)
     if state.get(BUILD_FINGERPRINT) != _fingerprint(parts):
         return None
     return BuildResult(directory.path, SurrogateBuildSummary.model_validate(saved))
@@ -1930,7 +2352,12 @@ def _build(
     state = directory.read_state()
     fit_key = _fit_fingerprint(config)
     model_files = _model_files(directory)
-    if state.get("complete") and state.get("fit_fingerprint") == fit_key:
+    lenient = _lenient_count(config, case)
+    if (
+        state.get("complete")
+        and state.get("fit_fingerprint") == fit_key
+        and _same_calibration(config, directory, lenient)
+    ):
         saved = directory.read_json(SUMMARY)
         # A complete build whose model files are gone (deleted, say, to drop a model a
         # changed format cannot read) is fitted again on the runs it made.
@@ -1943,13 +2370,16 @@ def _build(
             )
     plan = design_plan(config)
     adaptive = not isinstance(plan, BuiltinDesign)
+    # Once for the build (it may read a run's or an ensemble's columns: plans run, file):
+    # the completion check's, unless it could not ask the plugin (then strictly, to say why).
+    counted = lenient if lenient.known else calibration_count(config, case)
     streams = build_streams(section.seed)
     design = directory.load_design()
     if design is not None and adaptive and "adaptive" not in directory.read_state():
         design = None  # saved, but its state was never written: draw it again (same draws)
     if design is None:
         if isinstance(plan, BuiltinDesign):
-            design = draw_design(config, case, streams["design"])
+            design = draw_design(config, case, streams["design"], counted)
         else:
             design = _initial_adaptive_design(config, case, plan, streams["design"])
             # The state first: it is the record (a design saved without it is drawn again,
@@ -1967,11 +2397,23 @@ def _build(
             extra={"event": "surrogate_design", "plan": design.plan,
                    "training": len(design.training_ids), "held_out": len(design.held_out_ids)},
         )  # fmt: skip
+    if isinstance(plan, BuiltinDesign):
+        design = _reconciled_design(config, case, directory, design, counted)
+    notice = counted.notice()
+    if notice is not None:
+        logger.info(
+            notice,
+            extra={"event": "surrogate_calibration_runs", "runs": len(design.calibration_ids),
+                   "rule": counted.rule, "automatic": counted.automatic},
+        )  # fmt: skip
     plan_provenance = case.provenance.model_copy(update={
         "plan": design.plan, "seed": section.seed,
         "source": None if config.design.run_dir is None else str(config.design.run_dir),
     })  # fmt: skip
     keep = config.output.keep_simulations
+    calibration_values: dict[int, NDArray[np.float64]] = {}
+    calibration_failed: dict[int, str] = {}
+    fallback: str | None = None
     coarse_values: dict[int, NDArray[np.float64]] | None = None
     coarse_only: tuple[dict[str, NDArray[np.float64]], NDArray[np.float64]] | None = None
     coarse_only_failed: dict[int, str] = {}
@@ -1980,6 +2422,11 @@ def _build(
         assert design.training_outputs is not None
         values = {int(m): design.held_out_outputs[:, j] for j, m in enumerate(design.held_out_ids)}
         values |= {int(m): design.training_outputs[:, j] for j, m in enumerate(design.training_ids)}
+        if design.calibration_outputs is not None:
+            calibration_values = {
+                int(m): design.calibration_outputs[:, j]
+                for j, m in enumerate(design.calibration_ids)
+            }
         failed: dict[int, str] = dict.fromkeys(
             design.failed_ids, "its stored forecast is not finite at every key"
         )
@@ -1991,6 +2438,9 @@ def _build(
             members = _members(design.held_out_ids, design.held_out) + _members(
                 design.training_ids, design.training
             )
+            if design.calibration is not None:
+                # Full runs like the others, last (a resume reuses them as the others).
+                members += _members(design.calibration_ids, design.calibration)
             outcome = run_members(
                 directory, case.simulator, case.executor, members, case.run_keys, label="design",
                 keep_simulations=keep, max_runs=max_runs, progress=progress, stopped=stopped,
@@ -2003,7 +2453,8 @@ def _build(
         if not outcome.complete:
             # An adaptive design's later batches are pending too (not drawn yet).
             later = max(config.design.training - len(design.training_ids), 0)
-            summary = _summary(config, design, case, outcome.failed, len(outcome.pending) + later,
+            lost = {m: v for m, v in outcome.failed.items() if m not in design.calibration_ids}
+            summary = _summary(config, design, case, lost, len(outcome.pending) + later,
                                len(outcome.values) + len(outcome.failed))  # fmt: skip
             directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
             directory.write_state(complete=False)
@@ -2014,6 +2465,18 @@ def _build(
             return BuildResult(directory.path, summary)
         values, seconds, failed = dict(outcome.values), outcome.seconds, dict(outcome.failed)
         simulator_runs = len(values) + len(failed)
+        # The calibration runs apart: never trained or gated on, their failures recorded
+        # apart from the runs' (as the coarse-only members').
+        for member in design.calibration_ids:
+            if member in values:
+                calibration_values[member] = values.pop(member)
+            elif member in failed:
+                calibration_failed[member] = failed.pop(member)
+                logger.warning(
+                    "a calibration run failed",
+                    extra={"event": "surrogate_calibration_failed", "member": member,
+                           "reason": calibration_failed[member]},
+                )  # fmt: skip
         if case.coarse_simulator is not None:
             # Every design run on the coarse stack too, in a folder of its own,
             # within what is left of max_runs; then the coarse-only members ([design]
@@ -2072,26 +2535,47 @@ def _build(
         for label, ids in (("held-out", design.held_out_ids), ("training", design.training_ids)):
             check_success(label, len(ids), sum(int(m) in failed for m in ids),
                           config.design.min_success_fraction)  # fmt: skip
+        total = len(design.calibration_ids)
+        if total and (total - len(calibration_failed)) / total < config.design.min_success_fraction:
+            # Not the build's runs: a spread calibrated on the validation runs (the plugin
+            # warns) rather than a build lost after all its good runs.
+            logger.warning(
+                "%d of the %d calibration runs failed: fewer than %.0f%% succeeded; the "
+                "spread is calibrated on the validation runs instead",
+                len(calibration_failed), total, 100 * config.design.min_success_fraction,
+                extra={"event": "surrogate_calibration_runs_failed",
+                       "failed": sorted(calibration_failed)},
+            )  # fmt: skip
+            calibration_values = {}
+            fallback = (
+                f"{len(calibration_failed)} of the {total} calibration runs failed: the spread "
+                "is calibrated on the validation runs"
+            )
     if stopped is not None and stopped():
         # Every run made, the fit not started (it may take hours): ended as stopped, nothing
         # pending; the resume fits.
-        summary = _summary(config, design, case, failed, 0, simulator_runs)
+        summary = _summary(config, design, case, failed, 0, simulator_runs).model_copy(
+            update={"calibration_fallback": fallback}
+        )
         directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
         directory.write_state(complete=False)
         logger.info("build stopped", extra={"event": "surrogate_stopped", "pending": 0})
         return BuildResult(directory.path, summary)
     failed_ids = sorted(failed)
+    calibration = _calibration_snapshots(case, design, calibration_values)
     held_out = _snapshot_set(case, design.held_out_ids, design.held_out, values,
-                             plan_provenance, failed_ids, coarse_values, coarse_only)  # fmt: skip
+                             plan_provenance, failed_ids, coarse_values, coarse_only,
+                             calibration)  # fmt: skip
     training = _snapshot_set(case, design.training_ids, design.training, values,
-                             plan_provenance, failed_ids, coarse_values, coarse_only)  # fmt: skip
+                             plan_provenance, failed_ids, coarse_values, coarse_only,
+                             calibration)  # fmt: skip
     # Every successful run, in id order: the snapshot set a refit starts from (phase 3).
     everything = _snapshot_set(
         case,
         list(design.held_out_ids) + list(design.training_ids),
         {k: np.concatenate([design.held_out[k], design.training[k]], axis=1)
          for k in design.held_out},
-        values, plan_provenance, failed_ids, coarse_values, coarse_only,
+        values, plan_provenance, failed_ids, coarse_values, coarse_only, calibration,
     )  # fmt: skip
     directory.save_snapshots(everything)
     try:
@@ -2168,6 +2652,9 @@ def _build(
         "gate": fitted.gate, "identity": stored.identity,
         "coarse_only_runs": 0 if coarse_only is None else coarse_only[1].shape[1],
         "coarse_only_failed": sorted(coarse_only_failed),
+        "calibration_runs": len(calibration_values),
+        "calibration_failed": sorted(calibration_failed),
+        "calibration_fallback": fallback,
         "model": str(MODEL),
         "domain": DomainSummary(
             coordinates=fitted.domain.n_coordinates, points=fitted.domain.n_points,

@@ -290,7 +290,8 @@ class SurrogateForecasting:
             )
         order = rng.permutation(n)
         n_held = 0 if n < 2 else min(n - 1, max(1, round(self.section.refit_held_out * n)))
-        first = max(base.run_ids) + 1
+        # Past the calibration runs' ids too (none without them: the ids of before).
+        first = max((*base.run_ids, *base.calibration_ids)) + 1
         new_ids = tuple(first + j for j in range(n))
         combined = SnapshotSet(
             layout=base.layout,
@@ -309,6 +310,11 @@ class SurrogateForecasting:
             # The build's coarse-only members ([design] coarse_only) stay with the refit.
             coarse_only_inputs=base.coarse_only_inputs,
             coarse_only_outputs=base.coarse_only_outputs,
+            # And its calibration runs ([design] calibration): still never trained on, so
+            # the refit's spread is calibrated on the same runs, out of sample.
+            calibration_inputs=base.calibration_inputs,
+            calibration_outputs=base.calibration_outputs,
+            calibration_ids=base.calibration_ids,
         )
         held_ids = set(held) | {new_ids[int(j)] for j in order[:n_held]}
         held_positions = [p for p, r in enumerate(combined.run_ids) if r in held_ids]

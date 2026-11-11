@@ -1407,10 +1407,7 @@ class ApexService:
         # optimizations are, not gated (a resume never is).
         try:
             total = surrogates.plan_build(stored).simulator_runs
-            done = len(SurrogateDirectory(build_dir).journal())
-            if (build_dir / "coarse").is_dir():
-                done += len(SurrogateDirectory(build_dir / "coarse").journal())
-            planned = max(total - done, 0)
+            planned = max(total - surrogates.runs_made(build_dir), 0)
             if max_runs is not None:
                 planned = min(planned, max_runs)  # a resume runs at most max_runs now
         except (ConfigError, OSError, ValueError):

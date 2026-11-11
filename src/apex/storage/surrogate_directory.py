@@ -105,6 +105,10 @@ class StoredDesign:
     coarse_only_ids, coarse_only
         The members run on the coarse stack only (``[design] coarse_only``) and their
         inputs ``{variable: (size, n)}``; ``()`` and ``None`` without them.
+    calibration_ids, calibration, calibration_outputs
+        The calibration runs of the surrogate's spread (``[design] calibration``): their
+        members, inputs ``{variable: (size, n)}`` and, for plan ``run``, stored forecasts
+        ``(n_keys, n)``; ``()`` and ``None`` without them.
     """
 
     plan: str
@@ -117,6 +121,9 @@ class StoredDesign:
     failed_ids: tuple[int, ...] = ()
     coarse_only_ids: tuple[int, ...] = ()
     coarse_only: Mapping[str, NDArray[np.float64]] | None = None
+    calibration_ids: tuple[int, ...] = ()
+    calibration: Mapping[str, NDArray[np.float64]] | None = None
+    calibration_outputs: NDArray[np.float64] | None = None
 
 
 #: Where the job service places builds it is given without a folder
@@ -243,6 +250,13 @@ class SurrogateDirectory:
             arrays["coarse_only_ids"] = np.asarray(design.coarse_only_ids, dtype=np.int64)
             for i, name in enumerate(layout.names):
                 arrays[f"coarse_only_{i}"] = np.ascontiguousarray(design.coarse_only[name])
+        if design.calibration_ids and design.calibration is not None:
+            # Likewise: designs without calibration runs keep their files' bytes.
+            arrays["calibration_ids"] = np.asarray(design.calibration_ids, dtype=np.int64)
+            for i, name in enumerate(layout.names):
+                arrays[f"calibration_{i}"] = np.ascontiguousarray(design.calibration[name])
+            if design.calibration_outputs is not None:
+                arrays["calibration_outputs"] = design.calibration_outputs
         _save_npz(self.path / DESIGN, arrays)
 
     def load_design(self) -> StoredDesign | None:
@@ -254,6 +268,7 @@ class SurrogateDirectory:
             names = [str(n) for n in data["variables"]]
             outputs = "held_out_outputs" in data.files
             only = "coarse_only_ids" in data.files
+            calibrated = "calibration_ids" in data.files
             return StoredDesign(
                 plan=str(data["plan"]),
                 held_out_ids=tuple(int(i) for i in data["held_out_ids"]),
@@ -276,6 +291,17 @@ class SurrogateDirectory:
                     n: np.ascontiguousarray(data[f"coarse_only_{i}"]) for i, n in enumerate(names)
                 }
                 if only
+                else None,
+                calibration_ids=tuple(int(i) for i in data["calibration_ids"])
+                if calibrated
+                else (),
+                calibration={
+                    n: np.ascontiguousarray(data[f"calibration_{i}"]) for i, n in enumerate(names)
+                }
+                if calibrated
+                else None,
+                calibration_outputs=np.ascontiguousarray(data["calibration_outputs"])
+                if "calibration_outputs" in data.files
                 else None,
             )
 
@@ -386,6 +412,12 @@ class SurrogateDirectory:
             arrays["coarse_only_outputs"] = snapshots.coarse_only_outputs
             for i, variable in enumerate(snapshots.layout.variables):
                 arrays[f"coarse_only_input_{i}"] = snapshots.coarse_only_inputs[variable.name]
+        if snapshots.calibration_inputs is not None and snapshots.calibration_outputs is not None:
+            # Absent without calibration runs ([design] calibration), as in the digest.
+            arrays["calibration_ids"] = np.asarray(snapshots.calibration_ids, dtype=np.int64)
+            arrays["calibration_outputs"] = snapshots.calibration_outputs
+            for i, variable in enumerate(snapshots.layout.variables):
+                arrays[f"calibration_input_{i}"] = snapshots.calibration_inputs[variable.name]
         if snapshots.fields:
             # State fields, in the same file: one digest covers them.
             arrays["field_names"] = np.array(json.dumps(sorted(snapshots.fields)))
@@ -433,6 +465,17 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 else None,
                 fields={str(n): data[f"field_{i}"] for i, n in enumerate(names)},
                 field_times=tuple(json.loads(str(data["field_times"]))) if names else (),
+                calibration_inputs={
+                    v.name: data[f"calibration_input_{i}"] for i, v in enumerate(layout.variables)
+                }
+                if "calibration_ids" in data.files
+                else None,
+                calibration_outputs=data["calibration_outputs"]
+                if "calibration_ids" in data.files
+                else None,
+                calibration_ids=tuple(int(i) for i in data["calibration_ids"])
+                if "calibration_ids" in data.files
+                else (),
             )
             recorded = str(data["digest"])
     except (OSError, KeyError, ValueError) as error:
