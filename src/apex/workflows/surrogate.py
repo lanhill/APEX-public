@@ -74,10 +74,14 @@ class _Journalled:
         """Run the member, save its outputs, and return them."""
         began = time.monotonic()
         values = np.asarray(self.simulator.run(member, keys), dtype=np.float64).reshape(-1)
-        if values.shape != (len(keys),) or not np.all(np.isfinite(values)):
+        # A simulator returning more than one number per key says how many (output_size, as
+        # the executors read it): a sensitivity run's values and gradients.
+        output_size = getattr(self.simulator, "output_size", None)
+        expected = len(keys) if output_size is None else int(output_size(len(keys)))
+        if values.shape != (expected,) or not np.all(np.isfinite(values)):
             raise SimulationError(
                 f"member {member.member_id} returned {values.shape[0]} values for "
-                f"{len(keys)} keys, or values that are not finite"
+                f"{len(keys)} keys ({expected} expected), or values that are not finite"
             )
         self.directory.save_member(member.member_id, values, time.monotonic() - began)
         return values

@@ -110,6 +110,7 @@ from apex.services.identity import code_version, tree_hash
 from apex.services.plugins import check_options
 from apex.simulation.deck import deck_layout, restart_schedule
 from apex.simulation.geophysics import GeophysicsSimulator
+from apex.simulation.sensitivity import SensitivityRun
 from apex.simulation.state_fields import StateFieldModel, field_keys, split_fields
 from apex.simulation.surrogate import SurrogateSimulator
 from apex.storage import provenance
@@ -480,6 +481,9 @@ class SurrogateCase:
         optimization): a design member ``m`` is given realization ``m mod n_realizations``.
     run_sections
         The configuration's sections that fix its runs (the build's fingerprint).
+    gradients
+        Whether every run also returns its values' derivatives with respect to its inputs
+        (``SnapshotSet.gradients``), for a plugin with ``uses_gradients``.
     """
 
     config: HistoryMatchConfig | OptimizationConfig
@@ -498,6 +502,9 @@ class SurrogateCase:
     field_cells: int = 0
     objective: ResponseObjective | None = None
     realizations: Mapping[str, NDArray[np.float64]] = dataclasses.field(default_factory=dict)
+    #: Every run also returns its sensitivities (a plugin with ``uses_gradients``):
+    #: ``simulator`` is wrapped in :class:`~apex.simulation.sensitivity.SensitivityRun`.
+    gradients: bool = False
     run_sections: tuple[str, ...] = ()
 
     @property
@@ -1254,6 +1261,115 @@ def _wants_calibration(config: SurrogateConfig) -> bool | None:
     return bool(getattr(model, "uses_calibration_runs", False))
 
 
+#: The most numbers a build's gradients may hold (``n_keys x n_inputs x n_runs``, the
+#: training and held-out runs): 400 MB of float64 in ``snapshots.npz``; the build holds a few
+#: copies while it assembles them. Gradient-enhanced models suit few inputs (a field of
+#: thousands of cells is far beyond what their kernels use), so more is refused.
+MAX_GRADIENT_VALUES = 50_000_000
+
+
+def _wants_gradients(config: SurrogateConfig) -> bool:
+    """Whether the configured plugin learns from the runs' gradients (``uses_gradients``).
+
+    When the plugin cannot say (it is not installed, or now refuses its options) and the
+    build's folder recorded a fingerprint, that fingerprint's ``gradients`` part: a complete
+    build is found without its plugin, as :func:`_completed_build` finds any.
+
+    Raises
+    ------
+    ConfigError
+        If the plugin refuses its options and the folder recorded nothing: refused before
+        anything is stamped there (as :func:`_wants_calibration`).
+    """
+    try:
+        model = surrogate_models.create(config.surrogate.model, **config.surrogate.options)
+    except (PluginError, ImportError, TypeError, ValueError) as error:
+        parts = None
+        if config.surrogate.output_dir is not None:
+            parts = (
+                SurrogateDirectory(config.surrogate.output_dir)
+                .read_state()
+                .get("fingerprint_parts")
+            )
+        if isinstance(parts, dict):
+            return "gradients" in parts
+        if isinstance(error, TypeError | ValueError):
+            raise ConfigError(f"[surrogate] {config.surrogate.model}: {error}") from error
+        return False
+    return bool(getattr(model, "uses_gradients", False))
+
+
+def _also_calibrates(config: SurrogateConfig) -> bool:
+    """Whether the plugin also calibrates a spread on calibration runs.
+
+    ``False`` when the plugin cannot be created (not installed, or now refusing its
+    options): the build then rests on its recorded fingerprint (:func:`_wants_gradients`).
+    """
+    try:
+        model = surrogate_models.create(config.surrogate.model, **config.surrogate.options)
+    except (PluginError, ImportError, TypeError, ValueError):
+        return False
+    return bool(getattr(model, "uses_calibration_runs", False))
+
+
+def _with_gradients(config: SurrogateConfig, case: SurrogateCase) -> SurrogateCase:
+    """Return ``case`` whose runs return their sensitivities.
+
+    Raises
+    ------
+    ConfigError
+        If the stack cannot give gradients of the surrogate's inputs: a simulator without
+        ``run_with_sensitivities``, parameterizations (the derivatives would be the state's,
+        not the inputs'), state fields, a coarse stack, a plan other than ``prior``, ``lhs``
+        and ``file``, or more than :data:`MAX_GRADIENT_VALUES` numbers.
+    """
+    plugin = config.surrogate.model
+    # What the build itself shapes first: a field stack or a coarse one would also hide
+    # the simulator's capability, and their own reason is the one to give.
+    refused = [
+        reason for reason, present in (
+            ("state fields ([case] fields)", bool(case.fields)),
+            ("a [coarse] stack", config.coarse is not None),
+            (f"the plan {config.design.plan!r} (prior, lhs or file only)",
+             config.design.plan not in ("prior", "lhs", "file")),
+        ) if present
+    ]  # fmt: skip
+    if refused:
+        raise ConfigError(
+            f"[surrogate] {plugin} learns from the runs' gradients, which are not made with "
+            + ", ".join(refused)
+        )
+    if not case.properties.identity:
+        raise ConfigError(
+            f"[surrogate] {plugin} learns from gradients with respect to its inputs, and the "
+            "case's [[parameterizations]] map the state to them: not supported"
+        )
+    if _also_calibrates(config):
+        # Its calibration runs would be run with sensitivities never used (and outside the
+        # size limit's count): no plugin has both capabilities yet, so the pair is refused.
+        raise ConfigError(
+            f"[surrogate] {plugin} learns from the runs' gradients and calibrates a spread on "
+            "calibration runs: the two together are not supported"
+        )
+    if not hasattr(case.simulator, "run_with_sensitivities"):
+        raise ConfigError(
+            f"[surrogate] {plugin} learns from the runs' gradients, and the "
+            f"{case.provenance.simulator!r} simulator gives none (no run_with_sensitivities): "
+            "use a simulator with sensitivities, or another surrogate"
+        )
+    runs = config.design.training + config.design.held_out
+    values = len(case.keys) * case.input_layout.n_state * runs
+    if values > MAX_GRADIENT_VALUES:
+        raise ConfigError(
+            f"[surrogate] {plugin}: the gradients of {len(case.keys)} keys over "
+            f"{case.input_layout.n_state} inputs for {runs} runs are {values:,} numbers, over "
+            f"the limit of {MAX_GRADIENT_VALUES:,}: fewer keys, inputs or runs"
+        )
+    return dataclasses.replace(
+        case, simulator=SensitivityRun(case.simulator, case.layout.n_state), gradients=True
+    )
+
+
 def _spare_columns(config: SurrogateConfig, case: SurrogateCase) -> int | None:
     """Return the columns a finite ensemble leaves after the other runs (``None``: drawn).
 
@@ -1552,7 +1668,10 @@ def fingerprint_parts(
     stack's provenance (``stack.<field>``: simulator, its version, its options' and deck's
     digests), the keys, the design and the seed. The plugin, its options, the gate and the
     domain's extent are left out: changing them refits on the runs already made (the runs are
-    the cost). A resume refused names the parts that differ.
+    the cost). The exception: a plugin that learns from the runs' gradients
+    (``uses_gradients``) adds the part ``gradients``, so switching between it and one without
+    the capability is refused in the same folder (its runs were made with sensitivities, or
+    not). A resume refused names the parts that differ.
 
     The design's files (``ensemble_file``, files its plan's options name) count by their
     content, as the stack's, so a build moved or copied with its files is the same build
@@ -1606,6 +1725,9 @@ def fingerprint_parts(
             "section": _with_contents(json.loads(config.coarse.model_dump_json())),
             "stack": coarse,
         })  # fmt: skip
+    if case.gradients:
+        # Every run also returns its sensitivities (absent otherwise: builds keep theirs).
+        parts["gradients"] = "sensitivities"
     if config.design.plan not in BUILTIN_PLANS:
         # An adaptive plan's runs are chosen by the surrogate (the user,
         # 2026-11-02): its plugin and options are part of what the runs are.
@@ -1870,12 +1992,13 @@ def _build_case(
     else:
         case_config, keys, variances = loaded
     assert config.surrogate.output_dir is not None
-    return surrogate_case(
+    case = surrogate_case(
         case_config, keys, variances, execution=config.execution,
         output_dir=config.surrogate.output_dir, coarse=config.coarse,
         fields=config.case.fields, field_times=config.case.field_times,
         field_cells=config.case.field_cells,
     )  # fmt: skip
+    return _with_gradients(config, case) if _wants_gradients(config) else case
 
 
 def _members(
@@ -1910,9 +2033,19 @@ def _snapshot_set(
     state = {k: np.ascontiguousarray(v[:, columns]) for k, v in blocks.items()}
     inputs = case.properties.ensemble(state)
     n_keys = len(case.keys)
-    values = np.stack([outputs[int(ids[j])] for j in columns], axis=-1).reshape(
-        len(case.run_keys), len(columns)
-    )
+    stacked = np.stack([outputs[int(ids[j])] for j in columns], axis=-1)
+    gradients = None
+    if case.gradients:
+        # Each run's output is [values, Jacobian.ravel()] (SensitivityRun); no fields here.
+        n_state = case.layout.n_state
+        if stacked.shape[0] != n_keys * (1 + n_state):
+            raise WorkflowError(
+                f"the runs' outputs hold {stacked.shape[0]} numbers, not {n_keys} values and "
+                f"their {n_keys} x {n_state} gradients: runs made without sensitivities"
+            )
+        gradients = np.ascontiguousarray(stacked[n_keys:].reshape(n_keys, n_state, len(columns)))
+        stacked = stacked[:n_keys]
+    values = stacked.reshape(len(case.run_keys), len(columns))
     return SnapshotSet(
         layout=case.input_layout,
         inputs={k: np.ascontiguousarray(v) for k, v in inputs.items()},
@@ -1932,6 +2065,7 @@ def _snapshot_set(
         ),
         coarse_only_inputs=None if coarse_only is None else coarse_only[0],
         coarse_only_outputs=None if coarse_only is None else coarse_only[1],
+        gradients=gradients,
         calibration_inputs=None if calibration is None else calibration[0],
         calibration_outputs=None if calibration is None else calibration[1],
         calibration_ids=() if calibration is None else calibration[2],
@@ -3444,6 +3578,14 @@ def refuse_model(
                 f"{model.model.early_until}, and every observation of this run lies up to "
                 "that date: the simulator's early runs would be the whole forecast"
             )
+    if section.on_check_failure == "refit" and getattr(model.model, "uses_gradients", False):
+        # A run's checks are plain simulator runs (no sensitivities): a refit set would have
+        # no gradients for such a model to learn from.
+        raise ConfigError(
+            f'[surrogate] on_check_failure = "refit": the surrogate {name} learns from the '
+            'runs\' gradients, which a run\'s checks do not make; use "stop" or "simulator", '
+            "or rebuild it"
+        )
     if section.on_check_failure == "refit" and getattr(model.model, "trains_on_coarse", False):
         # A run makes no coarse runs for such a model, and its refit set would need them.
         raise ConfigError(

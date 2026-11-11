@@ -418,6 +418,9 @@ class SurrogateDirectory:
             arrays["calibration_outputs"] = snapshots.calibration_outputs
             for i, variable in enumerate(snapshots.layout.variables):
                 arrays[f"calibration_input_{i}"] = snapshots.calibration_inputs[variable.name]
+        if snapshots.gradients is not None:
+            # Absent without gradients, as in the digest.
+            arrays["gradients"] = snapshots.gradients
         if snapshots.fields:
             # State fields, in the same file: one digest covers them.
             arrays["field_names"] = np.array(json.dumps(sorted(snapshots.fields)))
@@ -476,6 +479,7 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 calibration_ids=tuple(int(i) for i in data["calibration_ids"])
                 if "calibration_ids" in data.files
                 else (),
+                gradients=data["gradients"] if "gradients" in data.files else None,
             )
             recorded = str(data["digest"])
     except (OSError, KeyError, ValueError) as error:

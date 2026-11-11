@@ -181,7 +181,7 @@ def test_a_localized_adjoint_update_is_refused(linear_case: CaseFactory) -> None
 
 def test_a_transposed_jacobian_is_refused() -> None:
     from apex.core.errors import SimulationError
-    from apex.workflows.history_matching import SensitivityRun
+    from apex.simulation.sensitivity import SensitivityRun
 
     class Transposed:
         def run_with_sensitivities(

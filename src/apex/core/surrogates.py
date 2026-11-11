@@ -32,6 +32,12 @@ Optional capabilities, read with ``getattr`` as the simulators' are:
   calibrates its spread on runs of their own (``SnapshotSet.calibration_runs()``, ``[design]
   calibration``, drawn automatically when unset), e.g. a Laplace posterior's two scales, and
   on its validation share without them;
+- ``uses_gradients``, a ``bool`` (``False`` by default): the plugin learns from the runs'
+  gradients (``SnapshotSet.gradients``, ``(n_keys, n_inputs, n_runs)``), so its build runs
+  every member with its sensitivities (``SensitivitySimulator.run_with_sensitivities``,
+  through :class:`apex.simulation.sensitivity.SensitivityRun`); a build is refused where the
+  stack cannot give them (no sensitivities, parameterizations, state fields, a coarse stack,
+  a plan other than ``prior``, ``lhs`` and ``file``);
 - ``requires``, a ``tuple[str, ...]`` of simulator capabilities the plugin needs to be
   trained (the intrusive reduced models); none by default;
 - ``version``, a ``str`` recorded in the manifest.

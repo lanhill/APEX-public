@@ -210,6 +210,11 @@ class SnapshotSet:
         ``(n_keys, n_calibration)`` and their member ids. Never trained on nor gated on: like
         the coarse-only members they are not runs of the set, and :meth:`columns` keeps them
         whole. :meth:`calibration_runs` returns them as a set of their own.
+    gradients
+        Optional ``(n_keys, n_inputs, n_runs)``: each run's derivatives of its values at
+        ``keys`` with respect to its inputs, stacked in the layout's order (``n_inputs`` the
+        layout's n_state), from simulators with sensitivities, for plugins that learn
+        from them (``uses_gradients``, gradient-enhanced kriging, say).
     """
 
     layout: StateLayout
@@ -227,6 +232,7 @@ class SnapshotSet:
     calibration_inputs: Mapping[str, NDArray[np.float64]] | None = None
     calibration_outputs: NDArray[np.float64] | None = None
     calibration_ids: tuple[int, ...] = ()
+    gradients: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
         """Check every shape against the layout, the keys and the runs; copy the arrays."""
@@ -291,6 +297,12 @@ class SnapshotSet:
         object.__setattr__(self, "calibration_inputs", calibration_inputs)
         object.__setattr__(self, "calibration_outputs", calibration_outputs)
         object.__setattr__(self, "calibration_ids", tuple(int(i) for i in self.calibration_ids))
+        if self.gradients is not None:
+            gradients = _array(self.gradients, "gradients", 3)
+            expected = (len(self.keys), self.layout.n_state, n_runs)
+            if gradients.shape != expected:
+                raise ValueError(f"gradients must be {expected}, got {gradients.shape}")
+            object.__setattr__(self, "gradients", gradients)
 
     def _calibration(
         self, n_runs: int
@@ -417,6 +429,7 @@ class SnapshotSet:
             calibration_inputs=self.calibration_inputs,
             calibration_outputs=self.calibration_outputs,
             calibration_ids=self.calibration_ids,
+            gradients=None if self.gradients is None else self.gradients[:, :, index],
         )
 
     def digest(self) -> str:
@@ -466,6 +479,10 @@ class SnapshotSet:
             for variable in self.layout.variables:
                 array(self.calibration_inputs[variable.name])
             array(self.calibration_outputs)
+        if self.gradients is not None:
+            # Likewise: sets without gradients keep their digests.
+            text("gradients")
+            array(self.gradients)
         return digest.hexdigest()
 
 
