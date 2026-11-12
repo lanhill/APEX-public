@@ -32,6 +32,7 @@ from apex.algorithms.model_error.lstm import WellNetwork, well_residuals
 from apex.core.errors import SimulationError
 from apex.core.options import InputFile, Text, TextList
 from apex.core.plugins import model_error_models
+from apex.core.simulation import BlockStates
 from apex.domain.observations import DataKey, ObservationSet
 from apex.simulation.model_error import (
     RESIDUAL_PREFIX,
@@ -178,8 +179,8 @@ class PGLSTMModel:
             if k.index is None and k.datatype in modelled
         ]
 
-    def features(self, files: CaseFiles) -> list[NDArray[np.float64]]:
-        """Return each well's input sequence ``(n_steps, n_features)`` from a simulated case."""
+    def features(self, files: BlockStates) -> list[NDArray[np.float64]]:
+        """Return each well's input sequence ``(n_steps, n_features)`` from a member's states."""
         return well_features(files, self.wells, self.report_steps, self.phases)
 
     def well_residuals(
@@ -221,9 +222,26 @@ class PGLSTMModel:
         SimulationError
             If the case's files lack a feature, or a covered key is not at a report time.
         """
-        files = CaseFiles(case)
-        series = self.well_residuals(self.features(files), theta)
-        dates = [dt.date.fromisoformat(d) for d in files.report_dates(self.report_steps)]
+        return self.state_residuals(self.case_states(case), theta, keys)
+
+    def case_states(self, case: Path) -> BlockStates:
+        """Return a simulated case's block states: its INIT, restart and summary files."""
+        return CaseFiles(case)
+
+    def state_residuals(
+        self, states: BlockStates, theta: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        """Return :meth:`residuals` from a member's block states.
+
+        The same features, from a simulated case's files or a surrogate's predicted states.
+
+        Raises
+        ------
+        SimulationError
+            If the states lack a feature, or a covered key is not at a report time.
+        """
+        series = self.well_residuals(self.features(states), theta)
+        dates = [dt.date.fromisoformat(d) for d in states.report_dates(self.report_steps)]
         if len(set(dates)) != len(dates):
             # Keys are dates: two report steps on one day could not be told apart.
             raise SimulationError(

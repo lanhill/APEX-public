@@ -134,3 +134,17 @@ def test_deck_keywords_follow_the_includes(tmp_path: Path) -> None:
     assert found["SWOF"] == ["0.2 0 1 0 0.8 0.5 0 0"]
     assert found["PVTW"] == ["200 1.02 4E-5 0.5 0"]
     assert "OIL" in found
+
+
+def test_the_public_reader_and_text_after_a_records_slash() -> None:
+    """``keyword_records`` and ``include_path`` (public for plugins); as in Eclipse and OPM
+    Flow, the text after a record's ``/`` on its line is a comment, so a second record on
+    the same line is not read."""
+    from apex.simulation.deck import include_path, keyword_records
+
+    text = 'EQUALS\n PERMZ 1 / PERMY 2 /\n PORO 0.2 /\n/\nINCLUDE\n"${case_dir}/a.inc" /\n'
+    found = dict(keyword_records(text))
+    assert found["EQUALS"] == ["PERMZ 1", "PORO 0.2"]
+    assert include_path(found["INCLUDE"][0]) == "${case_dir}/a.inc"
+    assert include_path("grid.inc") == "grid.inc"
+    assert include_path("") is None

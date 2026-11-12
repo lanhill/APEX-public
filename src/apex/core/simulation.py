@@ -574,6 +574,166 @@ def extrapolates(model: object) -> bool:
     return isinstance(model, ExtrapolatingModel) and bool(model.extrapolates)
 
 
+@runtime_checkable
+class BlockStates(Protocol):
+    """What a model-error model reads of one member's run, by report step.
+
+    A simulated case's files are one source (``CaseFiles``: INIT, restarts, summary); a
+    surrogate's predicted states another (:class:`DatedStates` seen through the deck's
+    report dates, :class:`StepStates`). Arrays are over the active cells, in the grid's
+    order.
+    """
+
+    @property
+    def label(self) -> str:
+        """A name for messages (the case's, or the source's)."""
+        ...
+
+    def active(self, block: tuple[int, int, int]) -> int:
+        """Return the active index of a 1-based block, ``-1`` if inactive."""
+        ...
+
+    def static(self, name: str) -> NDArray[np.float64]:
+        """Return a static array (``DX``, ``PERMX``, ``PORO``, ...) over the active cells."""
+        ...
+
+    def restart(self, step: int) -> dict[str, NDArray[np.float64]]:
+        """Return the dynamic arrays (``PRESSURE``, saturations, densities) at a report step."""
+        ...
+
+    def wbhp(self, well: str, step: int) -> float:
+        """Return a well's bottom-hole pressure at a report step."""
+        ...
+
+    def report_dates(self, steps: Sequence[int]) -> list[str]:
+        """Return the ISO dates of 1-based report steps."""
+        ...
+
+
+@runtime_checkable
+class DatedStates(Protocol):
+    """A member's states addressed by report date: what a surrogate gives.
+
+    A model-error model's parameters were matched on what a deck's files hold, so these
+    must be the values the deck would write, as ``CaseFiles`` reads them:
+
+    - **units**: the deck's unit system, as its INIT and restart files (metric: bar, m,
+      mD, kg/m3; field: psi, ft, mD, lb/ft3), never converted;
+    - **cells**: arrays over the active cells, in the grid's order (Eclipse's: ``i`` fastest,
+      then ``j``, then ``k``); ``active(block)`` maps a 1-based ``(i, j, k)`` to its index,
+      ``-1`` for an inactive block;
+    - **static**: the INIT arrays ``DX DY DZ PERMX PERMY PERMZ PORO``;
+    - **dynamic**: ``PRESSURE`` and each phase's saturation and density (``SWAT``, ``SGAS``,
+      ``OIL_DEN``, ``WAT_DEN``, ``GAS_DEN`` as the deck has them), with ``SOIL`` given, as
+      ``CaseFiles`` fills it when the restart lacks it: ``1 - SWAT - SGAS``;
+    - **wbhp**: the well's bottom-hole pressure the summary reports at the date, also for a
+      shut well (a model reads it whatever its treatment of shut wells' rates).
+
+    ``apex.testing.assert_block_states_conform`` checks a source against a deck's run.
+    """
+
+    def active(self, block: tuple[int, int, int]) -> int:
+        """Return the active index of a 1-based block, ``-1`` if inactive."""
+        ...
+
+    def static(self, name: str) -> NDArray[np.float64]:
+        """Return a static array over the active cells."""
+        ...
+
+    def dynamic(self, date: str) -> dict[str, NDArray[np.float64]]:
+        """Return the dynamic arrays at an ISO report date."""
+        ...
+
+    def wbhp(self, well: str, date: str) -> float:
+        """Return a well's bottom-hole pressure at an ISO report date."""
+        ...
+
+
+@dataclass(frozen=True)
+class StepStates:
+    """:class:`DatedStates` seen by report step: the :class:`BlockStates` a model reads.
+
+    ``step_dates`` maps each 1-based report step to its ISO date (the deck's schedule,
+    read from its text: ``apex.simulation.deck.restart_schedule``).
+    """
+
+    source: DatedStates
+    step_dates: Mapping[int, str]
+    name: str = "surrogate"
+
+    @property
+    def label(self) -> str:
+        """The source's name, for messages."""
+        return self.name
+
+    def _date(self, step: int) -> str:
+        if step not in self.step_dates:
+            raise ValueError(f"{self.name}: no report date for step {step}")
+        return self.step_dates[step]
+
+    def active(self, block: tuple[int, int, int]) -> int:
+        """Return the active index of a 1-based block, ``-1`` if inactive."""
+        return self.source.active(block)
+
+    def static(self, name: str) -> NDArray[np.float64]:
+        """Return a static array over the active cells."""
+        return self.source.static(name)
+
+    def restart(self, step: int) -> dict[str, NDArray[np.float64]]:
+        """Return the dynamic arrays at a report step."""
+        return self.source.dynamic(self._date(step))
+
+    def wbhp(self, well: str, step: int) -> float:
+        """Return a well's bottom-hole pressure at a report step."""
+        return self.source.wbhp(well, self._date(step))
+
+    def report_dates(self, steps: Sequence[int]) -> list[str]:
+        """Return the ISO dates of 1-based report steps."""
+        return [self._date(int(s)) for s in steps]
+
+
+@runtime_checkable
+class BlockStateModel(Protocol):
+    """A model-error model that reads :class:`BlockStates`.
+
+    Such a model can run on a source other than a simulated case's files, e.g. a
+    surrogate's predicted states: ``state_residuals`` is ``residuals`` from ``states``, and
+    ``case_states`` the states of a simulated case (``residuals(case, ...)`` must equal
+    ``state_residuals(case_states(case), ...)``). ``report_steps`` are the 1-based report
+    steps it reads (their dates come from the deck).
+    """
+
+    state_variable: str
+    report_steps: tuple[int, ...]
+
+    def case_states(self, case: Path) -> BlockStates:
+        """Return the block states of a simulated case (its files)."""
+        ...
+
+    def state_residuals(
+        self, states: BlockStates, theta: NDArray[np.float64], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        """Return r at ``keys`` (0 where it does not apply) for one member's states."""
+        ...
+
+
+@runtime_checkable
+class BlockStateSimulator(Protocol):
+    """A simulator that gives a member's :class:`DatedStates`.
+
+    A surrogate simulator whose model predicts them (``gives_block_states``). The states
+    must come from the same prediction ``run`` gives: one source per member and forecast.
+    """
+
+    def gives_block_states(self) -> bool:
+        """Whether this simulator's model gives block states."""
+        ...
+
+    def block_states(self, member: MemberInput, dates: Sequence[str]) -> DatedStates:
+        """Return the member's states at the ISO report ``dates``."""
+        ...
+
+
 class CaseFieldModel(Protocol):
     """Field data computed from a simulated case's files: geophysics.
 

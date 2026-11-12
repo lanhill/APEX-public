@@ -173,6 +173,7 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
     if config.surrogate is not None:
         # The forecasts are the surrogate's; only the simulator's runs count.
         from apex.services import surrogates
+        from apex.workflows.history_matching import DATE_CHECK_RUNS
 
         evaluations = surrogates.planned_evaluations(
             config.surrogate, ensemble, single, members,
@@ -199,6 +200,16 @@ def plan(config: HistoryMatchConfig, run: "composition.Run", store: RunStore | N
                 f"{forecasting.early_until}: each of its evaluations is also a simulator run "
                 "up to that date, counted with the simulator runs (each a share of a full run; "
                 "members outside the domain or whose early run fails make one too, uncounted)"
+            )
+        if forecasting is not None and forecasting.model_error is not None:
+            # A deck run checks the deck's report dates first (another
+            # member's if it fails, up to DATE_CHECK_RUNS: the plan counts them all).
+            if runs is not None:
+                runs += DATE_CHECK_RUNS
+            warnings.append(
+                "the model error is computed on the surrogate's states: one simulator run "
+                f"first checks the deck's report dates (up to {DATE_CHECK_RUNS} if runs fail), "
+                "counted with the simulator runs"
             )
         if forecasting is not None:
             original = forecasting.original

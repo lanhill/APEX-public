@@ -109,6 +109,18 @@ Every saved ensemble (`checkpoints/iter_<k>.npz`) also holds:
 - An output whose observations are never positive cannot be modelled: its scale u would not be positive.
 - The θ ensemble can be large: 352,920 values for Brugge's 30 wells. An adaptive taper over the whole state is then about 6 GB.
 
+## Model error on a surrogate
+
+A history-matching run may forecast with a surrogate (`[surrogate]`) and keep its model error. The effective model is then the surrogate's forecast plus the model error, `p(m) + r(m, θ)`: `r` is computed from the surrogate's own predicted states at the wells' blocks (pressures, saturations, densities, the wells' bottom-hole pressures), as it is from a deck run's files otherwise.
+
+- **Both parts must be able to.** The surrogate's model must give a member's *block states* (an optional capability of a surrogate plugin, `predict_block_states`), and the model-error model must read them (`pg_lstm` does). Otherwise the run is refused, saying which part cannot.
+- **One source per member.** A member the surrogate forecasts takes both its forecast and its model error from the surrogate. A member the deck runs takes both from the deck's run: a check, a member outside the surrogate's domain (`outside = "simulator"`), the posterior's forecast. A member never mixes the two.
+- **The report dates come from the deck's text.** The model reads its report steps; a surrogate knows dates. They are read from the deck's schedule (`DATES` and `TSTEP`), as OPM Flow reads them. A schedule the text cannot tell (template expressions, conditional includes) is refused. Before the surrogate forecasts any member, one prior member runs on the deck to check its own dates against them (another if it fails, up to three, all counted in the plan), and the run stops if they differ. Report dates the surrogate was not validated at are refused.
+- **What the model error absorbs.** On a surrogate, `r` corrects whatever the surrogate misses as well as the model's error, so the matched θ belongs to that surrogate: it does not carry over to a run on the deck, nor the reverse. The surrogate's checks compare the two effective models, so as θ takes up the surrogate's error they may fail for that reason alone, and members the deck runs carry a θ matched on the surrogate.
+- **The surrogate stands for the deck alone.** Build it on the case with `[model_error]` (the build leaves the model error out; [Surrogate models](surrogates.md)) or on the same case without it.
+- **Not with:** `on_check_failure = "refit"` (a refit would learn from the checks' runs, which include the model error), a model-error model that extrapolates its parameters, a surrogate that predicts from companion runs (coarse-corrected, early-start), or predictions with a surrogate.
+- **What is saved.** The residuals (`MEC:` vectors) are saved where every member runs on the deck: the posterior's forecast by the deck (`full_<k>`), and the iterates after a switch to the simulator; the surrogate's iterates save none. `variance_in_errors` adds the surrogate's predictive variance of its forecast only, not of `r`.
+
 ## Parity with the reference implementation
 
 **The Brugge comparison's first iterations differ.** APEX's MEC + AdaLoc run on OPM Flow reduced the data mismatch from 1.04e9 to 5.4e8 in its first iteration; the reference implementation's published run went to 9.7e8, and then decreased steadily for 20 iterations. Two known differences explain it, not the case set-up:

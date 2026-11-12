@@ -62,11 +62,19 @@ from apex.core.errors import (
     WorkflowError,
     validation_problems,
 )
-from apex.core.plugins import executors, priors, simulators, surrogate_designs, surrogate_models
+from apex.core.plugins import (
+    executors,
+    model_error_models,
+    priors,
+    simulators,
+    surrogate_designs,
+    surrogate_models,
+)
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import (
     CaseFileSimulator,
     Executor,
+    ModelErrorModel,
     SeriesRequest,
     Simulator,
     match_vectors,
@@ -110,6 +118,7 @@ from apex.services.identity import code_version, tree_hash
 from apex.services.plugins import check_options
 from apex.simulation.deck import deck_layout, restart_schedule
 from apex.simulation.geophysics import GeophysicsSimulator
+from apex.simulation.model_error import ModelErrorSimulator
 from apex.simulation.sensitivity import SensitivityRun
 from apex.simulation.state_fields import StateFieldModel, field_keys, split_fields
 from apex.simulation.surrogate import SurrogateSimulator
@@ -412,11 +421,14 @@ def stack_provenance(
     ``options_digest``: the simulator's options, with the content of every file they name;
     ``deck_digest``: the deck template's folder (its includes), as run identity hashes it;
     ``case_digest``: what else maps the simulator's inputs to its answers
-    (``[geophysics]``, ``[model_error]``). Paths do not count, contents do: every file and
-    folder an option names (one with ``/`` in it, or a data file's suffix) is hashed by its
-    content, so a copied case is the same case. A path given without a separator, or a file
-    a deck reads through a path written inside it (not an option), is not followed: such
-    a change is seen only through the deck template's folder digest.
+    (``[geophysics]``; ``[model_error]`` never: a surrogate stands for the deck alone,
+    ``g``, and a case's model error is left out, ``model_error_left_out``; with the
+    digest of a case without one, as before). Paths do not count,
+    contents do: every file and folder an option names (one with ``/`` in it, or a data
+    file's suffix) is hashed by its content, so a copied case is the same case. A path
+    given without a separator, or a file a deck reads through a path written inside it (not
+    an option), is not followed: such a change is seen only through the deck template's
+    folder digest.
     """
     assert case.simulator is not None  # an optimization without one is refused before
     options = json.loads(case.simulator.model_dump_json())["options"]
@@ -424,10 +436,15 @@ def stack_provenance(
     version = getattr(simulator, "version", None)
     # An optimization has neither section: its case digest is that of an empty document.
     document = (
-        json.loads(case.model_dump_json(include={"geophysics", "model_error"}))
+        json.loads(
+            case.model_copy(update={"model_error": None}).model_dump_json(
+                include={"geophysics", "model_error"}
+            )
+        )
         if isinstance(case, HistoryMatchConfig)
         else {}
     )
+    left_out = isinstance(case, HistoryMatchConfig) and case.model_error is not None
     return SnapshotProvenance(
         simulator=case.simulator.name,
         simulator_version=None if not callable(version) else _version(version),
@@ -435,6 +452,7 @@ def stack_provenance(
         deck_digest=None if template is None else tree_hash(Path(str(template)).parent),
         case_digest=_digest(_with_contents(document)),
         apex_commit=code_version()["commit"],
+        model_error_left_out=left_out,
     )
 
 
@@ -561,15 +579,56 @@ class SurrogateCase:
 
 def _refuse(case: HistoryMatchConfig) -> None:
     if case.model_error is not None:
+        # A build's own case has its model error left out (_deck_alone); what reaches here
+        # is a run's (plan "run") or a coarse stack's.
         raise ConfigError(
-            "a surrogate cannot stand in for a stack with [model_error] (the "
-            "model-error model reads each run's case files)"
+            "a surrogate learns the deck alone (g), and this run's stored forecasts are the "
+            "deck with its model error (g + r): build from the case instead ([case] "
+            "config_file)"
         )
     name = case.simulator.name
     if name in REFUSED_SIMULATORS:
         raise ConfigError(f"a surrogate cannot stand in for {name!r}: {REFUSED_SIMULATORS[name]}")
     if case.execution.name == "ert":
         raise ConfigError("the 'ert' executor runs ERT's batches; use another [execution]")
+
+
+def _deck_alone(case: HistoryMatchConfig) -> HistoryMatchConfig:
+    """Return ``case`` without its model error: the deck alone, ``g``.
+
+    The ``[model_error]`` section goes, and with it the model's parameters: its state
+    variable and that variable's prior. A surrogate learns the deck; a run adds the model
+    error back on the surrogate's block states. A case without model error is returned as
+    it is.
+
+    Raises
+    ------
+    ConfigError
+        If the model is unknown, or its parameters are drawn in a prior group with others.
+    """
+    section = case.model_error
+    if section is None:
+        return case
+    try:
+        name = str(model_error_models.create(section.name, **section.options).state_variable)
+    except (PluginError, TypeError, ValueError) as error:
+        raise ConfigError(f"[model_error]: {error}") from error
+    grouped = [g for g, group in case.prior.groups.items() if name in group.variables]
+    if grouped:
+        raise ConfigError(
+            f"[model_error]'s parameters {name!r} are drawn with others in the prior group "
+            f"{grouped[0]!r}: a surrogate cannot leave them out"
+        )
+    variables = [v for v in case.state.variables if v.name != name]
+    if not variables:
+        raise ConfigError(f"the case's state is only [model_error]'s parameters {name!r}")
+    return case.model_copy(update={
+        "model_error": None,
+        "state": case.state.model_copy(update={"variables": variables}),
+        "prior": case.prior.model_copy(update={
+            "variables": {k: v for k, v in case.prior.variables.items() if k != name}
+        }),
+    })  # fmt: skip
 
 
 def _input_layout(layout: StateLayout, properties: PropertyMap) -> StateLayout:
@@ -687,6 +746,10 @@ def surrogate_case(
                 "yet (its keys are the objective's responses)"
             )
         return _optimization_case(case, keys, execution=execution)
+    # a case's model error is left out of a build, which simulates the
+    # deck alone (g); a run may add the model error back on the surrogate.
+    left_out = case.model_error is not None
+    case = _deck_alone(case)
     _refuse(case)
     if execution is not None:
         case = case.model_copy(update={"execution": execution})
@@ -706,7 +769,9 @@ def surrogate_case(
         composition.prepare_remote(executor, simulator, case)
     except (TypeError, ValueError, PluginError) as error:
         raise ConfigError(f"invalid case for a surrogate: {error}") from error
-    provenance_ = stack_provenance(case, stack.simulator)
+    provenance_ = stack_provenance(case, stack.simulator).model_copy(
+        update={"model_error_left_out": left_out}
+    )
     coarse_simulator, coarse_config = None, None
     if coarse is not None:
         built = coarse_stack(case, coarse, layout, executor)
@@ -1728,6 +1793,11 @@ def fingerprint_parts(
     if case.gradients:
         # Every run also returns its sensitivities (absent otherwise: builds keep theirs).
         parts["gradients"] = "sensitivities"
+    if case.provenance.model_error_left_out:
+        # The case's model error was left out: the runs are the deck's alone. Absent
+        # otherwise, so such a build and the same case's without
+        # [model_error] neither resume nor are confused with each other.
+        parts["model_error"] = "left out: the deck alone"
     if config.design.plan not in BUILTIN_PLANS:
         # An adaptive plan's runs are chosen by the surrogate (the user,
         # 2026-11-02): its plugin and options are part of what the runs are.
@@ -3453,8 +3523,9 @@ def _field_data(config: HistoryMatchConfig) -> bool:
 def refusals(config: HistoryMatchConfig) -> list[str]:
     """Return why ``config``'s ``[surrogate]`` is refused, from the configuration alone.
 
-    "Refused": ``[model_error]``, fidelity levels, ``intersect_visage`` (and ERT's
-    batches), and ``[[data_transforms]]`` on field data (§3, until tested); also
+    "Refused": fidelity levels, ``intersect_visage`` (and ERT's batches), and
+    ``[[data_transforms]]`` on field data (§3, until tested); ``[model_error]`` with a refit
+    (its capabilities are refused by :func:`surrogate_forecasting`); also
     ``variance_in_errors`` with data transforms (the variance is per raw datum). The
     adjoint update and executors running members remotely are refused when the run is built
     (:func:`refuse_parts`); the model's own refusals by :func:`refuse_model`.
@@ -3463,10 +3534,12 @@ def refusals(config: HistoryMatchConfig) -> list[str]:
     if section is None:
         return []
     found = []
-    if config.model_error is not None:
+    if config.model_error is not None and section.on_check_failure == "refit":
+        # A refit learns the deck from the checks' runs, which with model error are g + r.
         found.append(
-            "[surrogate] with [model_error]: the model-error model reads each run's case "
-            "files, which a surrogate has none of"
+            '[surrogate] on_check_failure = "refit" with [model_error]: the checks\' runs '
+            "are the deck with its model error (g + r), not the deck alone a surrogate "
+            'learns; use "stop" or "simulator"'
         )
     if config.method.name == "multilevel_esmda" or "levels" in config.method.options:
         found.append(
@@ -3640,6 +3713,7 @@ def surrogate_forecasting(
     *,
     layout: StateLayout | None = None,
     executor: object = None,
+    model_error: ModelErrorModel | None = None,
 ) -> SurrogateForecasting:
     """Compose what a run with ``[surrogate]`` holds, after every refusal.
 
@@ -3661,6 +3735,20 @@ def surrogate_forecasting(
         raise ConfigError("; ".join(found))
     original = active_model(section.model_file)
     refuse_model(config, original, observations, stack)
+    step_dates = None
+    if model_error is not None:
+        # The model error of the members the surrogate forecasts is
+        # computed on its block states; refused when either part cannot. The deck's report
+        # dates (from its text) after the configuration's refusals.
+        step_dates = composition.model_error_step_dates(config)
+        try:
+            ModelErrorSimulator(original.simulator, model_error, step_dates=step_dates)
+        except ValueError as error:
+            raise ConfigError(
+                f"[surrogate] with [model_error]: {error} (the surrogate "
+                f"{section.model_file}, plugin {original.manifest.plugin!r})"
+            ) from error
+        _refuse_untrained_dates(original, model_error, step_dates)
     manifest = original.manifest
     coarse = run_coarse_stack(config, original, layout, executor)
     assert manifest.gate is not None  # refused otherwise
@@ -3713,7 +3801,42 @@ def surrogate_forecasting(
             coarse_relative_to,
             coarse_resolved_in(manifest.coarse, Path(section.model_file).parent),
         ),
+        model_error=model_error,
+        step_dates=step_dates,
     )
+
+
+def _refuse_untrained_dates(
+    model: ActiveModel, model_error: ModelErrorModel, step_dates: Mapping[int, str]
+) -> None:
+    """Refuse model-error report dates the surrogate was not validated at (revision 5).
+
+    Its block states are asked at the deck's date of every report step the model reads:
+    each must lie within the times its gate checked (``time_range``), or be a time of its
+    keys when it records none; beyond them the states would be extrapolated unchecked.
+
+    Raises
+    ------
+    ConfigError
+        Naming the dates outside.
+    """
+    steps = getattr(model_error, "report_steps", ())
+    dates = [step_dates[int(s)] for s in steps if int(s) in step_dates]
+    domain = model.domain
+    outside: list[str]
+    if domain.time_range is not None:
+        outside = list(check_request(domain, (), times=dates).times_outside)
+    else:
+        known = {k.time for k in domain.keys}
+        outside = [d for d in dates if d not in known]
+    if outside:
+        raise ConfigError(
+            f"[surrogate] with [model_error]: the model error reads report dates the "
+            f"surrogate {model.path} was not validated at ({len(outside)}, e.g. "
+            f"{outside[0]}): its states there would be extrapolated; rebuild it over them "
+            "(observations or [case] times covering them), or leave those steps out of the "
+            "model's report_steps"
+        )
 
 
 def run_coarse_stack(

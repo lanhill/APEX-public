@@ -496,13 +496,14 @@ def test_cross_validation_decides_on_the_surrogate_and_reports_both(
 
 @pytest.mark.parametrize(
     ("extra", "match"),
-    [
-        ('[model_error]\nname = "pg_lstm"', "with [model_error]"),
-        (None, "fidelity levels"),
-    ],
+    [(None, "fidelity levels")],
 )
 def test_refused_combinations(tmp_path: Path, built: Path, extra: str | None, match: str) -> None:
-    """[model_error] and fidelity levels are refused with a surrogate ("Refused")."""
+    """Fidelity levels are refused with a surrogate ("Refused").
+
+    ``[model_error]`` is accepted when both parts can combine; its
+    refusals are in ``test_model_error_surrogate.py``.
+    """
     method = cases.ESMDA
     if extra is None:
         method = (

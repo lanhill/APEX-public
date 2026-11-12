@@ -136,14 +136,22 @@ class SnapshotProvenance(_Frozen):
     coarse: "SnapshotProvenance | None" = Field(
         default=None, description="The coarse stack's, for coarse-corrected surrogates."
     )
+    model_error_left_out: bool = Field(
+        default=False,
+        description="The case has a [model_error], which the runs left out: they simulated "
+        "the deck alone, g, never g + r.",
+    )
 
     @model_serializer(mode="wrap")
     def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        # Absent before coarse stacks existed: manifests and snapshot digests
-        # of surrogates without one keep their bytes.
+        # Absent before coarse stacks existed, and before model error could
+        # be left out: manifests and snapshot digests of surrogates
+        # without either keep their bytes.
         document: dict[str, Any] = handler(self)
         if document.get("coarse") is None:
             document.pop("coarse", None)
+        if not document.get("model_error_left_out"):
+            document.pop("model_error_left_out", None)
         return document
 
     def stack_mismatches(self, other: "SnapshotProvenance") -> list[str]:

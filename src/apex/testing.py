@@ -9,12 +9,14 @@ A package's ``conftest.py`` opts in with ``pytest_plugins = ["apex.testing"]`` (
 - generated cases with exact answers: ``linear_case`` (linear-Gaussian) and ``well_case``;
 - ``private_executor``, a private plugin for tests of what only the owner sees;
 - ``small_deck``, a deck with a history, and ``write_pet_case``, a PET case, for the
-  case-converter.
+  case-converter;
+- :func:`assert_block_states_conform`: a block-state source (a surrogate's) against a
+  deck's run, as a model-error model reads them.
 
 It needs pytest (a development dependency), so only tests import it.
 """
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,8 +24,16 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from apex.core.simulation import MemberCallback, MemberFailure, MemberInput, Simulator
+from apex.core.simulation import (
+    BlockStates,
+    DatedStates,
+    MemberCallback,
+    MemberFailure,
+    MemberInput,
+    Simulator,
+)
 from apex.domain.observations import DataKey
+from apex.simulation.model_error import WellSchedule
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -445,3 +455,44 @@ def write_pet_case(folder: Path, ensemble: str, dataassim: str) -> Path:
     path = folder / "CONFIG.toml"
     path.write_text(ensemble + PET_COMMON.format(dataassim=dataassim))
     return path
+
+
+def assert_block_states_conform(
+    files: BlockStates,
+    dated: DatedStates,
+    step_dates: Mapping[int, str],
+    wells: Sequence[WellSchedule],
+    phases: Sequence[str] = ("oil", "water"),
+    *,
+    rtol: float = 1e-6,
+    atol: float = 0.0,
+) -> None:
+    """Assert that ``dated`` gives a model-error model the inputs ``files`` gives.
+
+    Every :class:`~apex.core.surrogates.BlockStateSurrogate` plugin's
+    tests call it with one member's states and the same member's deck run (its
+    ``CaseFiles``, or arrays read from one). Checks the report dates by step, then every
+    well's input sequence (``well_features``: the static arrays, the dynamic ones, the
+    pressure difference to the bottom-hole pressure, at every perforated block and step)
+    read through :class:`~apex.core.simulation.StepStates`, within ``rtol``/``atol``.
+
+    Raises
+    ------
+    AssertionError
+        Naming the dates or the well and the largest difference.
+    """
+    from apex.core.simulation import StepStates
+    from apex.simulation.model_error import well_features
+
+    steps = sorted(int(s) for s in step_dates)
+    found_dates = files.report_dates(steps)
+    expected_dates = [step_dates[s] for s in steps]
+    assert found_dates == expected_dates, (
+        f"report dates differ: the run's {found_dates}, the states' {expected_dates}"
+    )
+    expected = well_features(files, wells, steps, phases)
+    found = well_features(StepStates(dated, dict(step_dates)), wells, steps, phases)
+    for well, want, got in zip(wells, expected, found, strict=True):
+        np.testing.assert_allclose(
+            got, want, rtol=rtol, atol=atol, err_msg=f"well {well.name}'s model inputs"
+        )

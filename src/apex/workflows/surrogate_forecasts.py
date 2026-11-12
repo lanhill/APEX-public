@@ -33,7 +33,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError, WorkflowError
-from apex.core.simulation import Executor, Simulator
+from apex.core.simulation import Executor, ModelErrorModel, Simulator
 from apex.core.surrogates import EarlyStartSurrogate, SurrogateModel
 from apex.domain.config import SurrogateRunSection
 from apex.domain.observations import DataKey
@@ -156,8 +156,18 @@ class SurrogateForecasting:
         stored_options: Callable[[Path], dict[str, object]] | None = None,
         coarse: Simulator | None = None,
         stored_coarse: Callable[[Path], CoarseSection] | None = None,
+        model_error: ModelErrorModel | None = None,
+        step_dates: Mapping[int, str] | None = None,
     ) -> None:
         self.section = section
+        # the run's model-error model, computed on the surrogate's
+        # block states for the members it forecasts (the deck's report dates by step).
+        self.model_error = model_error
+        self.step_dates = None if step_dates is None else dict(step_dates)
+        # Whether the deck's report dates were checked by a deck run before the first
+        # forecast (checkpointed: a resume does not check again). Attempted once: should
+        # that run fail, every deck run's model-error simulator still checks them.
+        self.dates_verified = model_error is None
         self.original = original
         self.active = original
         self.executor = executor
@@ -399,6 +409,8 @@ class SurrogateForecasting:
             "switched_at": self.switched_at,
             **({"coarse_runs": self.coarse_runs} if self.coarse is not None else {}),
             **({"early_runs": self.early_runs} if self.early_until is not None else {}),
+            # Absent without model error: such runs keep their state's bytes.
+            **({"dates_checked": self.dates_verified} if self.model_error is not None else {}),
         }
 
     def restore(self, saved: Mapping[str, Any] | None, run_path: Path) -> None:
@@ -429,6 +441,8 @@ class SurrogateForecasting:
         self.simulator_runs = int(saved.get("simulator_runs", 0))
         self.coarse_runs = int(saved.get("coarse_runs", 0))
         self.early_runs = int(saved.get("early_runs", 0))
+        if self.model_error is not None:
+            self.dates_verified = bool(saved.get("dates_checked", False))
         switched = saved.get("switched_at")
         self.switched_at = None if switched is None else int(switched)
         if self.refits:

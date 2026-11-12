@@ -570,8 +570,41 @@ def forecast_stack(
         # The uncertain petro-elastic parameters have no true value either.
         auxiliary |= frozenset(geophysics.state_variables)
     if model_error is not None:
+        # With a surrogate, the deck's report dates are set after the
+        # surrogate's refusals (ModelErrorSimulator.expect_dates).
         simulator = ModelErrorSimulator(simulator, model_error)
     return ForecastStack(simulator, tuple(warnings), auxiliary, geophysics, model_error)
+
+
+def model_error_step_dates(config: HistoryMatchConfig) -> dict[int, str]:
+    """Return the deck's report dates by 1-based step, from its text.
+
+    OPM Flow's rules (``simulation.deck.restart_schedule``): step 0 is ``START``, then each
+    ``DATES`` record and ``TSTEP`` step. A model-error model on a surrogate reads its report
+    steps at these dates; a deck run's own dates are checked against them.
+
+    Raises
+    ------
+    ConfigError
+        If the simulator has no deck template, or its schedule cannot be read from the text
+        (template expressions, Mako lines, unread includes), naming why.
+    """
+    options = config.simulator.options
+    template = options.get("deck_template_file")
+    if not isinstance(template, str):
+        raise ConfigError(
+            "[surrogate] with [model_error]: the model error reads the deck's report dates "
+            "from its text, and the simulator has no deck_template_file"
+        )
+    schedule = restart_schedule(Path(template), case_folder(options))
+    if schedule.unresolved:
+        raise ConfigError(
+            "[surrogate] with [model_error]: the model error reads the deck's report dates "
+            f"from its text, which cannot tell them: {'; '.join(schedule.unresolved[:3])}"
+        )
+    return {
+        step: time.date().isoformat() for step, time in enumerate(schedule.report_times) if step > 0
+    }
 
 
 def attach_parameter_mask(
@@ -808,8 +841,13 @@ def build_run(
             surrogates.refuse_parts(method, executor, config.surrogate)
             forecasting = surrogates.surrogate_forecasting(
                 config, observations, surrogates.stack_provenance(config, stack.simulator),
-                layout=layout, executor=executor,
+                layout=layout, executor=executor, model_error=stack.model_error,
             )  # fmt: skip
+            if forecasting.step_dates is not None and isinstance(
+                stack.simulator, ModelErrorSimulator
+            ):
+                # The deck's runs check their own dates against those its states are read at.
+                stack.simulator.expect_dates(forecasting.step_dates)
             if forecasting.early_until is not None and not getattr(
                 simulator, "stops_at_report_dates", False
             ):

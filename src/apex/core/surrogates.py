@@ -56,6 +56,7 @@ from typing import Protocol, Self, runtime_checkable
 import numpy as np
 from numpy.typing import NDArray
 
+from apex.core.simulation import DatedStates
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import SnapshotSet
 
@@ -131,6 +132,26 @@ class FieldSurrogate(Protocol):
         self, inputs: SurrogateInputs, names: Sequence[str], times: Sequence[str]
     ) -> dict[str, NDArray[np.float64]]:
         """Return ``{name: (n_cells, len(times), n_members)}``; deterministic."""
+        ...
+
+
+@runtime_checkable
+class BlockStateSurrogate(Protocol):
+    """A surrogate that gives one member's block states (optional).
+
+    What a model-error model reads of a run (``core.simulation.BlockStates``), from the
+    surrogate's own prediction: the static arrays, and the pressures, saturations,
+    densities and wells' bottom-hole pressures at report dates. With it a run may combine
+    ``[surrogate]`` and ``[model_error]``: the model-error residuals of a member the
+    surrogate forecasts are computed from these states. ``predict_block_states`` must agree
+    with ``predict`` for the same member (one prediction, one source), and give the values
+    the deck's files would hold, in their units and cell order (the contract of
+    ``core.simulation.DatedStates``); a plugin's tests check it on a deck's run with
+    ``apex.testing.assert_block_states_conform``.
+    """
+
+    def predict_block_states(self, inputs: SurrogateInputs, dates: Sequence[str]) -> DatedStates:
+        """Return one member's states (``inputs`` of one column) at the ISO ``dates``."""
         ...
 
 

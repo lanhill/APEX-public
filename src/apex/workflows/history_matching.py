@@ -60,7 +60,7 @@ from apex.algorithms.data_assimilation.data_error import DataErrorCovariance
 from apex.algorithms.surrogates.domain import check_members
 from apex.algorithms.surrogates.gate import gate
 from apex.core.diagnostics import DiagnosticsPlan, NoDiagnostics, RecordingDiagnostics
-from apex.core.errors import WorkflowError
+from apex.core.errors import ConfigError, WorkflowError
 from apex.core.metrics import MetricContext, PerformanceMetric
 from apex.core.progress import (
     GuardedProgress,
@@ -83,6 +83,7 @@ from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.results import HistoryMatchResult, IterationRecord
 from apex.domain.state import StateLayout
 from apex.domain.surrogate import GateResult
+from apex.simulation.model_error import ModelErrorSimulator
 from apex.simulation.sensitivity import SensitivityRun
 from apex.storage.run_directory import SIMULATOR, SURROGATE, RunDirectory, upgrade_iterate
 from apex.workflows.parameterization import PropertyMap, parameterized
@@ -94,6 +95,11 @@ from apex.workflows.surrogate_forecasts import (
     SurrogateForecasting,
     forecast_timing,
 )
+
+#: Deck runs tried, one member each, to check the deck's report dates before a surrogate
+#: run with model error forecasts: a run that fails is followed by
+#: another member's, up to this many.
+DATE_CHECK_RUNS = 3
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +214,9 @@ class HistoryMatchingWorkflow:
     A simulator with ``auxiliary_keys(keys)`` (a model-error simulator's residuals) is
     asked for those keys after the observations'; their values are saved with each saved
     ensemble (``auxiliary_predicted``, ``auxiliary_keys``) and never assimilated or scored.
+    With a surrogate they are saved only where every member runs on
+    the deck: the posterior's forecast by the simulator (``full_<k>``) and the iterates
+    after a switch to the simulator (``on_check_failure = "simulator"``).
     """
 
     def __init__(
@@ -310,12 +319,20 @@ class HistoryMatchingWorkflow:
         )
         self._last_raw: NDArray[np.float64] | None = None
         self.surrogate = surrogate
-        if surrogate is not None and (self._transformed_remotely or self.auxiliary_keys):
-            # Composition refuses both first ("Refused"); kept here for other callers.
+        if surrogate is not None and self._transformed_remotely:
+            # Composition refuses it first ("Refused"); kept here for other callers.
             raise ValueError(
                 "a surrogate's forecasts stay on local workers: no executor transforming "
-                "members remotely, no simulator with auxiliary keys (model error)"
+                "members remotely"
             )
+        #: A surrogate run's model-error residual keys, saved with the posterior's forecast
+        #: by the simulator only.
+        self._surrogate_auxiliary_keys: tuple[DataKey, ...] = ()
+        if surrogate is not None and self.auxiliary_keys:
+            # With a surrogate, a model error's residuals are not saved
+            # with the iterates (their members come from two sources, whose auxiliary rows
+            # are not gathered); the forecasts g + r and p + r are unaffected.
+            self._surrogate_auxiliary_keys, self.auxiliary_keys = self.auxiliary_keys, ()
         # A surrogate run's forecast sources of each iteration until its record is saved:
         # (member ids, their sources, the surrogate's identity, its predictive variance).
         self._pending_sources: dict[
@@ -693,7 +710,8 @@ class HistoryMatchingWorkflow:
             if auxiliary is not None:
                 ids, values = auxiliary
                 arrays["auxiliary_predicted"] = keep(values[:, _columns_of(ids, record.member_ids)])
-                arrays["auxiliary_keys"] = np.array([str(k) for k in self.auxiliary_keys])
+                names = self.auxiliary_keys or self._surrogate_auxiliary_keys
+                arrays["auxiliary_keys"] = np.array([str(k) for k in names])
             if sources is not None:
                 arrays.update(sources)
             prefix = "iter" if record.kind == "iterate" else "trial"
@@ -810,8 +828,15 @@ class HistoryMatchingWorkflow:
     # ------------------------------------------------------------------ surrogate
 
     def _surrogate_inputs(self, state: NDArray[np.float64]) -> dict[str, NDArray[np.float64]]:
-        """Return the surrogate's inputs of an ensemble: its properties, C-contiguous."""
+        """Return the surrogate's inputs of an ensemble: its properties, C-contiguous.
+
+        A model-error model's parameters are not inputs: the surrogate stands for the deck
+        alone.
+        """
         blocks = self.layout.split(state)
+        surrogate = self.surrogate
+        if surrogate is not None and surrogate.model_error is not None:
+            blocks = {k: v for k, v in blocks.items() if k != surrogate.model_error.state_variable}
         properties = blocks if self.property_map.identity else self.property_map.ensemble(blocks)
         return {
             name: np.ascontiguousarray(np.asarray(value, dtype=np.float64))
@@ -830,8 +855,19 @@ class HistoryMatchingWorkflow:
         assert surrogate is not None
         label = "mean model" if request.required else "ensemble"
         state, ids, iteration = request.state, request.member_ids, request.iteration
+        if not surrogate.dates_verified and surrogate.switched_at is None:
+            self._verify_dates(state, ids, iteration)
+        # No residuals left from an earlier forecast's runs.
+        self._last_auxiliary = None
         if surrogate.switched_at is not None:  # on_check_failure = "simulator" happened
-            outputs = self._run_members(state, ids, iteration, label, auxiliary=False)
+            # Every member on the deck now: its model error's residuals are saved again. (With
+            # them, an executor transforming remotely sends the raw rows back too: auxiliary
+            # skips without_raw_rows.)
+            residuals = self._surrogate_auxiliary_keys if not request.required else ()
+            outputs = self._run_members(
+                state, ids, iteration, label, auxiliary=bool(residuals),
+                auxiliary_keys=residuals or None,
+            )  # fmt: skip
             surrogate.simulator_runs += len(ids)
             sources = [SIMULATOR] * len(ids)
         else:
@@ -853,6 +889,48 @@ class HistoryMatchingWorkflow:
                 variance,
             )
         return outputs
+
+    def _verify_dates(
+        self, state: NDArray[np.float64], member_ids: NDArray[np.int64], iteration: int
+    ) -> None:
+        """Run a member on the deck to check its report dates.
+
+        The model error of the surrogate's members is read at the deck's report dates taken
+        from its text; before any is forecast, a deck run's own dates are checked against
+        them (its model-error simulator raises ``ConfigError`` when they differ, or when
+        the run reports fewer steps). The run's forecast is discarded: the run's results are
+        those of a run without it. A member whose run fails is followed by the next, up to
+        :data:`DATE_CHECK_RUNS`; none succeeding refuses the run. The members are the first
+        forecast's: one that asks for fewer (a method whose first forecast is a single
+        mean model) gets that many tries.
+
+        Raises
+        ------
+        ConfigError
+            If the dates differ, or no deck run succeeds to check them.
+        """
+        surrogate = self.surrogate
+        assert surrogate is not None
+        failures: list[str] = []
+        for column in range(min(DATE_CHECK_RUNS, len(member_ids))):
+            out = self._run_members(
+                keep(state[:, [column]]), member_ids[[column]], iteration,
+                "date check (simulator)", auxiliary=False, folder="check_dates",
+            )[0]  # fmt: skip
+            surrogate.simulator_runs += 1
+            if not isinstance(out, MemberFailure):
+                surrogate.dates_verified = True
+                logger.info(
+                    "the deck's report dates checked",
+                    extra={"event": "surrogate_dates_checked", "iteration": iteration,
+                           "member_id": int(member_ids[column])},
+                )  # fmt: skip
+                return
+            failures.append(f"member {out.member_id}: {out.message}")
+        raise ConfigError(
+            "[surrogate] with [model_error]: no deck run succeeded to check the deck's report "
+            f"dates before the surrogate forecasts ({'; '.join(failures)})"
+        )
 
     def _surrogate_members(
         self,
@@ -1056,12 +1134,18 @@ class HistoryMatchingWorkflow:
         """
         surrogate = self.surrogate
         assert surrogate is not None
-        model = surrogate.active.simulator
+        model: Simulator = surrogate.active.simulator
         if coarse is not None:
             model = (
-                model.with_coarse(coarse)
+                surrogate.active.simulator.with_coarse(coarse)
                 if surrogate.early_until is None
-                else model.with_early(coarse)
+                else surrogate.active.simulator.with_early(coarse)
+            )
+        if surrogate.model_error is not None:
+            # P(m) + r(m, theta), r from the surrogate's block states of
+            # the same member and prediction (never a deck run's files).
+            model = ModelErrorSimulator(
+                model, surrogate.model_error, step_dates=surrogate.step_dates
             )
         blocks = self.layout.split(state)
         members = [
@@ -1338,7 +1422,10 @@ class HistoryMatchingWorkflow:
             return
         state, member_ids, needs_reference = accepted()
         folder = f"accepted_{iteration}"
-        forecast, sources = self._accepted_forecast(state, member_ids, iteration, folder)
+        forecast, sources = self._accepted_forecast(
+            state, member_ids, iteration, folder, residuals=True
+        )
+        residuals = self._last_auxiliary
         predicted = self._assimilated(forecast)
         reference = None
         if needs_reference:
@@ -1363,6 +1450,11 @@ class HistoryMatchingWorkflow:
             "accepted_iteration": np.array(accepted_iteration),
             **{f"{role}_predicted": values for role, values in held.items()},
         }
+        if residuals is not None:
+            # The deck's forecast with its model error's residuals:
+            # the posterior's forecast reuses the members with them (_forecast_full).
+            arrays["auxiliary_predicted"] = keep(residuals)
+            arrays["auxiliary_keys"] = np.array([str(k) for k in self._surrogate_auxiliary_keys])
         for role, values in held.items():
             for label, per_member in _mean_square_by_type(self._held_out[role][1], values).items():
                 arrays[f"metric:{role}_normalized_data_mismatch:{label}"] = per_member
@@ -1383,18 +1475,24 @@ class HistoryMatchingWorkflow:
         member_ids: NDArray[np.int64],
         iteration: int,
         folder: str,
+        *,
+        residuals: bool = False,
     ) -> tuple[NDArray[np.float64], list[str]]:
         """Forecast members by the current source; every one must succeed.
 
         Returns their forecast in the analysis space (every row, held-out ones included)
-        and each member's source.
+        and each member's source. ``residuals``: on the deck (after a switch), also its
+        model error's residuals, left in ``_last_auxiliary``.
         """
         surrogate = self.surrogate
         assert surrogate is not None
+        self._last_auxiliary = None
         if surrogate.switched_at is not None:
+            keys = self._surrogate_auxiliary_keys if residuals else ()
             outputs = self._run_members(
-                state, member_ids, iteration, "accepted iterate", auxiliary=False, folder=folder
-            )
+                state, member_ids, iteration, "accepted iterate", auxiliary=bool(keys),
+                folder=folder, auxiliary_keys=keys or None,
+            )  # fmt: skip
             surrogate.simulator_runs += len(member_ids)
             sources = [SIMULATOR] * len(member_ids)
         else:
@@ -1507,6 +1605,33 @@ class HistoryMatchingWorkflow:
         )  # fmt: skip
         return keep(full["state"]), keep(full["predicted"]), full["member_ids"]
 
+    def _simulated_residuals_of(self, iteration: int) -> dict[int, NDArray[np.float64]]:
+        """Return the model error's residuals the simulator's forecasts of ``iteration`` saved.
+
+        By member, from the same sources as :meth:`_simulated_of` (its ``iter_<k>`` and the
+        accepted iterate's forecasts again, ``rescored_<j>``), where they hold them (the
+        deck's forecasts after a switch to the simulator).
+        """
+        found: dict[int, NDArray[np.float64]] = {}
+        sources = [upgrade_iterate(self.run_dir.load_arrays(f"iter_{iteration}"))]
+        for record in self.surrogate.rescores if self.surrogate else []:
+            if int(record["accepted"]) == iteration and record["source"] == SIMULATOR:
+                sources.append(self.run_dir.load_arrays(f"rescored_{record['iteration']}"))
+        for saved in sources:
+            has = "auxiliary_predicted" in saved
+            for column, (member, source) in enumerate(
+                zip(saved["member_ids"], saved["forecast_source"], strict=True)
+            ):
+                if str(source) != SIMULATOR:
+                    continue
+                # As _simulated_of, a later source wins: a member's residuals come from the
+                # file its forecast does, or the member is run again.
+                if has:
+                    found[int(member)] = np.asarray(saved["auxiliary_predicted"][:, column])
+                else:
+                    found.pop(int(member), None)
+        return found
+
     def _simulated_of(self, iteration: int) -> dict[int, NDArray[np.float64]]:
         """Return the simulator's forecasts of iterate ``iteration`` made already, by member.
 
@@ -1544,16 +1669,28 @@ class HistoryMatchingWorkflow:
 
         ``simulated``: the simulator's forecasts made already (analysis space, by member),
         kept rather than run again.
+
+        With a model error the residuals are saved with the forecast
+        (``auxiliary_predicted``) for every member: a member is reused only with its
+        residuals (the deck's forecasts after a switch to the simulator save them), the
+        others run.
         """
+        residuals = self._surrogate_auxiliary_keys
+        known: dict[int, NDArray[np.float64]] = {}
+        if residuals:
+            known = self._simulated_residuals_of(iteration)
+            simulated = {m: v for m, v in simulated.items() if m in known}
         to_run = [j for j, m in enumerate(member_ids) if int(m) not in simulated]
         ran = (
             self._run_members(
                 keep(state[:, to_run]), member_ids[to_run], iteration, "posterior (simulator)",
-                auxiliary=False, folder=f"full_{iteration}",
+                auxiliary=bool(residuals), folder=f"full_{iteration}",
+                auxiliary_keys=residuals or None,
             )
             if to_run
             else []
         )  # fmt: skip
+        ran_residuals = self._last_auxiliary if residuals else None
         succeeded = [
             j for j, o in zip(to_run, ran, strict=True) if not isinstance(o, MemberFailure)
         ]
@@ -1604,6 +1741,21 @@ class HistoryMatchingWorkflow:
             "forecast_source": np.array([SIMULATOR] * len(ids)),
             "surrogate_id": np.array(""),
         }
+        if residuals:
+            # Each kept member's residuals: a reused one's as saved, a run one's from this
+            # forecast (its successful members, in their order).
+            ran_columns = dict(zip(succeeded, range(len(succeeded)), strict=True))
+            per_member = []
+            for j, member in enumerate(member_ids):
+                if not ok[j]:
+                    continue
+                if j in ran_columns:
+                    assert ran_residuals is not None
+                    per_member.append(ran_residuals[:, ran_columns[j]])
+                else:
+                    per_member.append(known[int(member)])
+            arrays["auxiliary_predicted"] = keep(np.column_stack(per_member))
+            arrays["auxiliary_keys"] = np.array([str(k) for k in residuals])
         held = {role: keep(analysis[rows]) for role, (rows, _) in self._held_out.items()}
         arrays.update({f"{role}_predicted": values for role, values in held.items()})
         if self.run_dir.has_arrays("perturbed_observations"):
@@ -1785,6 +1937,7 @@ class HistoryMatchingWorkflow:
         keys: Sequence[DataKey] | None = None,
         folder: str | None = None,
         stop_at: str | None = None,
+        auxiliary_keys: Sequence[DataKey] | None = None,
     ) -> list[NDArray[np.float64] | MemberFailure]:
         """Run the members through the executor, reporting progress as they finish.
 
@@ -1797,7 +1950,13 @@ class HistoryMatchingWorkflow:
         self.progress.forecast_started(iteration=iteration, label=label, n_members=len(member_ids))
         began = time.monotonic()
         keys = self.raw_observations.keys if keys is None else tuple(keys)
-        extra = self.auxiliary_keys if simulator is None and auxiliary else ()
+        extra = (
+            tuple(auxiliary_keys)
+            if auxiliary_keys is not None
+            else self.auxiliary_keys
+            if simulator is None and auxiliary
+            else ()
+        )
         # A required forecast (the mean model's) keeps no raw rows: an executor applying the
         # transforms elsewhere sends none back for it.
         without_raw = getattr(self.executor, "without_raw_rows", None)

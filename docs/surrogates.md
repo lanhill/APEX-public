@@ -286,7 +286,7 @@ A case that transforms its field data (`[[data_transforms]]`) cannot have its ob
 
 Each finished run is saved at once. Running the same configuration again (or `uv run apex surrogate build --resume runs/NAME`) runs only the missing members, and the model files it writes are identical, byte for byte, to an uninterrupted build's. `--max-runs N` runs at most N full runs now. A configuration whose plugin, options or gate changed is fitted again on the runs already made; one whose case, design or seed changed is refused in the same directory, naming what differs (for example `stack.simulator_version` or `design`).
 
-A build refuses a case with `[model_error]`, and stacks whose coupling reads each step's restart files.
+A build on a case with `[model_error]` simulates the deck alone: the model error and its parameters are left out of the runs and of the surrogate's inputs, so the surrogate stands for the deck, and a run may add the model error back on it ([Model error on a surrogate](mec.md#model-error-on-a-surrogate)). The model's provenance records it (`model_error_left_out`), and so does the build's fingerprint, so such a build never resumes a build of the same case without `[model_error]`, or the reverse. A build refuses stacks whose coupling reads each step's restart files.
 
 ## Builds and checks as jobs
 
@@ -350,7 +350,8 @@ max_refits = 2
    - the model did not pass its gate, or its last check failed;
    - it was built for another simulator stack or case;
    - the run observes a key (in any role: history matching, cross validation, test) the model was not gated on;
-   - the case has `[model_error]`, fidelity levels, the adjoint update (`sensitivities`), an executor running members on other hosts (remote mode; use the executor's other mode), or `[[data_transforms]]` on field data (or any, with `refit` or `variance_in_errors`);
+   - the case has `[model_error]` and the surrogate gives no block states, or its model-error model cannot read them, or `on_check_failure = "refit"` (see [Model error on a surrogate](mec.md#model-error-on-a-surrogate));
+   - the case has fidelity levels, the adjoint update (`sensitivities`), an executor running members on other hosts (remote mode; use the executor's other mode), or `[[data_transforms]]` on field data (or any, with `refit` or `variance_in_errors`);
    - the plan would exceed `max_evaluations`;
    - `sigma_ratio` would loosen the model's gate;
    - `variance_in_errors` names a model without a predictive variance, or an iterative method (GIES, LM-EnRML, GN-EnRML, CHOP draw their perturbations once and judge trials on the observation errors alone). With ES-MDA and ES, the members' mean predictive variance per datum is added to the observation errors of each step, in its perturbations and gain; the variance is that step's, and diagonal.

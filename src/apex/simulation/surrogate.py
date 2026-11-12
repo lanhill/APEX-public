@@ -43,8 +43,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from apex.core.simulation import MemberInput
+from apex.core.simulation import DatedStates, MemberInput
 from apex.core.surrogates import (
+    BlockStateSurrogate,
     CoarseCorrectedSurrogate,
     EarlyStartSurrogate,
     SurrogateInputs,
@@ -183,6 +184,40 @@ class SurrogateSimulator:
         if self._model is None or self._domain is None:
             self._model, self._domain = self.loader()
         return self._model, self._domain
+
+    def gives_block_states(self) -> bool:
+        """Whether the model gives a member's block states.
+
+        A model that predicts from companion runs (coarse-corrected, early-start) does
+        not: its states would not be those of one prediction from the member alone.
+        """
+        model, _ = self.fitted()
+        return (
+            isinstance(model, BlockStateSurrogate)
+            and not isinstance(model, CoarseCorrectedSurrogate)
+            and not isinstance(model, EarlyStartSurrogate)
+        )
+
+    def block_states(self, member: MemberInput, dates: Sequence[str]) -> DatedStates:
+        """Return the member's states at the ISO ``dates`` (a model-error model's inputs).
+
+        Raises
+        ------
+        SurrogateDomainError
+            If the member lies outside the model's validated domain.
+        ValueError
+            If the model gives no block states.
+        """
+        model, domain = self.fitted()
+        if not self.gives_block_states():
+            raise ValueError(f"the surrogate {self.identity[:12]} gives no block states")
+        assert isinstance(model, BlockStateSurrogate)
+        inputs = {
+            name: np.ascontiguousarray(np.asarray(value, dtype=np.float64).reshape(-1, 1))
+            for name, value in member.state.items()
+        }
+        self.guard(domain, model, inputs, (member.member_id,), (), None)
+        return model.predict_block_states(inputs, list(dates))
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
         """Predict one member at ``keys``: ``(len(keys),)``.

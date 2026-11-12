@@ -636,6 +636,28 @@ def _keyword_records(
     return found
 
 
+def keyword_records(text: str) -> list[tuple[str, list[str]]]:
+    """Return deck text's keywords, each with its ``/``-terminated records, in order.
+
+    The text is read as it stands: includes are not followed (:func:`deck_keywords` follows
+    them) and Mako lines are skipped. Comments are dropped, and as in Eclipse and OPM Flow
+    the text after a record's ``/`` on its line is a comment too (``PERMZ 1 / PERMY 2 /``
+    on one line is one record). Keywords are upper case; records are as written.
+    """
+    return _keyword_records(text)
+
+
+def include_path(record: str) -> str | None:
+    """Return an ``INCLUDE`` record's path as written (quotes removed), or None if empty.
+
+    Template expressions (``${case_dir}/grid.inc``) are kept as they are.
+    """
+    match = _INCLUDE_PATH.search(record)
+    if match is None:
+        return None
+    return (match.group(1) or match.group(2)).strip()
+
+
 def _terminator(line: str, quote: str) -> tuple[int | None, str]:
     """Return where a record's ``/`` is in ``line``, and the quote open at its end.
 

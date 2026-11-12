@@ -29,8 +29,11 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from apex.core.errors import SimulationError
+from apex.core.errors import ConfigError, SimulationError
 from apex.core.simulation import (
+    BlockStateModel,
+    BlockStates,
+    BlockStateSimulator,
     CaseFileSimulator,
     ExtrapolatingModel,
     MemberInput,
@@ -38,6 +41,7 @@ from apex.core.simulation import (
     ModelErrorModel,
     SeriesRequest,
     Simulator,
+    StepStates,
     extrapolates,
 )
 from apex.domain.observations import DataKey
@@ -312,6 +316,11 @@ class CaseFiles:
         self._file = ResdataFile
         self._vectors: dict[str, NDArray[np.float64]] = {}
 
+    @property
+    def label(self) -> str:
+        """The case's name, for messages (``BlockStates``)."""
+        return self.case.name
+
     def active(self, block: tuple[int, int, int]) -> int:
         """Return the active index of a 1-based block, ``-1`` if inactive."""
         i, j, k = block
@@ -369,8 +378,17 @@ class CaseFiles:
         return [dates[s - first].isoformat()[:10] for s in steps]
 
 
+def _label(states: BlockStates) -> str:
+    """Return a states source's name for messages (its ``label``, else its case's)."""
+    label = getattr(states, "label", None)
+    if isinstance(label, str):
+        return label
+    case = getattr(states, "case", None)
+    return Path(str(case)).name if case is not None else type(states).__name__
+
+
 def well_features(
-    files: CaseFiles,
+    files: BlockStates,
     wells: Sequence[WellSchedule],
     report_steps: Sequence[int],
     phases: Sequence[str] = ("oil", "water"),
@@ -397,7 +415,7 @@ def well_features(
         missing = [n for n in names[len(STATIC) : -1] if n not in arrays and n not in absent]
         if missing:
             raise SimulationError(
-                f"{files.case.name}: no {', '.join(missing)} at report step {step} (the deck "
+                f"{_label(files)}: no {', '.join(missing)} at report step {step} (the deck "
                 "needs RPTRST BASIC=2 DEN, so that restarts hold the densities)"
             )
     sequences = []
@@ -428,25 +446,81 @@ class ModelErrorSimulator:
     residuals themselves.
     """
 
-    needs_work_dir = True
-
-    def __init__(self, inner: Simulator, model: ModelErrorModel) -> None:
-        if not isinstance(inner, CaseFileSimulator):
+    def __init__(
+        self,
+        inner: Simulator,
+        model: ModelErrorModel,
+        *,
+        step_dates: Mapping[int, str] | None = None,
+    ) -> None:
+        # A simulator whose runs leave files (a deck), or one that gives
+        # block states (a surrogate whose model predicts them), read by a model that can.
+        # ``step_dates``: the deck's report dates by step (from its text), which a surrogate
+        # is asked at; given, a deck run's own dates are checked against them once.
+        self._step_dates = None if step_dates is None else dict(step_dates)
+        self._dates_checked = False
+        if isinstance(inner, CaseFileSimulator):
+            self.proxy = False
+        elif isinstance(inner, BlockStateSimulator) and inner.gives_block_states():
+            if not isinstance(model, BlockStateModel):
+                raise ValueError(
+                    f"model error on a surrogate needs a model that reads block states "
+                    f"(state_residuals); {type(model).__name__} reads a run's files only"
+                )
+            if extrapolates(model):
+                raise ValueError(
+                    f"model error on a surrogate: {type(model).__name__} extrapolates its "
+                    "parameters past the history, which is not supported on a surrogate"
+                )
+            missing = [s for s in model.report_steps if s not in (self._step_dates or {})]
+            if missing:
+                raise ValueError(
+                    "model error on a surrogate needs the deck's report date of every report "
+                    f"step the model reads; none for steps {missing[:5]}"
+                )
+            self.proxy = True
+        elif isinstance(inner, BlockStateSimulator):
             raise ValueError(
-                f"model error needs a simulator whose runs leave files to read "
-                f"(opm_flow, eclipse); {type(inner).__name__} has none"
+                "model error on a surrogate needs its model to give block states "
+                "(predict_block_states), from the member alone: this one has none, or "
+                "predicts from companion runs (coarse-corrected or early-start)"
             )
-        self.inner: CaseFileSimulator = inner
+        else:
+            raise ValueError(
+                f"model error needs a simulator whose runs leave files to read (opm_flow, "
+                f"eclipse), or a surrogate whose model gives block states; "
+                f"{type(inner).__name__} has neither"
+            )
+        self.inner = inner
         self.model = model
         # a model whose residuals apply past the history (it declares
         # ``forecasts``) forecasts whole series, when the inner simulator can read them from
         # a simulated case; otherwise no ``run_series`` (predictions list keys or refuse).
-        reader = getattr(inner, "read_series", None)
+        reader = None if self.proxy else getattr(inner, "read_series", None)
         self._read_series: Callable[[Path, SeriesRequest], MemberSeries] | None = (
             reader if callable(reader) else None
         )
         if getattr(model, "forecasts", False) is True and self._read_series is not None:
             self.run_series = self._run_series
+
+    def expect_dates(self, step_dates: Mapping[int, str]) -> None:
+        """Check every deck run's report dates against these.
+
+        A run whose model error is also computed on a surrogate's states, asked at the
+        deck's dates read from its text: a deck run reporting others stops the run. Checked
+        once per process (each worker process checks its first run).
+        """
+        self._step_dates = dict(step_dates)
+        self._dates_checked = False
+
+    @property
+    def needs_work_dir(self) -> bool:
+        """A deck's runs write files in a work directory; a surrogate's predictions none."""
+        return not self.proxy
+
+    def _deck(self) -> CaseFileSimulator:
+        assert isinstance(self.inner, CaseFileSimulator)
+        return self.inner
 
     def state_names_read(self) -> frozenset[str] | None:
         """Return the wrapped simulator's (its members' state reaches it unchanged)."""
@@ -509,7 +583,7 @@ class ModelErrorSimulator:
             raise SimulationError(f"member {member.member_id} has no state variable {name!r}")
         theta = np.asarray(member.state[name], dtype=np.float64)
         physical = replace(member, state={k: v for k, v in member.state.items() if k != name})
-        case = self.inner.simulate(physical)
+        case = self._deck().simulate(physical)
         try:
             assert self._read_series is not None  # run_series is set only with it
             series = self._read_series(case, request)
@@ -523,7 +597,7 @@ class ModelErrorSimulator:
             if callable(release):
                 release(case)
             raise
-        self.inner.clean(case)
+        self._deck().clean(case)
         return MemberSeries(series.times, series.vectors, np.ascontiguousarray(values))
 
     def _residuals(
@@ -549,12 +623,16 @@ class ModelErrorSimulator:
         # replace(), not a new MemberInput: the member keeps where it runs.
         physical = replace(member, state={k: v for k, v in member.state.items() if k != name})
         data_rows = [i for i, k in enumerate(keys) if not k.datatype.startswith(RESIDUAL_PREFIX)]
-        case = self.inner.simulate(physical)
+        if self.proxy:
+            return self._run_proxy(member, physical, theta, keys, data_rows)
+        case = self._deck().simulate(physical)
         try:
+            if self._step_dates is not None and not self._dates_checked:
+                self._check_dates(case)
             # One reading of the run's files gives r at every key: added to the simulated
             # data at the data keys, as is at the MEC: keys.
             values = self._residuals(member, case, theta, keys)
-            values[data_rows] += self.inner.read(case, [keys[i] for i in data_rows])
+            values[data_rows] += self._deck().read(case, [keys[i] for i in data_rows])
         except BaseException:
             # A failed member's files stay for diagnosis (keep_simulations); only what the
             # inner simulator holds for the case (the geophysics' member model) goes.
@@ -562,5 +640,64 @@ class ModelErrorSimulator:
             if callable(release):
                 release(case)
             raise
-        self.inner.clean(case)
+        self._deck().clean(case)
         return values
+
+    def _run_proxy(
+        self,
+        member: MemberInput,
+        physical: MemberInput,
+        theta: NDArray[np.float64],
+        keys: Sequence[DataKey],
+        data_rows: Sequence[int],
+    ) -> NDArray[np.float64]:
+        """Return ``p(m) + r(m, theta)`` on a surrogate.
+
+        One source: the surrogate's prediction gives ``p`` and the states ``r`` reads, for
+        this member and forecast (never a deck run's files).
+        """
+        assert isinstance(self.inner, BlockStateSimulator)
+        assert isinstance(self.model, BlockStateModel)
+        assert self._step_dates is not None  # checked when built
+        steps = {int(s): self._step_dates[int(s)] for s in self.model.report_steps}
+        dated = self.inner.block_states(physical, list(steps.values()))
+        states = StepStates(dated, steps, name=f"surrogate states of member {member.member_id}")
+        values = np.asarray(
+            self.model.state_residuals(states, theta, keys), dtype=np.float64
+        ).copy()
+        if data_rows:
+            values[list(data_rows)] += self.inner.run(physical, [keys[i] for i in data_rows])
+        return values
+
+    def _check_dates(self, case: Path) -> None:
+        """Refuse a deck run whose report dates differ from the deck text's (revision 5).
+
+        The surrogate's states are asked at the dates read from the deck's text; a run of
+        the deck reports its own. They must agree at the steps the model reads.
+        """
+        assert self._step_dates is not None
+        if not isinstance(self.model, BlockStateModel):
+            self._dates_checked = True
+            return
+        steps = list(self.model.report_steps)
+        if steps:
+            try:
+                found = self.model.case_states(case).report_dates(steps)
+            except SimulationError as error:
+                # Fewer report steps than the model reads: a date error too, not a member's.
+                raise ConfigError(
+                    f"{case.name}: the deck's run does not report the model's report steps "
+                    f"read from its text: {error}"
+                ) from error
+            expected = [self._step_dates.get(s) for s in steps]
+            if found != expected:
+                differ = [
+                    (s, e, f) for s, e, f in zip(steps, expected, found, strict=True) if e != f
+                ]
+                # Not a member's failure: every member would read its states at wrong dates.
+                raise ConfigError(
+                    f"{case.name}: the deck's report dates read from its text differ from "
+                    f"the run's at {len(differ)} step(s), e.g. step {differ[0][0]}: text "
+                    f"{differ[0][1]}, run {differ[0][2]}"
+                )
+        self._dates_checked = True
