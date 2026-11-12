@@ -632,7 +632,10 @@ SYSTEM = (
     "instead of planning. plan_study and revise_draft "
     "return held_fixed, differs and seeds from the study's cells: say which settings are "
     "shared and which differ from those, never from memory, and point out any difference "
-    "beyond the one the user asked for. A caveat you add about a plan concerns a setting "
+    "beyond the one the user asked for. Asked for a study's random seeds, quote that "
+    "result's 'seeds' (each replicate's seeds) as given: you have them, so never say "
+    "you cannot list them or offer to read the draft for them. A caveat you add "
+    "about a plan concerns a setting "
     "the plan shows (held_fixed, differs, defaults), such as a localization shown 'within "
     "the strategy <name>' (that strategy localizes by itself, e.g. adaptive_rows), never "
     "one from background knowledge. A setting is shared only when every arm has it at "
@@ -2353,13 +2356,13 @@ def _over_budget(message: str) -> bool:
 
 #: A plan's result keys the answer must state, first (#288 review, the release tester's
 #: H33): the events' excerpt keeps a result's first fields, and the tools' bound cuts its
-#: last long fields first.
+#: last long fields first. ``seeds`` is short and early, so the events keep it (#297).
 PLAN_FIRST = (
-    "draft", "study", "kind", "alternative_to", "cost", "budget", "within_budget", "cost_line",
+    "draft", "study", "kind", "alternative_to", "cost", "budget", "within_budget", "seeds",
+    "seed_rule", "cost_line",
     "design_warnings", "design_revision", "design_unfit", "design_warnings_note", "approval",
     "arm_costs",
     "unmatched", "matched", "next", "differences", "true_model", "simulator", "replicates",
-    "seeds", "seed_rule",
 )  # fmt: skip
 #: A plan's long blocks, last, in this order: the tools' bound cuts from the end, so the
 #: arms themselves (methods, variants: the model summarises the study from them; ERT's
