@@ -625,3 +625,27 @@ def test_a_plugin_bug_at_its_creation_is_loud_even_for_a_complete_build(
     monkeypatch.setattr(_Calibrated, "__init__", broken)
     with pytest.raises(RuntimeError, match="a bug in the plugin"):
         surrogates.build(_build(tmp_path, "bug", laplace=True))
+
+
+def test_raising_training_on_a_file_design_reuses_the_calibration_runs(tmp_path: Path) -> None:
+    """The Brugge build's case (2026-11-12): plan file, training raised in the same folder.
+    The old calibration columns fall inside the new training runs and are reused (they are
+    full runs); only the new training columns beyond them and the new calibration runs are
+    simulated. The result equals a build made with the larger count from the start."""
+    write_case(tmp_path)
+    np.savez(tmp_path / "ensemble.npz", x=np.random.default_rng(3).standard_normal((3, 45)))
+    small = (
+        'plan = "file"\ntraining = 20\nheld_out = 5\ncalibration = 5\n'
+        'ensemble_file = "ensemble.npz"'
+    )
+    first = surrogates.build(_build(tmp_path, "grow", laplace=True, design=small))
+    made = len((first.path / JOURNAL).read_text().splitlines())
+    assert made == 30
+    larger = small.replace("training = 20", "training = 30")
+    grown = surrogates.build(_build(tmp_path, "grow", laplace=True, design=larger))
+    assert grown.complete
+    # 30 training (20 old + the 5 old calibration + 5 new) and 5 new calibration runs.
+    assert len((grown.path / JOURNAL).read_text().splitlines()) == made + 10
+    fresh = surrogates.build(_build(tmp_path, "fresh", laplace=True, design=larger))
+    assert fresh.summary.gate == grown.summary.gate
+    assert fresh.summary.calibration_runs == grown.summary.calibration_runs == 5

@@ -1844,6 +1844,28 @@ def _open_build(
                 "build fingerprint upgraded",
                 extra={"event": "surrogate_fingerprint_upgraded", "part": "design"},
             )
+        else:
+            before = _grown_training(directory, config, case, parts)
+            saved_design = directory.load_design() if before is not None else None
+            if before is not None and saved_design is not None:
+                # Drawn and checked now, before the folder changes: a larger count the
+                # ensemble cannot give (or anything else that refuses the design) leaves the
+                # build as it was. The build draws it again (the same draws) and saves it.
+                _grown_design(config, case, directory, saved_design,
+                              build_streams(config.surrogate.seed)["design"],
+                              calibration_count(config, case))  # fmt: skip
+            if before is not None:
+                # More training runs on the same columns: the build goes on with the runs
+                # made, its design drawn again (and checked) at the start of the build.
+                directory.write_state(
+                    **{BUILD_FINGERPRINT: fingerprint}, fingerprint_parts=parts,
+                    complete=False, design_grown_from=before,
+                )  # fmt: skip
+                logger.info(
+                    "design grown",
+                    extra={"event": "surrogate_design_grown", "training_before": before,
+                           "training": config.design.training},
+                )  # fmt: skip
     resumed = directory.open(
         kind=BUILD_FINGERPRINT,
         config_text=config.model_dump_json(indent=2),
@@ -1857,6 +1879,107 @@ def _open_build(
             # The same build (its fingerprint matched), its design's files elsewhere now.
             directory.write_config(json.dumps({**stored, "design": design}, indent=2))
     return parts
+
+
+def _grown_training(
+    directory: SurrogateDirectory,
+    config: SurrogateConfig,
+    case: SurrogateCase,
+    parts: Mapping[str, str],
+) -> int | None:
+    """Return the saved build's training count if this configuration only raises it.
+
+    A design of plan ``file`` or ``run`` permutes its ensemble's columns once by the seed:
+    the held-out runs are the first, then the training runs, then the coarse-only and the
+    calibration runs (:func:`apex.algorithms.surrogates.designs.ensemble_design`), and a
+    member's id is its column. Raising ``training`` (nothing else) therefore keeps every
+    held-out run and every training run made, and the new training runs include the old
+    calibration runs (full runs, so their outputs serve): the runs are reused by id. ``None``
+    when anything else differs (the directory then refuses, naming the parts).
+
+    Raises
+    ------
+    ConfigError
+        If only ``training`` was raised, on a plan whose ids would name other inputs
+        (``prior``, ``lhs``: drawn, not columns; adaptive plans), or with coarse-only runs
+        (their runs are on the coarse stack only, and would become training runs).
+    """
+    state = directory.read_state()
+    saved_parts = state.get("fingerprint_parts") or {}
+    differ = {k for k in set(saved_parts) | set(parts) if saved_parts.get(k) != parts.get(k)}
+    stored_path = directory.path / "config.json"
+    if differ != {"design"} or not stored_path.is_file():
+        return None
+    before = json.loads(stored_path.read_text()).get("design", {}).get("training")
+    if not isinstance(before, int) or before >= config.design.training:
+        return None
+    earlier = config.model_copy(
+        update={"design": config.design.model_copy(update={"training": before})}
+    )
+    if fingerprint_parts(earlier, case).get("design") != saved_parts.get("design"):
+        return None  # more than the training count changed
+    if config.design.plan not in ("file", "run"):
+        raise ConfigError(
+            f"{directory.path} holds a surrogate build of other runs (design differ): "
+            f"raising [design] training from {before} to {config.design.training} reuses the "
+            "runs only with plan 'file' or 'run' (a "
+            f"member is its ensemble's column); plan {config.design.plan!r} draws other "
+            "inputs for the same ids: build in another output_dir"
+        )
+    if config.design.coarse_only > 0:
+        raise ConfigError(
+            f"{directory.path} holds a surrogate build of other runs (design differ): "
+            "raising [design] training with coarse-only runs would make "
+            "runs of the coarse stack alone training runs: build in another output_dir"
+        )
+    return before
+
+
+def _grown_design(
+    config: SurrogateConfig,
+    case: SurrogateCase,
+    directory: SurrogateDirectory,
+    saved: StoredDesign,
+    rng: np.random.Generator,
+    counted: CalibrationCount,
+) -> StoredDesign:
+    """Return the design drawn again with more training runs, checked against the saved one.
+
+    The held-out runs must be the same, with the same inputs, every saved training run must
+    stay a training run with its inputs, and a saved calibration run the new design makes a
+    training run must have its inputs too (:func:`_grown_training` says why they do).
+
+    Raises
+    ------
+    ConfigError
+        If the design drawn again does not keep the saved runs (or cannot be drawn).
+    """
+    drawn = draw_design(config, case, rng, counted)
+    position = {m: j for j, m in enumerate(drawn.training_ids)}
+    calibrating = [
+        (j, position[m]) for j, m in enumerate(saved.calibration_ids) if m in position
+    ]  # fmt: skip
+    kept = drawn.held_out_ids == saved.held_out_ids and all(
+        m in position for m in saved.training_ids
+    ) and all(
+        np.array_equal(drawn.held_out[k], saved.held_out[k])
+        and np.array_equal(
+            drawn.training[k][:, [position[m] for m in saved.training_ids]], saved.training[k]
+        )
+        and (
+            not calibrating or saved.calibration is None or np.array_equal(
+                drawn.training[k][:, [p for _, p in calibrating]],
+                saved.calibration[k][:, [j for j, _ in calibrating]],
+            )
+        )
+        for k in saved.held_out
+    )  # fmt: skip
+    if not kept:
+        raise ConfigError(
+            f"{directory.path}: the design drawn again with more training runs does not keep "
+            "its saved runs; build in another output_dir"
+        )
+    return drawn
 
 
 def _fingerprint(parts: Mapping[str, str]) -> str:
@@ -2598,6 +2721,19 @@ def _build(
         directory.write_state(design_stream=streams["design"].bit_generator.state)
         logger.info(
             "design drawn",
+            extra={"event": "surrogate_design", "plan": design.plan,
+                   "training": len(design.training_ids), "held_out": len(design.held_out_ids)},
+        )  # fmt: skip
+    elif directory.read_state().get("design_grown_from") is not None:
+        # [design] training raised in this folder (_grown_training): the design is drawn
+        # again from the seed, as it was first, keeping the runs made.
+        design = _grown_design(config, case, directory, design, streams["design"], counted)
+        directory.save_design(design, case.layout)
+        directory.write_state(
+            design_stream=streams["design"].bit_generator.state, design_grown_from=None
+        )
+        logger.info(
+            "design drawn again with more training runs",
             extra={"event": "surrogate_design", "plan": design.plan,
                    "training": len(design.training_ids), "held_out": len(design.held_out_ids)},
         )  # fmt: skip

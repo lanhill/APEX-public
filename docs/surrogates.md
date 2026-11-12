@@ -75,7 +75,7 @@ After this page you can build a surrogate of a history-matching case, read its g
    The command prints the gate per datatype and exits with status 1 if the gate fails. A datatype passes when its error is within the tolerance (with `outputs = "observations"`, an RMS of `(surrogate − simulator) / σ` at most `sigma_ratio`). A passing build prints every datatype within its tolerance and exits with status 0.
 
    **If the gate fails,** the model is not usable. Typical remedies, then rebuild:
-   - add training runs (raise `training`): the run files already made are kept, so only the missing members are simulated;
+   - add training runs (raise `training`): with plan `file` or `run` the runs already made are kept, so only the missing members are simulated; with `prior` or `lhs` the members are drawn, so a larger count is a new build in another `output_dir`;
    - change the plugin's `options`: they are refitted on the runs already made;
    - use a design that fits the case better (`prior` for fields, `lhs` for a few scalar inputs);
    - loosen `sigma_ratio` only if the observation errors really allow it: the surrogate's error should lie well inside the data noise.
@@ -284,7 +284,7 @@ A case that transforms its field data (`[[data_transforms]]`) cannot have its ob
 
 ## Resuming and refitting
 
-Each finished run is saved at once. Running the same configuration again (or `uv run apex surrogate build --resume runs/NAME`) runs only the missing members, and the model files it writes are identical, byte for byte, to an uninterrupted build's. `--max-runs N` runs at most N full runs now. A configuration whose plugin, options or gate changed is fitted again on the runs already made; one whose case, design or seed changed is refused in the same directory, naming what differs (for example `stack.simulator_version` or `design`).
+Each finished run is saved at once. Running the same configuration again (or `uv run apex surrogate build --resume runs/NAME`) runs only the missing members, and the model files it writes are identical, byte for byte, to an uninterrupted build's. `--max-runs N` runs at most N full runs now. A configuration whose plugin, options or gate changed is fitted again on the runs already made; one whose case, design or seed changed is refused in the same directory, naming what differs (for example `stack.simulator_version` or `design`). The exception is a larger `training` with plan `file` or `run` and nothing else changed: the columns are permuted once by the seed (held-out runs first, then training, then calibration), so the held-out runs stay, every training run made stays a training run, and the old calibration runs fall into the new training or calibration runs (by column); the design is drawn again, checked to keep them, and only the new members run. A smaller count, or one with coarse-only runs, is still another build.
 
 A build on a case with `[model_error]` simulates the deck alone: the model error and its parameters are left out of the runs and of the surrogate's inputs, so the surrogate stands for the deck, and a run may add the model error back on it ([Model error on a surrogate](mec.md#model-error-on-a-surrogate)). The model's provenance records it (`model_error_left_out`), and so does the build's fingerprint, so such a build never resumes a build of the same case without `[model_error]`, or the reverse. A build refuses stacks whose coupling reads each step's restart files.
 

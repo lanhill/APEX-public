@@ -1591,6 +1591,87 @@ def test_a_design_file_counts_by_its_content_not_its_path(tmp_path: Path) -> Non
         surrogates.build(path)
 
 
+def test_raising_training_on_a_file_design_reuses_the_runs_made(tmp_path: Path) -> None:
+    """The user's rule (Brugge, 2026-11-12): more training runs in the same folder run only
+    the missing members. Plan file permutes the columns once by the seed, so the held-out runs
+    stay and the old training runs stay training runs; the result equals a build made with
+    the larger count from the start."""
+    _stored_prior_case(tmp_path)
+    small = 'plan = "file"\ntraining = 20\nheld_out = 10\nensemble_file = "prior.npz"'
+    first = surrogates.build(write_build(tmp_path, name="grown", design=small))
+    before = SurrogateDirectory(first.path).load_design()
+    assert before is not None
+    made = len((first.path / JOURNAL).read_text().splitlines())
+
+    grown = surrogates.build(write_build(tmp_path, name="grown", design=FILE_DESIGN.format(
+        "prior.npz")))  # fmt: skip
+    after = SurrogateDirectory(grown.path).load_design()
+    assert after is not None
+    assert after.held_out_ids == before.held_out_ids
+    assert set(before.training_ids) <= set(after.training_ids)
+    assert len(after.training_ids) == 30
+    # Only the 10 new members ran.
+    assert len((grown.path / JOURNAL).read_text().splitlines()) == made + 10
+    assert grown.complete
+    stored = json.loads((grown.path / "config.json").read_text())
+    assert stored["design"]["training"] == 30
+    assert "design_grown_from" not in {
+        k for k, v in SurrogateDirectory(grown.path).read_state().items() if v is not None
+    }
+    # The same design and fit as a build with 30 from the start, in another folder.
+    fresh = surrogates.build(write_build(tmp_path, name="fresh", design=FILE_DESIGN.format(
+        "prior.npz")))  # fmt: skip
+    again = SurrogateDirectory(fresh.path).load_design()
+    assert again is not None
+    assert again.training_ids == after.training_ids
+    assert again.held_out_ids == after.held_out_ids
+    assert fresh.summary.gate == grown.summary.gate
+    for name in ("model/surrogate.json", "model/surrogate.npz", "snapshots.npz"):
+        assert (fresh.path / name).read_bytes() == (grown.path / name).read_bytes(), name
+    # Built again with the same count: complete, nothing new.
+    assert surrogates.build(write_build(tmp_path, name="grown", design=FILE_DESIGN.format(
+        "prior.npz"))).complete  # fmt: skip
+    assert len((grown.path / JOURNAL).read_text().splitlines()) == made + 10
+
+
+def test_a_count_the_ensemble_cannot_give_leaves_the_build_as_it_was(tmp_path: Path) -> None:
+    """The review of the growth: 35 training runs from 40 columns with 10 held out cannot be
+    drawn; refused before the folder changes, so the build resumes with its own count and
+    can still grow to one the ensemble gives."""
+    _stored_prior_case(tmp_path)
+    small = 'plan = "file"\ntraining = 20\nheld_out = 10\nensemble_file = "prior.npz"'
+    first = surrogates.build(write_build(tmp_path, name="kept", design=small))
+    state = (first.path / "state.json").read_text()
+    with pytest.raises(ConfigError, match="the design cannot be drawn"):
+        surrogates.build(write_build(tmp_path, name="kept", design=small.replace(
+            "training = 20", "training = 35")))  # fmt: skip
+    assert (first.path / "state.json").read_text() == state
+    assert surrogates.build(write_build(tmp_path, name="kept", design=small)).complete
+    assert surrogates.build(write_build(tmp_path, name="kept", design=small.replace(
+        "training = 20", "training = 30"))).complete  # fmt: skip
+
+
+def test_raising_training_refuses_a_drawn_plan_and_lowering_it_stays_refused(
+    tmp_path: Path,
+) -> None:
+    """A prior or lhs design draws its members: an id would name other inputs, so raising
+    training there is refused with the reason; a lower count is another build, as before."""
+    write_case(tmp_path)
+    surrogates.build(write_build(tmp_path, name="drawn"))
+    with pytest.raises(ConfigError, match=r"design differ\): raising \[design\] training"):
+        surrogates.build(
+            write_build(
+                tmp_path, name="drawn", design='plan = "prior"\ntraining = 30\nheld_out = 5'
+            )
+        )
+    _stored_prior_case(tmp_path / "f")
+    small = 'plan = "file"\ntraining = 20\nheld_out = 10\nensemble_file = "prior.npz"'
+    surrogates.build(write_build(tmp_path / "f", name="fewer", design=small))
+    with pytest.raises(ConfigError, match="design differ"):
+        surrogates.build(write_build(tmp_path / "f", name="fewer", design=small.replace(
+            "training = 20", "training = 15")))  # fmt: skip
+
+
 def test_a_build_fingerprinted_by_its_design_path_resumes_and_is_upgraded(
     tmp_path: Path,
 ) -> None:
