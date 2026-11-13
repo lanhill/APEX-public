@@ -177,6 +177,19 @@ class OptimizationSurrogateSection(_Strict):
         description="Controls outside the surrogate's validated domain: `stop` the "
         "optimization, or evaluate them by the `simulator` (recorded as such).",
     )
+
+    @field_validator("outside", mode="before")
+    @classmethod
+    def _no_extrapolation(cls, value: object) -> object:
+        # outside = "surrogate" (extrapolation by the user's explicit choice) is a history
+        # match's option only: said so, rather than pydantic's list of the allowed values.
+        if value == "surrogate":
+            raise ValueError(
+                'outside = "surrogate" (extrapolating beyond the validated domain) is offered '
+                'only in history matching; here give "stop" or "simulator"'
+            )
+        return value
+
     relative: dict[QuantityKind, float] = Field(
         default_factory=dict,
         description="The checks' relative tolerances by kind of quantity (pressure, rate, "

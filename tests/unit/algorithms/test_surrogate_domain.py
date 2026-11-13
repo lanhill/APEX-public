@@ -281,3 +281,23 @@ def test_the_domain_round_trips_through_json_exactly(extent: DomainExtent) -> No
         check_coordinates(back, members, residuals, range(20)).members
         == check_coordinates(domain, members, residuals, range(20)).members
     )
+
+
+def test_the_keys_guard_lets_members_outside_pass_but_not_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """outside = "surrogate" (2026-11-13): its guard answers a member outside the domain, but
+    still refuses a key, field or time the model was never gated on."""
+    from apex.algorithms.surrogates import domain as module
+
+    member_outside = check_coordinates(_box(), np.array([[2.0], [0.0]]), np.zeros(1), [7])
+    assert not member_outside.inside
+    monkeypatch.setattr(module, "check_members", lambda *a, **k: member_outside)
+    module.refuse_keys_outside(_box(), None, {}, [7])  # type: ignore[arg-type]
+    with pytest.raises(SurrogateDomainError, match="member 7"):
+        module.refuse_outside(_box(), None, {}, [7])  # type: ignore[arg-type]
+    unknown = member_outside.merged(check_request(_box(), [DataKey("2024-01-01", "WWCT:P1")]))
+    monkeypatch.setattr(module, "check_members", lambda *a, **k: unknown)
+    with pytest.raises(SurrogateDomainError, match="not trained and gated on") as raised:
+        module.refuse_keys_outside(_box(), None, {}, [7])  # type: ignore[arg-type]
+    assert "member 7" not in str(raised.value)

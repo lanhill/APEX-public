@@ -402,6 +402,45 @@ def test_each_member_takes_g_and_r_from_one_source(tmp_path: Path, built: Path) 
     assert seen == {"surrogate", "simulator"}
 
 
+def test_outside_surrogate_answers_every_member_by_the_surrogate(
+    tmp_path: Path, built: Path
+) -> None:
+    """outside = "surrogate" (the user, 2026-11-13: one forecast source for every member):
+    members outside the domain (the box [-2, 2], the prior's spread 1.5) are the surrogate's
+    p and r too, never the deck's; each forecast with members outside logs them with the
+    policy, and the summary counts them (member forecasts: a member outside at several
+    forecasts counts each time). The checks and the posterior stay the deck's."""
+    config = _case(tmp_path, surrogate=_section(built, outside="surrogate", check_members=4))
+    composition.start(config)
+    run = tmp_path / "runs" / "hm"
+    for path in sorted((run / "checkpoints").glob("iter_*.npz")):
+        saved = np.load(path)
+        assert set(map(str, saved["forecast_source"])) == {"surrogate"}
+        for column in range(saved["state"].shape[1]):
+            x, theta = saved["state"][:N_STATE, column], float(saved["state"][N_STATE, column])
+            expected = G @ x + _residual(_pressure(x) + DELTA, theta)
+            np.testing.assert_allclose(saved["predicted"][:, column], expected, rtol=0,
+                                       atol=ROUND_OFF)  # fmt: skip
+    events = [json.loads(line) for line in (run / "events.jsonl").read_text().splitlines()]
+    outside = [e for e in events if e.get("event") == "surrogate_outside"]
+    assert outside  # some members leave the box
+    assert {e["policy"] for e in outside} == {"surrogate"}
+    summary = json.loads((run / "summary.json").read_text())
+    assert summary["surrogate"]["extrapolated"] == sum(len(e["members"]) for e in outside)
+    state = json.loads((run / "state.json").read_text())
+    assert state["surrogate"]["extrapolated"] == summary["surrogate"]["extrapolated"]
+    # Worker processes get the simulator pickled: its guard goes with it (the test's own
+    # plugin is not registered in workers, so pickled here).
+    import pickle
+
+    from apex.algorithms.surrogates.domain import refuse_keys_outside, refuse_outside
+    from apex.services.surrogates import active_model
+
+    for extrapolate, guard in ((True, refuse_keys_outside), (False, refuse_outside)):
+        simulator = active_model(built, extrapolate=extrapolate).simulator
+        assert pickle.loads(pickle.dumps(simulator)).guard is guard
+
+
 def test_the_checks_and_the_posterior_are_the_decks(tmp_path: Path, built: Path) -> None:
     """The posterior is forecast again by the deck: its r comes from the deck's files, and
     is saved for every member (the only residuals a surrogate run saves)."""
@@ -608,10 +647,14 @@ class _Shifted:
 # ---------------------------------------------------------------- resume, plan, refusals
 
 
-def test_a_resumed_run_equals_an_uninterrupted_one(tmp_path: Path, built: Path) -> None:
+@pytest.mark.parametrize("outside", ["simulator", "surrogate"])
+def test_a_resumed_run_equals_an_uninterrupted_one(
+    tmp_path: Path, built: Path, outside: str
+) -> None:
     """Interrupted after its first step and resumed, bit for bit as uninterrupted; the dates
-    are checked once (the flag is checkpointed)."""
-    section = _section(built, outside="simulator", check_members=4)
+    are checked once (the flag is checkpointed); with outside = "surrogate" the count of
+    member forecasts outside the domain is checkpointed too."""
+    section = _section(built, outside=outside, check_members=4)
     whole = composition.start(_case(tmp_path, name="whole", surrogate=section))
     composition.start(_case(tmp_path, name="parts", surrogate=section), max_steps=1)
     resumed = composition.resume(tmp_path / "runs" / "parts")
@@ -626,6 +669,10 @@ def test_a_resumed_run_equals_an_uninterrupted_one(tmp_path: Path, built: Path) 
         for line in (tmp_path / "runs" / "parts" / "events.jsonl").read_text().splitlines()
     ]
     assert sum(e.get("event") == "surrogate_dates_checked" for e in events) == 1
+    if outside == "surrogate":
+        counts = [json.loads((tmp_path / "runs" / n / "summary.json").read_text())["surrogate"]
+                  ["extrapolated"] for n in ("whole", "parts")]  # fmt: skip
+        assert counts[0] == counts[1] > 0
     # The check is a simulator run of its own label, never an ensemble forecast.
     done = [e for e in events if e.get("event") == "forecast_done"]
     checks = [e for e in done if e.get("label") == "date check (simulator)"]
@@ -866,3 +913,34 @@ def test_the_posterior_reuses_the_deck_forecasts_with_their_residuals(
             for c in range(f["state"].shape[1])
         ]
         np.testing.assert_allclose(f["auxiliary_predicted"], np.column_stack(r), atol=ROUND_OFF)
+
+
+def test_the_plan_says_members_outside_are_extrapolated(built: Path) -> None:
+    """outside = "surrogate": the plan and apex validate say members outside the domain are
+    extrapolated; its simulator runs are a stopping run's (no fallback is counted)."""
+    from apex.domain.config import SurrogateRunSection
+
+    def plan(outside: str) -> tuple[int | None, list[str]]:
+        section = SurrogateRunSection.model_validate(
+            {"model_file": built, "outside": outside, "check_members": 4}
+        )
+        return surrogates.planned_simulator_runs(section, 6, 20)
+
+    extrapolating, stopping = plan("surrogate"), plan("stop")
+    assert extrapolating[0] == stopping[0]
+    assert any("extrapolated by the surrogate" in n for n in extrapolating[1])
+    assert not any("extrapolated" in n for n in stopping[1])
+
+
+def test_predictions_and_optimizations_refuse_extrapolation_by_name() -> None:
+    """outside = "surrogate" is a history match's option: a prediction's or an optimization's
+    [surrogate] refuses it saying so."""
+    import pydantic
+
+    from apex.domain.optimization import OptimizationSurrogateSection
+    from apex.domain.prediction import PredictionSurrogateSection
+
+    for section in (PredictionSurrogateSection, OptimizationSurrogateSection):
+        with pytest.raises(pydantic.ValidationError, match="only in history matching"):
+            section.model_validate({"model_file": "m.json", "outside": "surrogate"})
+        section.model_validate({"model_file": "m.json", "outside": "simulator"})

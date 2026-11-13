@@ -32,6 +32,7 @@ validated points than varying coordinates) is refused when the domain is built: 
 member would lie outside it.
 """
 
+import dataclasses
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -654,3 +655,26 @@ def refuse_outside(
         Naming the members, keys and times outside, and by how much.
     """
     check_members(domain, model, inputs, member_ids, keys, coarse=coarse).raise_if_outside()
+
+
+def refuse_keys_outside(
+    domain: TrainingDomain,
+    model: SurrogateModel,
+    inputs: SurrogateInputs,
+    member_ids: Sequence[int],
+    keys: Sequence[DataKey] = (),
+    coarse: NDArray[np.float64] | None = None,
+) -> None:
+    """Raise unless every key, field and time lies inside the domain; members may lie outside.
+
+    The guard of a history match with ``outside = "surrogate"``: its members outside the
+    domain are answered anyway by the user's explicit choice (the run logs and counts them),
+    but a key, field or time the model was never gated on is still refused.
+
+    Raises
+    ------
+    SurrogateDomainError
+        Naming the keys, fields and times outside.
+    """
+    found = check_members(domain, model, inputs, member_ids, keys, coarse=coarse)
+    dataclasses.replace(found, outside=()).raise_if_outside()

@@ -52,7 +52,12 @@ from apex.algorithms.surrogates.designs import (
     repeated_columns,
     sampled_design,
 )
-from apex.algorithms.surrogates.domain import check_members, check_request, refuse_outside
+from apex.algorithms.surrogates.domain import (
+    check_members,
+    check_request,
+    refuse_keys_outside,
+    refuse_outside,
+)
 from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import (
     ApexError,
@@ -3633,8 +3638,13 @@ def fitted_model(path: str, identity: str) -> tuple[SurrogateModel, TrainingDoma
     return loaded.model, loaded.domain
 
 
-def active_model(path: Path, identity: str | None = None) -> ActiveModel:
+def active_model(
+    path: Path, identity: str | None = None, *, extrapolate: bool = False
+) -> ActiveModel:
     """Load a model as a run forecasts with it: a :class:`SurrogateSimulator` and its files.
+
+    ``extrapolate``: answer members outside the domain (a history match's ``outside =
+    "surrogate"``); keys, fields and times outside it are refused either way.
 
     Raises
     ------
@@ -3647,7 +3657,7 @@ def active_model(path: Path, identity: str | None = None) -> ActiveModel:
         loaded.domain,
         identity=loaded.identity,
         loader=functools.partial(fitted_model, str(Path(path).resolve()), loaded.identity),
-        guard=refuse_outside,
+        guard=refuse_keys_outside if extrapolate else refuse_outside,
     )
     return ActiveModel(Path(path), loaded.identity, loaded.manifest, simulator)
 
@@ -3869,7 +3879,8 @@ def surrogate_forecasting(
     found = refusals(config)
     if found:
         raise ConfigError("; ".join(found))
-    original = active_model(section.model_file)
+    extrapolate = section.outside == "surrogate"
+    original = active_model(section.model_file, extrapolate=extrapolate)
     refuse_model(config, original, observations, stack)
     step_dates = None
     if model_error is not None:
@@ -3925,7 +3936,7 @@ def surrogate_forecasting(
         tolerances=tolerances,
         variances=variances,
         kinds=kinds,
-        loader=active_model,
+        loader=functools.partial(active_model, extrapolate=extrapolate),
         plugin=functools.partial(surrogate_models.create, manifest.plugin, **resolved),
         snapshots=snapshots,
         cost=model_cost(Path(section.model_file), original.identity),
@@ -4097,6 +4108,11 @@ def planned_simulator_runs(
         notes.append(
             "the simulator may take over members outside the domain or the rest of the run: "
             "counted as if it forecast everything"
+        )
+    if section.outside == "surrogate":
+        notes.append(
+            'outside = "surrogate": members outside the validated domain are extrapolated '
+            "by the surrogate (logged; counted in summary.extrapolated)"
         )
     return runs, notes
 

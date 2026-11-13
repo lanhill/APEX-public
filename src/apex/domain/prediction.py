@@ -179,6 +179,19 @@ class PredictionSurrogateSection(_Strict):
         description="A member outside the model's domain stops the prediction, or is run "
         "by the simulator.",
     )
+
+    @field_validator("outside", mode="before")
+    @classmethod
+    def _no_extrapolation(cls, value: object) -> object:
+        # outside = "surrogate" (extrapolation by the user's explicit choice) is a history
+        # match's option only: said so, rather than pydantic's list of the allowed values.
+        if value == "surrogate":
+            raise ValueError(
+                'outside = "surrogate" (extrapolating beyond the validated domain) is offered '
+                'only in history matching; here give "stop" or "simulator"'
+            )
+        return value
+
     workers: int | None = Field(
         default=None, ge=1, description="Process workers for the surrogate (None: serial)."
     )

@@ -189,6 +189,9 @@ class SurrogateForecasting:
         self.rescores: list[dict[str, Any]] = []
         self.evaluations = 0
         self.simulator_runs = 0
+        # Member forecasts outside the domain the surrogate gave anyway (outside =
+        # "surrogate"): a member counts at every forecast it is outside in (trials, repeats).
+        self.extrapolated = 0
         # A coarse-corrected model's coarse runs: simulator runs of their own.
         self.coarse_runs = 0
         # An early-start model's early runs: each member simulated up to
@@ -406,6 +409,8 @@ class SurrogateForecasting:
             "rescores": [dict(r) for r in self.rescores],
             "evaluations": self.evaluations,
             "simulator_runs": self.simulator_runs,
+            # Absent unless outside = "surrogate": other runs keep their state's bytes.
+            **({"extrapolated": self.extrapolated} if self.section.outside == "surrogate" else {}),
             "switched_at": self.switched_at,
             **({"coarse_runs": self.coarse_runs} if self.coarse is not None else {}),
             **({"early_runs": self.early_runs} if self.early_until is not None else {}),
@@ -439,6 +444,7 @@ class SurrogateForecasting:
         self.rescores = [dict(r) for r in saved.get("rescores", [])]
         self.evaluations = int(saved.get("evaluations", 0))
         self.simulator_runs = int(saved.get("simulator_runs", 0))
+        self.extrapolated = int(saved.get("extrapolated", 0))
         self.coarse_runs = int(saved.get("coarse_runs", 0))
         self.early_runs = int(saved.get("early_runs", 0))
         if self.model_error is not None:

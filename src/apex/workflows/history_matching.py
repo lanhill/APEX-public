@@ -997,18 +997,25 @@ class HistoryMatchingWorkflow:
             if kept
             else np.zeros((len(self._companion_keys()), 0)),
         )
-        stops = found.unknown_keys or found.times_outside or surrogate.section.outside == "stop"
+        policy = surrogate.section.outside
+        stops = found.unknown_keys or found.times_outside or policy == "stop"
         if not found.inside:
             logger.log(
                 logging.ERROR if stops else logging.WARNING,
-                "members outside the surrogate's domain",
+                "members outside the surrogate's domain"
+                + (": answered by the surrogate anyway (outside = \"surrogate\")"
+                   if not stops and policy == "surrogate" else ""),
                 extra={"event": "surrogate_outside", "iteration": iteration, "label": label,
                        "members": [int(m) for m in found.members],
-                       "policy": "stop" if stops else "simulator", "details": found.message()},
+                       "policy": "stop" if stops else policy, "details": found.message()},
             )  # fmt: skip
             if stops:
                 found.raise_if_outside()
-        outside = {int(m) for m in found.members}
+        # outside = "surrogate": the members outside are predicted with the others (the
+        # user's explicit choice to extrapolate), counted as such.
+        extrapolated = {int(m) for m in found.members} if policy == "surrogate" else set()
+        surrogate.extrapolated += len(extrapolated)
+        outside = {int(m) for m in found.members} - extrapolated
         inside = [j for j in kept if int(member_ids[j]) not in outside]
         rest = [j for j in kept if int(member_ids[j]) in outside]
         if inside:
@@ -1050,6 +1057,7 @@ class HistoryMatchingWorkflow:
             "surrogate forecast",
             extra={"event": "surrogate_forecast", "iteration": iteration, "label": label,
                    "surrogate": len(inside), "simulator": len(rest), "reused": len(reused),
+                   "extrapolated": len(extrapolated),
                    "coarse_failed": len(lost), "identity": active.identity,
                    "evaluations": surrogate.evaluations},
         )  # fmt: skip
@@ -1877,6 +1885,9 @@ class HistoryMatchingWorkflow:
                 - len(posterior.get("reused", []))
             )
         report["simulator_runs"] = self.surrogate.simulator_runs + full_runs
+        if self.surrogate.section.outside == "surrogate":
+            # Member forecasts outside the domain (each forecast counts: trials, repeats).
+            report["extrapolated"] = self.surrogate.extrapolated
         report["sources"] = {
             str(h["iteration"]): h.get("forecast_source", SIMULATOR)
             for h in self.run_dir.history_dicts()

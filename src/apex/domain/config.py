@@ -1118,10 +1118,12 @@ class SurrogateRunSection(_Strict):
         "`refit` the surrogate with the checked runs added and repeat the iteration's "
         "forecast; or use the `simulator` for the rest of the run.",
     )
-    outside: Literal["stop", "simulator"] = Field(
+    outside: Literal["stop", "simulator", "surrogate"] = Field(
         default="stop",
-        description="Members outside the surrogate's validated domain: `stop` the run, or "
-        "run them by the `simulator` (recorded as such).",
+        description="Members outside the surrogate's validated domain: `stop` the run, run "
+        "them by the `simulator` (recorded as such), or answer them by the `surrogate` "
+        "anyway (an explicit choice to extrapolate: logged at every forecast and counted in "
+        "the summary). Keys or times outside the domain stop the run whatever the choice.",
     )
     max_refits: int = Field(
         default=2, ge=0, description="Refits allowed before a failing check stops the run."

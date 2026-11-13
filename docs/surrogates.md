@@ -11,7 +11,7 @@ audience: public
 
 A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs.
 
-After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator. You can also build one over an optimization's controls and optimize with it, and use one in predictions (see [Predictions with a surrogate](#predictions-with-a-surrogate) below). A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer.
+After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator. You can also build one over an optimization's controls and optimize with it, and use one in predictions (see [Predictions with a surrogate](#predictions-with-a-surrogate) below). A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer, unless a history match explicitly asks it to extrapolate (`outside = "surrogate"`, below).
 
 ## Prerequisites
 
@@ -337,7 +337,7 @@ model_file = "runs/box_surrogate/model/surrogate.json"
 check_every = 3            # iterations 3, 6, 9, ... are also checked by the simulator (0: none)
 check_members = 10         # members checked then (or "all"), drawn from the stream "surrogate"
 on_check_failure = "stop"  # "stop" | "refit" | "simulator"
-outside = "stop"           # members outside the model's domain: "stop" | "simulator"
+outside = "stop"           # members outside the model's domain: "stop" | "simulator" | "surrogate"
 max_refits = 2
 # refit_held_out = 0.5     # a refit's share of the checked runs held out for its gate
 # variance_in_errors = false   # ES-MDA, ES: add the model's predictive variance to C_d
@@ -361,7 +361,7 @@ max_refits = 2
 What happens during the run:
 
 - **Every decision is made on the surrogate's forecasts:** the acceptance of trials and their damping, the stopping criteria and, with `[validation]`, the cross-validation rule and its choice of the minimum-CV iterate. The update uses the surrogate's forecast of every member, so that the members' errors stay alike.
-- **Members outside the domain** stop the run with the members, the coordinates outside and by how much (`outside = "stop"`), or are run by the simulator and recorded as such (`outside = "simulator"`). They are never dropped.
+- **Members outside the domain** stop the run with the members, the coordinates outside and by how much (`outside = "stop"`), or are run by the simulator and recorded as such (`outside = "simulator"`). They are never dropped. `outside = "surrogate"` answers them by the surrogate anyway: an explicit choice to extrapolate beyond where the model was validated, for a study that wants one source for every member (a simulator forecast beside surrogate forecasts mixes two error levels in one ensemble). Every forecast with members outside logs `surrogate_outside` (policy `surrogate`) as a warning, its `surrogate_forecast` event counts them (`extrapolated`), and `summary.json`'s `surrogate.extrapolated` gives the run's total of member forecasts outside the domain (a member counts at every forecast it is outside in: trials and repeated forecasts included). Keys or times outside the domain still stop the run. History matching only; predictions and optimizations take `stop` or `simulator`.
 - **Checks:** at the check iterations, `check_members` members are run by the simulator too and gated against the surrogate's forecasts, with observation errors (`sigma_ratio`, in the space the method sees), the history-matching data and the cross-validation data apart. A check that fails:
   - `stop` (default): the run stops before the update, at its last checkpoint, with the event `surrogate_check_failed` and the errors per datatype. Set `on_check_failure` in the run's `config.json` and resume. A rebuilt model is another model (another identity), which a resume refuses: start a new run with it.
   - `refit`: the checked runs join the model's snapshots, the plugin is fitted again and gated on the held-out runs plus a share of the new ones, and the iteration's forecast is repeated with the refit. After `max_refits` refits a failing check stops the run.
