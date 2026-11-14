@@ -1,9 +1,10 @@
 """Telling a chat that the job it launched has ended.
 
-A study the web UI's assistant proposed, and a person launched from its card, is a job of
-the job service. When it ends, the chat gets a message saying so and what it can do next
-(a report, a comparison, a diagnosis), and the job's notification (a Teams card) names the
-study and the chat. Failures here are logged and never fatal: the job has ended either way.
+A study, run or optimization the web UI's assistant proposed, and a person launched from its
+card, is a job of the job service. When it ends, the chat gets a message saying so, naming it
+by its kind and name, and what it can do next (a report, a comparison, a diagnosis), and the
+job's notification (a Teams card) names it and the chat. Failures here are logged and never
+fatal: the job has ended either way.
 
 The web UI submits the study, then records the launch (two requests): a quick study can end,
 and be notified, in between. :func:`after_launch` then tells the chat when the launch is
@@ -32,7 +33,8 @@ def chat_followup(root: Path, record: dict[str, Any]) -> dict[str, str] | None:
         launches = store.launched(str(record["id"]))
         if not launches:
             return None
-        name = _study_name(record) or record["id"]
+        noun, name = _named(record)
+        done, failed = _NEXT.get(noun, _NEXT["job"])
         state = str(record["state"])
         reason = f" ({record['error']})" if record.get("error") else ""
         titles, told = [], 0
@@ -40,14 +42,8 @@ def chat_followup(root: Path, record: dict[str, Any]) -> dict[str, str] | None:
             chat = store.get(chat_id)
             titles.append(chat.title)
             text = (
-                f"The study **{name}** you launched (job `{record['id']}`) has ended: "
-                f"**{state}**{reason}. "
-                + (
-                    "Ask me for its report, its comparison of the variants, or a diagnosis "
-                    "of a run."
-                    if state == "complete"
-                    else "Ask me to diagnose its runs, or revise the draft and launch it again."
-                )
+                f"The {noun} **{name}** you launched (job `{record['id']}`) has ended: "
+                f"**{state}**{reason}. " + (done if state == "complete" else failed)
             )
             # Once, however many tell it (the notification, a late launch's follow-up).
             job = str(record["id"])
@@ -66,8 +62,9 @@ def chat_followup(root: Path, record: dict[str, Any]) -> dict[str, str] | None:
         "event": "chat_job_ended",
         "status": state,
         "summary": (
-            f"Study {name}, launched from the chat “{titles[0]}”, ended: {state}{reason}. "
-            "Open the chat in the web UI for its report or comparison."
+            f"{noun.capitalize()} {name}, launched from the chat “{titles[0]}”, ended: "
+            f"{state}{reason}. "
+            "Open the chat in the web UI for what to do next."
         ),
     }
 
@@ -85,6 +82,43 @@ def after_launch(root: Path, record: dict[str, Any]) -> None:
     if record.get("parent") or record.get("state") not in _FINAL or not record.get("notified"):
         return
     chat_followup(root, record)
+
+
+#: What a chat can ask next of an ended job, by its kind: (complete, otherwise). A run is
+#: not a study: the web-UI film's dry run (2026-11-14) was told "the study ... ended" of a
+#: single run, and offered "its comparison of the variants".
+_NEXT = {
+    "study": ("Ask me for its report, its comparison of the variants, or a diagnosis of a run.",
+              "Ask me to diagnose its runs, or revise the draft and launch it again."),
+    "run": ("Ask me for its report, its figures, a health check or a diagnosis.",
+            "Ask me to diagnose it, or revise the draft and launch it again."),
+    # The chat has no optimization report, diagnosis or summary tool: its page has them.
+    "optimization": ("Open it under Optimizations for its objective and controls, or ask me "
+                     "for its job's status.",
+                     "Ask me for its job's events, or revise the draft and launch it again."),
+    "job": ("Ask me what to do next.", "Ask me to revise the draft and launch it again."),
+}  # fmt: skip
+
+#: A job's kind as a chat names it.
+_NOUNS = {"study": "study", "run": "run", "resume": "run", "optimization": "optimization",
+          "optimization_resume": "optimization"}  # fmt: skip
+
+
+def _named(record: dict[str, Any]) -> tuple[str, str]:
+    """Return what ``record``'s job is (study, run, optimization, job) and its name.
+
+    A study by its name, a run by its directory's, an optimization by its directory's
+    parent (its own directory is an id: ``<folder>/optimizations/<name>/<id>``); the job id
+    otherwise.
+    """
+    noun = _NOUNS.get(str(record.get("kind")), "job")
+    if noun == "study":
+        return noun, _study_name(record) or str(record["id"])
+    dirs = record.get("run_dirs") or []
+    if not dirs:
+        return noun, str(record["id"])
+    where = Path(str(dirs[0]))
+    return noun, where.parent.name if noun == "optimization" else where.name
 
 
 def _study_name(record: dict[str, Any]) -> str | None:

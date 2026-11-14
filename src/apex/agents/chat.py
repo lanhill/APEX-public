@@ -1786,6 +1786,7 @@ class ChatAssistant:
             from apex.agents.plotter import Plotter
 
             check_run(args.run)
+            run_dir, job = RunMonitor(service, None).resolve(args.run)
             started = Plotter(service, None).start(args.run, request=args.request,
                                                    preset=args.preset,
                                                    preset_options=args.preset_options,
@@ -1802,6 +1803,12 @@ class ChatAssistant:
                 "preset": started.plan.preset,
                 "where": "the run's page (Figures), under report/plots",
                 "chosen_by": started.plan.reason,
+                # Which run, and whether it has a truth (RMSE, SSIM): the web-UI film's dry
+                # run (2026-11-14) named the job id as the run and doubted a synthetic
+                # case's truth.
+                "run": run_dir.name,
+                "job": job,
+                "case": _case_kind(run_dir),
             }
 
         def figure_status(args: RunArgument) -> dict[str, Any]:
@@ -1839,7 +1846,11 @@ class ChatAssistant:
                 if args.study is not None
                 else reporter.run_report(args.run or "", args.compare_with)
             )
-            written: dict[str, Any] = {"markdown": result.text}
+            # Where it is saved comes first, the Markdown last: the result limit cuts a long
+            # report to a preview, and the path and "whole report" note must survive the cut
+            # (the web-UI film's dry run, 2026-11-14: "only a truncated preview ... not the
+            # path"). CutFromEnd cuts the last long field, the Markdown.
+            written = CutFromEnd()
             # Saved unless the model says not to (the user's decisions on reported issues,
             # 2026-10-05 and #262, 2026-11-02); outside a chat, only when asked.
             if args.save if args.save is not None else chat_id is not None:
@@ -1880,12 +1891,14 @@ class ChatAssistant:
                 written["replaced"] = replaced
                 written["complete"] = (
                     "the saved file is the whole report (every section, and the comparison "
-                    "when compare_with is given)"
+                    "when compare_with is given), even when the markdown here is cut to fit"
                     + ("; unchanged from this chat's earlier one" if same else
                        "; it replaces this chat's earlier one" if replaced else "")
                     + (f"; kept as the user edited them: {', '.join(kept)}" if kept else "")
                 )  # fmt: skip
                 written["saved"] = f"{shown}/{name}"
+                written = CutFromEnd({"saved": written.pop("saved"), **written})
+            written["markdown"] = result.text
             return written
 
         def case(args: CaseArgument) -> dict[str, Any]:
@@ -2298,6 +2311,21 @@ def _unproposed_note(drafts: list[str]) -> str:
     if not drafts:
         return ""
     return "\n\n" + UNPROPOSED.format(drafts=", ".join(f"`{d.rsplit('/', 1)[-1]}`" for d in drafts))
+
+
+def _case_kind(run_dir: Path) -> dict[str, Any]:
+    """Return a run's case kind and whether it has a truth, from its ``config.json``."""
+    try:
+        config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"kind": "unknown: the run's configuration could not be read"}
+    case = config.get("case") if isinstance(config, dict) else None
+    case = case if isinstance(case, dict) else {}
+    kind = str(case.get("kind") or "synthetic")
+    truth = bool(case.get("truth_file"))
+    return {"kind": kind, "truth": truth,
+            "note": "a synthetic case with a truth: RMSE and SSIM can be drawn" if truth
+            else "no truth: figures of RMSE, SSIM or the truth are skipped"}  # fmt: skip
 
 
 def _digest(text: str) -> str:

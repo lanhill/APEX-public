@@ -160,6 +160,10 @@ def test_the_route_and_the_assistants_tool(tmp_path: Path, linear_case: CaseFact
     tool = {t.name: t for t in assistant.local_tools(isolate=False)}["plot_run"]
     answer = tool.handler(tool.arguments(run=handle.run_ids[0], request="rmse"))
     assert answer["figures"] == ["metric_distribution (rmse)"]
+    # The film's dry run (2026-11-14): the run by its name, not its job's id; its truth known.
+    assert answer["run"] == Path(service.store.find(handle.run_ids[0]).path).name  # type: ignore[union-attr]
+    assert answer["case"]["kind"] == "synthetic"
+    assert answer["case"]["truth"] is True
     assert _finished(Path(service.store.find(handle.run_ids[0]).path))["written"] == 4  # type: ignore[union-attr]
 
 

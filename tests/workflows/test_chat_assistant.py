@@ -2244,6 +2244,61 @@ def test_a_report_in_a_chat_is_saved_unless_the_model_says_not(
     assert "saved" not in outside.handler(outside.arguments(run=run))  # no chat: no folder
 
 
+def test_a_cut_report_keeps_where_it_is_saved(tmp_path: Path, linear_case: CaseFactory) -> None:
+    """The web-UI film's dry run (2026-11-14): the result limit cut a long report to a bare
+    preview, so the assistant saw neither the path nor that the saved file is whole."""
+    from apex.services.tools import bound
+
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    composition.start(case.config)
+    chat = store.create("report")
+    report = {t.name: t for t in assistant.local_tools(None, chat.id)}["write_report"]
+    written = report.handler(report.arguments(run=str(case.directory / "runs" / "alpha")))
+
+    cut = bound(written, 1_500)
+
+    assert next(iter(written)) == "saved"
+    assert list(written)[-1] == "markdown"
+    assert cut["saved"] == written["saved"]
+    assert "whole report" in cut["complete"]
+    assert cut["shortened"] == ["markdown"]
+    assert cut["truncated"]
+    assert cut["markdown"].startswith(written["markdown"][:200])
+
+
+def test_the_chat_names_an_ended_job_by_its_kind(tmp_path: Path) -> None:
+    """The web-UI film's dry run (2026-11-14): a launched run ended with "The study <job id>
+    you launched ... ended", offering its comparison of the variants."""
+    from apex.services.chat_followup import chat_followup
+
+    store = ChatStore(tmp_path)
+    chat = store.create("a run")
+    proposal = store.add_proposal(chat.id, "launch_run", "drafts/x.toml", "launch it", {})
+    store.settle(chat.id, proposal.n, "launched", "job-1")
+    run_dir = tmp_path / "UI" / "owner" / "runs" / "multispot_esmda"
+    record = {"id": "job-1", "kind": "run", "state": "complete", "spec": {},
+              "run_dirs": [str(run_dir)]}  # fmt: skip
+
+    notice = chat_followup(tmp_path, record)
+
+    told = store.turns(chat.id)[-1].content
+    assert told.startswith("The run **multispot_esmda** you launched (job `job-1`)")
+    assert "study" not in told
+    assert "variants" not in told
+    assert notice is not None
+    assert notice["summary"].startswith("Run multispot_esmda, launched")
+
+    # An optimization by its name, not its directory's id (review of this fix).
+    proposal = store.add_proposal(chat.id, "launch_optimization", "drafts/o.toml", "go", {})
+    store.settle(chat.id, proposal.n, "launched", "job-2")
+    where = tmp_path / "UI" / "owner" / "optimizations" / "npv_robust" / "3fa2b1c09d8e"
+    chat_followup(tmp_path, {"id": "job-2", "kind": "optimization", "state": "complete",
+                             "spec": {}, "run_dirs": [str(where)]})  # fmt: skip
+    told = store.turns(chat.id)[-1].content
+    assert told.startswith("The optimization **npv_robust** you launched (job `job-2`)")
+    assert "Optimizations" in told
+
+
 def test_a_follow_up_report_updates_the_chat_s_report_in_place(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
