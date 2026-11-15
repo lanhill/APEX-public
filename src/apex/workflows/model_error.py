@@ -16,7 +16,9 @@ Reference  : Luo, X. Model error characterization for ensemble-based history mat
 Differences: ``shut_wells`` chooses between the manuscript's zero residual for a shut well
              (``"zero"``, the default) and PET-fork's behaviour, which never zeroes it
              because its ``forward`` tests the truth of a non-empty list (``"ignore"``;
-             recorded in docs/mec.md).
+             recorded in docs/mec.md). ``causal_mask``, ``save_inputs`` and ``report_dates``
+             are APEX's options, not PET-fork's: off by default,
+             and runs without them are unchanged.
 """
 
 import datetime as dt
@@ -35,6 +37,7 @@ from apex.core.plugins import model_error_models
 from apex.core.simulation import BlockStates
 from apex.domain.observations import DataKey, ObservationSet
 from apex.simulation.model_error import (
+    INPUT_PREFIX,
     RESIDUAL_PREFIX,
     CaseFiles,
     feature_names,
@@ -76,6 +79,20 @@ class PGLSTMModel:
         The deck's phases, one or more of oil, water and gas: they set the dynamic features,
         each phase's density and saturation (:func:`~apex.simulation.model_error.feature_names`;
         without oil, its density and saturation are 0).
+    report_dates
+        The ISO date of each report step, in order. Needed by
+        ``causal_mask`` and ``save_inputs``, which must place a datum at its report step
+        before any run; every case's own report dates are checked against them.
+    causal_mask
+        Declare the network's structure to the run's localization (``MaskingModel``):
+        a well's LSTM acts on its own outputs at every report time,
+        report time ``t``'s output layer (each output's row and bias) on that output at
+        ``t`` only. Needs ``adaptive_prior``; ``nn_params`` in its ``unlocalized`` list
+        gives the mask alone.
+    save_inputs
+        Also answer the inputs, ``MEC:X<j>:<well>`` at each report date (feature ``j`` of
+        the well's inputs), saved with the residuals: a run of the prior gives a per-step
+        prior's sequential pass its inputs.
 
     Raises
     ------
@@ -96,6 +113,9 @@ class PGLSTMModel:
         shut_wells: ShutWells = "zero",
         phases: TextList = ("oil", "water"),
         initial_schedule_file: InputFile | None = None,
+        report_dates: TextList = (),
+        causal_mask: bool = False,
+        save_inputs: bool = False,
     ) -> None:
         if not producers and not injectors:
             raise ValueError("pg_lstm needs at least one producer or injector")
@@ -123,6 +143,57 @@ class PGLSTMModel:
         offsets = np.cumsum([0] + [n.n_params for n in self.networks])
         self._slices = [slice(int(a), int(b)) for a, b in itertools.pairwise(offsets)]
         self.scales: dict[str, float] | None = None
+        self.report_dates = _report_dates(report_dates, len(steps))
+        self.causal_mask = bool(causal_mask)
+        self.save_inputs = bool(save_inputs)
+        for name, wanted in (("causal_mask", self.causal_mask), ("save_inputs", self.save_inputs)):
+            if wanted and not self.report_dates:
+                raise ValueError(
+                    f"pg_lstm: {name} needs report_dates, the ISO date of each of the "
+                    f"{len(steps)} report steps"
+                )
+
+    @property
+    def masks_parameters(self) -> bool:
+        """Whether the run's localization takes :meth:`parameter_mask` (``causal_mask``)."""
+        return self.causal_mask
+
+    def parameter_mask(self, keys: Sequence[DataKey]) -> NDArray[np.bool_]:
+        """Return which data each parameter can affect, ``(n_params, len(keys))``.
+
+        The network's structure, exact: a well's parameters act on
+        its own outputs only; its LSTM (shared over the report times) on each of them at
+        every report time; report time ``t``'s output layer, its row ``k`` of ``fc_t.weight``
+        and ``fc_t.bias[k]``, on output ``k`` at ``t`` only. A key the model does not
+        correct (another well's, a field datum) is no parameter's.
+
+        Raises
+        ------
+        ValueError
+            If a corrected key's date is not one of ``report_dates``.
+        """
+        if not self.report_dates:
+            raise ValueError("pg_lstm: the parameter mask needs report_dates")
+        position = {date: t for t, date in enumerate(self.report_dates)}
+        mask = np.zeros((self.n_params, len(keys)), dtype=bool)
+        for well, network, part in zip(self.wells, self.networks, self._slices, strict=True):
+            h, o = network.hidden_size, network.output_size
+            lstm = 4 * h * (network.input_size + h) + 8 * h
+            for i, key in enumerate(keys):
+                output, _, name = key.datatype.partition(":")
+                if key.index is not None or name != well.name or output not in well.outputs:
+                    continue
+                t = position.get(key.time[:10])
+                if t is None:
+                    raise ValueError(
+                        f"pg_lstm: {key} is not at one of the report dates {self.report_dates}"
+                    )
+                k = well.outputs.index(output)
+                mask[part.start : part.start + lstm, i] = True
+                head = part.start + lstm + t * (o * h + o)
+                mask[head + k * h : head + (k + 1) * h, i] = True  # row k of fc_t.weight
+                mask[head + o * h + k, i] = True  # fc_t.bias[k]
+        return mask
 
     @property
     def summary_vectors(self) -> list[tuple[str, str]]:
@@ -171,13 +242,24 @@ class PGLSTMModel:
         self.scales = scales
 
     def residual_keys(self, keys: Sequence[DataKey]) -> list[DataKey]:
-        """Return the residual key ``MEC:<type>`` of each key a well's output covers."""
+        """Return the residual key ``MEC:<type>`` of each key a well's output covers.
+
+        With ``save_inputs``, also each report date's inputs, ``MEC:X<j>:<well>``.
+        """
         modelled = {f"{o}:{w.name}" for w in self.wells for o in w.outputs}
-        return [
+        found = [
             DataKey(k.time, RESIDUAL_PREFIX + k.datatype)
             for k in keys
             if k.index is None and k.datatype in modelled
         ]
+        if self.save_inputs:
+            found += [
+                DataKey(date, f"{RESIDUAL_PREFIX}{INPUT_PREFIX}{j}:{well.name}")
+                for well, network in zip(self.wells, self.networks, strict=True)
+                for date in self.report_dates
+                for j in range(network.input_size)
+            ]
+        return found
 
     def features(self, files: BlockStates) -> list[NDArray[np.float64]]:
         """Return each well's input sequence ``(n_steps, n_features)`` from a member's states."""
@@ -240,8 +322,17 @@ class PGLSTMModel:
         SimulationError
             If the states lack a feature, or a covered key is not at a report time.
         """
-        series = self.well_residuals(self.features(states), theta)
+        sequences = self.features(states)
+        series = self.well_residuals(sequences, theta)
         dates = [dt.date.fromisoformat(d) for d in states.report_dates(self.report_steps)]
+        if self.report_dates and [d.isoformat() for d in dates] != list(self.report_dates):
+            # The mask and the saved inputs place data by these dates: a case reporting
+            # others would put each datum at another report time's parameters.
+            raise SimulationError(
+                f"pg_lstm: {states.label} reports {[d.isoformat() for d in dates]} at the "
+                f"report steps {list(self.report_steps)}, not report_dates "
+                f"{list(self.report_dates)}"
+            )
         if len(set(dates)) != len(dates):
             # Keys are dates: two report steps on one day could not be told apart.
             raise SimulationError(
@@ -249,9 +340,22 @@ class PGLSTMModel:
                 "distinct days; data keys need one report step per day"
             )
         times = {date: t for t, date in enumerate(dates)}
+        inputs = {w.name: x for w, x in zip(self.wells, sequences, strict=True)}
         values = np.zeros(len(keys))
         for i, key in enumerate(keys):
             datatype = key.datatype.removeprefix(RESIDUAL_PREFIX)
+            feature = _input_feature(key) if self.save_inputs else None
+            if feature is not None:
+                j, name = feature
+                if name in inputs:
+                    try:
+                        t = times[dt.date.fromisoformat(key.time)]
+                    except (ValueError, KeyError):
+                        raise SimulationError(
+                            f"pg_lstm: {key} is not at one of the network's report times"
+                        ) from None
+                    values[i] = inputs[name][t, j]
+                continue
             if key.index is not None or datatype not in series:
                 continue
             try:
@@ -262,3 +366,33 @@ class PGLSTMModel:
                 ) from None
             values[i] = series[datatype][t]
         return values
+
+
+def _report_dates(dates: Sequence[str], n_steps: int) -> tuple[str, ...]:
+    """Return ``report_dates`` as ISO dates, one per report step, increasing (or none).
+
+    Raises
+    ------
+    ValueError
+        If they are not ``n_steps`` increasing ISO dates.
+    """
+    if not dates:
+        return ()
+    try:
+        parsed = [dt.date.fromisoformat(str(d)) for d in dates]
+    except ValueError:
+        raise ValueError(f"pg_lstm: report_dates must be ISO dates, got {list(dates)}") from None
+    if len(parsed) != n_steps or any(b <= a for a, b in itertools.pairwise(parsed)):
+        raise ValueError(
+            f"pg_lstm: report_dates must be {n_steps} increasing dates, one per report step, "
+            f"got {list(dates)}"
+        )
+    return tuple(d.isoformat() for d in parsed)
+
+
+def _input_feature(key: DataKey) -> tuple[int, str] | None:
+    """Return ``(j, well)`` of a saved-input key ``MEC:X<j>:<well>``, else ``None``."""
+    if key.index is not None or not key.datatype.startswith(RESIDUAL_PREFIX + INPUT_PREFIX):
+        return None
+    name, _, well = key.datatype.removeprefix(RESIDUAL_PREFIX + INPUT_PREFIX).partition(":")
+    return (int(name), well) if name.isdigit() and well else None

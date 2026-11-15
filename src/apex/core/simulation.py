@@ -506,6 +506,9 @@ class MaskingModel(Protocol):
         ...
 
 
+#: The datatype prefix of a model-error model's saved inputs (``MEC:X<j>:<well>``): saved
+#: with its residuals in ``auxiliary_predicted``, but inputs, not forecasts.
+SAVED_INPUT_PREFIX = "MEC:X"
 #: The option an :class:`ExtrapolatingModel` reads its forecast state.
 FORECAST_STATE_OPTION = "forecast_state_file"
 #: The forecast-state file's arrays holding the prediction's seed: the entropy's decimal

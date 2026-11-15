@@ -87,6 +87,9 @@ CHOP takes no `[method.localization]`, so it cannot leave the network's paramete
 | `hidden_size` | 20 | The LSTM's hidden size. |
 | `state_variable` | `nn_params` | The state variable that holds θ: producers' networks first, then injectors', each in torch's parameter order. |
 | `shut_wells` | `zero` | `zero`: no residual for a shut well's rates (WBHP is kept). `ignore`: residuals at every report time, as the published runs of the reference implementation (the method author's Python code) (its code never zeroes them). |
+| `report_dates` | none | The ISO date of each report step, in order. Needed by `causal_mask` and `save_inputs`. `apex validate` checks them against the deck's text when it can read the schedule (OPM Flow's rules); a deck whose schedule the text cannot tell (template expressions, unread includes) is checked only when each case runs, which refuses a member reporting other dates. |
+| `causal_mask` | `false` | Tell the run's localization which data each parameter can affect: a well's network acts on its own outputs only, its LSTM at every report time, report time `t`'s output layer (each output's row and bias) at `t` only. The localization's taper of θ is multiplied by this mask, which needs `adaptive_prior`; list θ in its `unlocalized` option to apply the mask alone. Without it, sample correlations of a finite ensemble also let data move output layers of other report times and other wells. |
+| `save_inputs` | `false` | Also save the networks' inputs with the residuals, keys `MEC:X<j>:<well>` (feature `j` of the well's inputs) at each report date: a run of the prior then shows what the networks see. They add wells × report dates × inputs rows to every saved ensemble (each input is a feature of a perforated block, so Brugge's 30 wells at 20 report dates add 67,680 rows, about 56 MB per iterate of 103 members): use it for a run of the prior, not a full history match. The residual figures leave them out. |
 
 ## What a run saves
 
@@ -94,6 +97,7 @@ Every saved ensemble (`checkpoints/iter_<k>.npz`) also holds:
 
 - `auxiliary_predicted`: the residuals `r`, one row per datum, with keys `MEC:<type>:<well>`;
 - `auxiliary_keys`: the names of those keys.
+- with `save_inputs`, the networks' inputs too, keys `MEC:X<j>:<well>`.
 
 `predicted` is the effective forecast `g + r`, so `g` itself is `predicted − auxiliary_predicted`.
 

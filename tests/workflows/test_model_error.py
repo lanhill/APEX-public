@@ -1249,3 +1249,54 @@ def test_the_fit_and_its_clean_up_run_only_under_the_folders_lock(
             predict(_future(tmp_path, "p", 'output_dir = "out"\nseed = 1'))
         assert _state_files(out) == [held.name]
         assert held.read_bytes() == b"the holder's"
+
+
+class DeckLinear(FileLinear):
+    """``FileLinear`` naming a deck template, whose text gives the report dates."""
+
+    def __init__(self, deck_template_file: InputFile) -> None:
+        self.deck_template_file = deck_template_file
+
+
+class DatedHalves(Halves):
+    """``Halves`` stating the dates of its report steps, with a mask that cannot place data."""
+
+    report_steps = (1, 2)
+
+    def __init__(self, report_dates: Sequence[str] = (), state_variable: str = "nn_params") -> None:
+        super().__init__(state_variable)
+        self.report_dates = tuple(report_dates)
+
+    def parameter_mask(self, keys: Sequence[DataKey]) -> NDArray[np.bool_]:
+        raise ValueError("a datum is not at one of the report dates")
+
+
+@pytest.mark.parametrize(("dates", "match"), [
+    ('["2000-01-02", "2000-01-04"]', r"step 2: 2000-01-03 \(report_dates 2000-01-04\)"),
+    ('["2000-01-02", "2000-01-03"]', "the model-error model's parameter mask"),
+])  # fmt: skip
+def test_a_run_checks_report_dates_against_its_deck_before_the_mask(
+    tmp_path: Path, dates: str, match: str
+) -> None:
+    """The deck's text (START, then TSTEP 1 1) gives 2000-01-02 and
+    -03. A wrong list is refused by the deck comparison before the mask is built (whose own
+    error would say less); a right one passes it, and the mask's error is then its own."""
+    simulators.register("test_deck_linear")(DeckLinear)
+    model_error_models.register("test_dated_halves")(DatedHalves)
+    try:
+        localization = 'localization = { name = "adaptive_prior" }'
+        config = _halves_case(tmp_path, localization)
+        (tmp_path / "deck.mako").write_text(
+            "RUNSPEC\nSTART\n 1 'JAN' 2000 /\nGRID\nINIT\nSCHEDULE\nTSTEP\n 1 1 /\nEND\n"
+        )
+        text = config.read_text().replace('name = "test_halves"', 'name = "test_dated_halves"')
+        text = text.replace('name = "test_file_linear"',
+                            'name = "test_deck_linear"\noptions = { deck_template_file = '
+                            '"deck.mako" }')  # fmt: skip
+        text += f"\n[model_error.options]\nreport_dates = {dates}\n"
+        config.write_text(text)
+        with pytest.raises(ConfigError, match=match):
+            composition.start(config)
+    finally:
+        simulators._factories.pop("test_deck_linear")
+        model_error_models._factories.pop("test_dated_halves")

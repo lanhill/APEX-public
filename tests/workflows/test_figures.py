@@ -640,3 +640,24 @@ def test_field_maps_skip_a_view_without_field_layouts() -> None:
         "no field datum has a map (geophysical AVO maps and station data have; "
         "whole traces and compressed fields do not)"
     )
+
+
+def test_residual_bands_leave_a_models_saved_inputs_out(tmp_path: Path) -> None:
+    """``save_inputs`` stores the networks' inputs beside the residuals: not residuals."""
+    import dataclasses
+
+    class WithInputs(FakeView):
+        def iterate(self, iteration: int) -> IterateView:
+            found = super().iterate(iteration)
+            assert found.auxiliary_predicted is not None
+            extra = (DataKey(TIMES[0], "MEC:X0:P1"), DataKey(TIMES[0], "MEC:X1:P1"))
+            rows = np.ones((len(extra), found.auxiliary_predicted.shape[1]))
+            return dataclasses.replace(
+                found, auxiliary_keys=(*found.auxiliary_keys, *extra),
+                auxiliary_predicted=np.vstack([found.auxiliary_predicted, rows]),
+            )  # fmt: skip
+
+    residuals = figures.create("data_bands", source="auxiliary")
+    series = residuals._series(WithInputs(), 0)  # type: ignore[attr-defined]
+    assert series
+    assert not any(datatype.startswith("MEC:X") for datatype in series)

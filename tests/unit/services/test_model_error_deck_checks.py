@@ -84,3 +84,29 @@ def test_eclipse_300s_co2store_is_refused_for_every_model(tmp_path: Path) -> Non
     _check(tmp_path, "CO2STORE\nCOMPS\n 3 /", ["water", "gas"], simulator="intersect")
     with pytest.raises(ConfigError, match="Eclipse 300's GASWAT"):
         _check(tmp_path, "WATER\nGASWAT\nCOMPS\n 3 /", ["water", "gas"], simulator="eclipse")
+
+
+def test_report_dates_are_checked_against_the_decks_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrong list is refused at build, an unreadable deck left to the run."""
+    from apex.services import composition
+
+    model: Any = SimpleNamespace(report_steps=(1, 3), report_dates=("2000-01-02", "2000-01-04"))
+    config: Any = object()
+    monkeypatch.setattr(composition, "model_error_step_dates",
+                        lambda c: {1: "2000-01-02", 2: "2000-01-03", 3: "2000-01-04"})  # fmt: skip
+    composition.check_model_error_report_dates(config, model)
+    wrong: Any = SimpleNamespace(report_steps=(1, 2), report_dates=("2000-01-02", "2000-01-04"))
+    with pytest.raises(ConfigError, match=r"step 2: 2000-01-03 \(report_dates 2000-01-04\)"):
+        composition.check_model_error_report_dates(config, wrong)
+    beyond: Any = SimpleNamespace(report_steps=(1, 9), report_dates=("2000-01-02", "2000-02-01"))
+    with pytest.raises(ConfigError, match="beyond the schedule"):
+        composition.check_model_error_report_dates(config, beyond)
+
+    def unreadable(c: object) -> dict[int, str]:
+        raise ConfigError("the text cannot tell them")
+
+    monkeypatch.setattr(composition, "model_error_step_dates", unreadable)
+    composition.check_model_error_report_dates(config, wrong)  # left to the run's check
+    composition.check_model_error_report_dates(config, SimpleNamespace())  # no dates: nothing

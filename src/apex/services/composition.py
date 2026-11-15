@@ -607,6 +607,41 @@ def model_error_step_dates(config: HistoryMatchConfig) -> dict[int, str]:
     }
 
 
+def check_model_error_report_dates(
+    config: HistoryMatchConfig, model: ModelErrorModel | None
+) -> None:
+    """Refuse a model's ``report_dates`` that are not its deck's.
+
+    A model that states the date of each of its ``report_steps`` (``pg_lstm``'s, for its
+    mask and saved inputs) places data by them before any run; each case's own dates are
+    checked again when it runs. Here they are checked against the deck's text when it can
+    be read (OPM Flow's rules, :func:`model_error_step_dates`), so that a wrong list is
+    refused by ``apex validate``, not after every member's simulation. A schedule the text
+    cannot tell (template expressions, unread includes) is left to the run's check.
+
+    Raises
+    ------
+    ConfigError
+        If the deck's text gives other dates at the model's report steps.
+    """
+    dates = tuple(getattr(model, "report_dates", ()) or ())
+    steps = tuple(getattr(model, "report_steps", ()) or ())
+    if not dates or not steps:
+        return
+    try:
+        step_dates = model_error_step_dates(config)
+    except (ConfigError, OSError):
+        return
+    found = [step_dates.get(int(step), "beyond the schedule") for step in steps]
+    if found != list(dates):
+        wrong = [f"step {s}: {f} (report_dates {d})"
+                 for s, f, d in zip(steps, found, dates, strict=True) if f != d]  # fmt: skip
+        raise ConfigError(
+            "[model_error] report_dates differ from the deck's report dates at its "
+            f"report_steps: {'; '.join(wrong[:5])}"
+        )
+
+
 def attach_parameter_mask(
     method: object,
     layout: StateLayout,
@@ -799,6 +834,8 @@ def build_run(
         parameterizations = build_parameterizations(config)
         method = _build_method(config, layout, parameterizations)
         transforms = build_transforms(config)
+        # The dates first: a wrong list gets the deck comparison's message, not the mask's.
+        check_model_error_report_dates(config, stack.model_error)
         attach_parameter_mask(method, layout, stack.model_error, observations.keys,
                               transformed=bool(transforms))  # fmt: skip
         # ERT runs an ERT case's members in batches, so they go together.

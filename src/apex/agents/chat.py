@@ -654,6 +654,13 @@ SYSTEM = (
     "'not an option of <plugin>' means that plugin has no such setting (say so; it is "
     "neither unset nor 'none'). When a tool's approval says "
     "needed, tell the user before proposing that launching needs the owner's approval. "
+    # A reported issue (#299): 20 replicates offered as "within the 20000 limit", by its own sums.
+    "Before you offer or answer about another number of replicates, take it from the "
+    "plan's approval: 'per_replicate' (the runs and simulator runs one replicate adds) "
+    "and 'max_replicates_without_approval' (the most replicates within every approval "
+    "limit, the runs as well as the simulator runs); say whether the number asked for "
+    "needs approval by comparing it with that, and never compute a total or call a count "
+    "within the limits by yourself. "
     "You cannot submit, stop or resume anything: to run a planned "
     "study, call propose_action, which shows the user a card to review, launch or discard "
     "it; for anything else say what the user can do (the editor, the job page's buttons). "
@@ -1138,7 +1145,8 @@ class ChatAssistant:
                 **({"cost_line": line} if (line := _cost_line(
                     cells, [p.max_simulator_runs for p in study_plan.validation.plans], total,
                 )) else {}),
-                "approval": _approval(service, len(cells), study_plan.max_simulator_runs),
+                "approval": _approval(service, len(cells), study_plan.max_simulator_runs,
+                                      proposal.replicates),
                 **({"matched": matched} if matched else {}),
                 **({"differences": differences,
                     "next": "the compared algorithms differ in more than the algorithm "
@@ -1220,7 +1228,7 @@ class ChatAssistant:
                 "cost": result.cost,
                 "budget": result.facts.budget_simulator_runs,
                 "within_budget": result.within_budget,
-                "approval": _approval(service, len(cells), result.cost),
+                "approval": _approval(service, len(cells), result.cost, result.proposal.replicates),
                 **({"matched": list(result.matched)} if result.matched else {}),
                 "next": "summarise the plan, then propose_action(draft=...)"
                 + MATCHED_NEXT * bool(result.matched)
@@ -2747,14 +2755,17 @@ def _draft_facts(
         cells = expand(service, *optimizing)
         matching = _optimization_matching(optimizing[0], optimizing[1], cells)
         budget = optimizing[0].study.budget.max_simulator_runs
-        return _comparison(cells, matching, budget), _approval(service, len(cells), total)
+        return _comparison(cells, matching, budget), _approval(
+            service, len(cells), total, optimizing[0].study.replicates
+        )
     from apex.services.study import load_study
 
     planned = _study_plan(service, load_study(path, service.workspace()))
     return (_comparison(planned.cells, _history_matching(planned),
                         planned.spec.study.budget.max_simulator_runs,
                         _replicate_cost(service, planned.spec, planned.cells)),
-            _approval(service, len(planned.cells), planned.max_simulator_runs))  # fmt: skip
+            _approval(service, len(planned.cells), planned.max_simulator_runs,
+                      planned.spec.study.replicates))  # fmt: skip
 
 
 def _history_matching(planned: Any) -> "_Matching":  # noqa: ANN401 (a StudyPlan)
@@ -2974,12 +2985,21 @@ def _unmatched(
     return found
 
 
-def _approval(service: ApexService, runs: int, simulator_runs: int | None) -> dict[str, Any]:
+def _approval(
+    service: ApexService, runs: int, simulator_runs: int | None, replicates: int | None = None
+) -> dict[str, Any]:
     """Return whether launching needs a person's approval.
 
     The assistant proposed a study without saying that launching it needed approval
     (a reported issue: 10 runs against the limit of 8), so the launch was refused with a 403
     the user had not been told about. The same rule as the service's ``Approvals.needed``.
+
+    With a study's ``replicates``, it also says what one replicate adds (``per_replicate``)
+    and the most replicates within every limit (``max_replicates_without_approval``): the
+    assistant offered 20 replicates as "within the 20000 limit", checking the simulator runs
+    by its own arithmetic and not the 20-run limit (a reported issue, #299). Both are left out when
+    the totals do not divide evenly by the replicates (then a replicate's cost is not one
+    number; with seeds that change a cell's bound the division is the replicates' average).
     """
     limits = service.approvals.settings
     needed = service.approvals.needed(simulator_runs, runs)
@@ -2987,6 +3007,16 @@ def _approval(service: ApexService, runs: int, simulator_runs: int | None) -> di
         "needed": needed, "runs": runs, "simulator_runs": simulator_runs,
         "limits": {"runs": limits.max_runs, "simulator_runs": limits.max_simulator_runs},
     }  # fmt: skip
+    if (replicates and runs and simulator_runs is not None
+            and runs % replicates == 0 and simulator_runs % replicates == 0):  # fmt: skip
+        per_runs, per_simulator_runs = runs // replicates, simulator_runs // replicates
+        result["per_replicate"] = {"runs": per_runs, "simulator_runs": per_simulator_runs}
+        # Approvals.needed's rule (over a limit needs approval) in closed form: a loop over
+        # replicates never ended for a study without cells (0 runs; the #299 review).
+        fitting = limits.max_runs // per_runs
+        if per_simulator_runs:
+            fitting = min(fitting, limits.max_simulator_runs // per_simulator_runs)
+        result["max_replicates_without_approval"] = fitting
     if needed:
         result["note"] = (
             "tell the user before proposing: launching it needs the owner's approval "

@@ -1319,12 +1319,50 @@ def test_a_draft_read_back_keeps_its_inherited_settings_and_says_when_it_needs_a
     assert large["approval"]["runs"] == 21  # 3 variants x 7 replicates, over 20 runs
     assert large["approval"]["needed"] is True
     assert "approval" in large["approval"]["note"]
+    # A reported issue (#299): what one replicate adds and the most replicates within every limit,
+    # the runs limit here (3 runs per replicate: 6 x 3 = 18 <= 20 < 21), so the assistant
+    # need not work it out from the simulator runs alone.
+    per = large["approval"]["per_replicate"]
+    assert per == {"runs": 3, "simulator_runs": large["approval"]["simulator_runs"] // 7}
+    assert large["approval"]["max_replicates_without_approval"] == 6
+    assert "max_replicates_without_approval" in SYSTEM  # and the prompt says to quote it
+    assert small["approval"]["max_replicates_without_approval"] == 20  # 1 run each
 
     back = read.handler(read.arguments(draft=large["draft"]))
     assert "ensemble_size" not in back["text"]  # inherited from the case, not written
+    assert back["approval"]["max_replicates_without_approval"] == 6
     assert back["held_fixed"]["prior.ensemble_size"] == 20
     assert "inherit" in back["inherited"]
     assert back["approval"]["needed"] is True
+
+
+def test_a_replicates_approval_facts_have_a_closed_form_and_none_without_cells() -> None:
+    """The #299 review: a study without cells (0 runs) made the replicate loop endless; the
+    closed form also takes no time with a large run limit and no simulator runs."""
+    from types import SimpleNamespace
+
+    from apex.agents.chat import _approval
+    from apex.services.approval import Approvals
+    from apex.services.settings import ApprovalSection
+
+    def service(**limits: int) -> Any:  # noqa: ANN401 (a stand-in ApexService)
+        approvals = Approvals.__new__(Approvals)
+        approvals.settings = ApprovalSection(**limits)
+        return SimpleNamespace(approvals=approvals)
+
+    empty = _approval(service(), 0, 0, replicates=3)
+    assert "max_replicates_without_approval" not in empty
+    assert empty["needed"] is False
+    analytic = _approval(service(max_runs=10**8), 4, 0, replicates=2)
+    assert analytic["per_replicate"] == {"runs": 2, "simulator_runs": 0}
+    assert analytic["max_replicates_without_approval"] == 5 * 10**7
+    # Exactly at a limit needs no approval (Approvals.needed: over it does).
+    both = _approval(service(max_runs=20, max_simulator_runs=1360), 4, 136, replicates=2)
+    assert both["max_replicates_without_approval"] == 10  # 10 x 2 runs = 20, 10 x 68 = 680
+    tight = _approval(service(max_runs=20, max_simulator_runs=340), 4, 136, replicates=2)
+    assert tight["max_replicates_without_approval"] == 5  # 5 x 68 = 340
+    uneven = _approval(service(), 3, 301, replicates=3)
+    assert "per_replicate" not in uneven
 
 
 def test_a_drafts_approval_counts_its_predictions_as_the_service_does(
@@ -1352,6 +1390,9 @@ def test_a_drafts_approval_counts_its_predictions_as_the_service_does(
 
     assert revised["approval"]["simulator_runs"] > 120  # the predictions' members too
     assert revised["approval"]["needed"] is True
+    # The simulator-run limit decides here: one replicate is already over 120.
+    assert planned["approval"]["max_replicates_without_approval"] == 1  # 100, not 200
+    assert revised["approval"]["max_replicates_without_approval"] == 0
 
 
 def test_a_diagnosis_patch_becomes_a_run_draft_to_launch(

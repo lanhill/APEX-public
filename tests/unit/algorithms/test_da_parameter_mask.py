@@ -215,3 +215,34 @@ def test_the_methods_report_a_localization_protocol() -> None:
     taper = ChopTaper([])
     assert _chop_taper_is_a_localization(taper) is taper
     assert not isinstance(taper, RestrictableLocalization)
+
+
+def test_a_pg_lstm_with_causal_mask_hands_its_mask_over(tmp_path: Any) -> None:  # noqa: ANN401
+    """``pg_lstm``'s own mask through composition and ``prepare``."""
+    from apex.domain.observations import ObservationSet
+    from apex.workflows.model_error import PGLSTMModel
+
+    (tmp_path / "Hist").write_text(
+        "COMPDAT\n'P1' 1 1 1 1 OPEN /\n/\nWCONHIST\n'P1' 'OPEN' 'LRAT' 100 /\n/\nTSTEP\n1 1 /\n"
+    )
+    dates = ("2000-01-02", "2000-01-03")
+    model = PGLSTMModel(schedule_file=tmp_path / "Hist", report_steps=[1, 2], producers=["P1"],
+                        producer_data=["WOPR", "WBHP"], hidden_size=2, state_variable="nn",
+                        report_dates=dates, causal_mask=True)  # fmt: skip
+    keys = [DataKey(d, t) for d in dates for t in ("WOPR:P1", "WBHP:P1", "FOPR")]
+    model.fit(ObservationSet(keys, np.full(len(keys), 2.0), np.ones(len(keys))))
+    blocks = [SimpleNamespace(name="k", size=3), SimpleNamespace(name="nn", size=model.n_params)]
+    layout: Any = SimpleNamespace(variables=blocks)
+    rng = np.random.default_rng(0)
+    state = rng.standard_normal((3 + model.n_params, 50))
+    forecast = rng.standard_normal((len(keys), 50))
+    loc = PriorAdaptiveLocalization([3, model.n_params], unlocalized=["nn"],
+                                    variable_names=["k", "nn"])  # fmt: skip
+    attach_parameter_mask(_method(loc), layout, model, keys)
+    loc.prepare(state, forecast, keys, np.random.default_rng(1))
+    assert loc.taper_matrix is not None
+    np.testing.assert_array_equal(loc.taper_matrix[3:], model.parameter_mask(keys).astype(float))
+    off: Any = [DataKey("2000-01-05", "WOPR:P1")]
+    with pytest.raises(ConfigError, match="not at one of the report dates"):
+        attach_parameter_mask(_method(PriorAdaptiveLocalization([3, model.n_params])), layout,
+                              model, off)  # fmt: skip

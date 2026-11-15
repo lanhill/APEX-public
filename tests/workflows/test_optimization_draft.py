@@ -354,6 +354,19 @@ def test_an_optimization_request_never_gets_a_history_matching_study(tmp_path: P
     study = plan.handler(plan.arguments(case=drafted["draft"], goal="compare optimizers",
                                         budget=100000))  # fmt: skip
     assert study["kind"] == "optimization"
+    # A reported issue (#299): an optimization study's approval says what one replicate adds and the
+    # most replicates within every limit, the runs limit as well as the simulator runs.
+    approval = study["approval"]
+    reps = study["replicates"]
+    per = approval["per_replicate"]
+    assert per == {"runs": approval["runs"] // reps,
+                   "simulator_runs": approval["simulator_runs"] // reps}  # fmt: skip
+    most = approval["max_replicates_without_approval"]
+    limits = approval["limits"]
+    assert most * per["runs"] <= limits["runs"]
+    assert most * per["simulator_runs"] <= limits["simulator_runs"]
+    assert ((most + 1) * per["runs"] > limits["runs"]
+            or (most + 1) * per["simulator_runs"] > limits["simulator_runs"])  # fmt: skip
     propose.handler(propose.arguments(draft=study["draft"], summary="compare"))
     kinds = [(p.kind, p.data["cost"]) for p in store.proposals(chat.id)]
     assert kinds[0] == ("launch_optimization", 114)

@@ -55,6 +55,7 @@ from numpy.typing import NDArray
 from apex.core.figures import FigureRequest, GridView, RunView
 from apex.core.options import Text, TextList
 from apex.core.plugins import figure_presets, figures
+from apex.core.simulation import SAVED_INPUT_PREFIX
 from apex.domain.observations import DataKey
 
 #: Box and violin plots (``metric_plots``, ``boxplot_or_violinplot``).
@@ -426,6 +427,8 @@ class DataBands:
         for row, key in enumerate(keys):
             if key.index is not None or (self.datatypes and key.datatype not in self.datatypes):
                 continue
+            if self.source == "auxiliary" and key.datatype.startswith(SAVED_INPUT_PREFIX):
+                continue  # a model's saved inputs (save_inputs), not residuals
             rows, kept = found.setdefault(key.datatype, ([], []))
             rows.append(row)
             kept.append(key)

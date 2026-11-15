@@ -31,6 +31,7 @@ from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError, SimulationError
 from apex.core.simulation import (
+    SAVED_INPUT_PREFIX,
     BlockStateModel,
     BlockStates,
     BlockStateSimulator,
@@ -48,6 +49,7 @@ from apex.domain.observations import DataKey
 from apex.simulation.deck import report_values
 
 __all__ = [
+    "INPUT_PREFIX",
     "PHASES",
     "RESIDUAL_PREFIX",
     "CaseFiles",
@@ -99,6 +101,9 @@ OIL_FEATURES = frozenset(PHASES["oil"])
 
 #: Datatype prefix of the residual keys an effective simulator also answers.
 RESIDUAL_PREFIX = "MEC:"
+#: Datatype of a model's saved inputs, ``MEC:X<j>:<well>`` (feature ``j`` of a well's
+#: inputs at a report time; ``save_inputs``).
+INPUT_PREFIX = SAVED_INPUT_PREFIX.removeprefix(RESIDUAL_PREFIX)
 
 #: A quoted item, a record's end ``/`` (also when it ends an item, as in ``100/``), or an
 #: item.
