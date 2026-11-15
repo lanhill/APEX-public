@@ -288,10 +288,46 @@ def run_stop(run_path: Path, summary: RunSummary) -> StopReason:
     return StopReason(
         code="iteration_budget", recorded=True,
         text=f"It used its whole iteration budget ({budget_text}) without meeting its "
-        "convergence test.",
+        "convergence test." + _trials_text(summary, method, budget),
         evidence=["summary.json: complete = true, converged = false",
                   f"config.json: method.{budget_text}"],
     )  # fmt: skip
+
+
+def _trials_text(summary: RunSummary, method: dict[str, Any], budget: object) -> str:
+    """Return how a run's trials after the prior split into accepted and rejected ones.
+
+    A reported issue (2026-11-15): a GIES run with ``max_iterations = 4`` made 4 trials, 2
+    accepted and 2 rejected; the report said "2 steps after the prior" and "its whole
+    iteration budget (max_iterations = 4)", and the assistant read a stop before the budget.
+    GIES's budget counts trials, accepted or rejected, unless ``max_trials_per_iteration``
+    makes it count outer iterations (:class:`~apex.algorithms.data_assimilation.gies.GIES`);
+    that is said only where it holds.
+    """
+    if not summary.accepted_iterations:  # an older summary: the split is not known
+        return ""
+    trials = max(len(summary.iterations) - 1, 0)
+    rejected = rejected_trials(summary)
+    if rejected <= 0:
+        return ""
+    text = (f" It made {trials} update trials after the prior: {trials - rejected} accepted, "
+            f"{rejected} rejected.")  # fmt: skip
+    options = method.get("options") or {}
+    # CHOP runs on GIES's loop by default (its inner method), with GIES's budget.
+    loop = options.get("inner", "gies") if method.get("name") == "chop" else method.get("name")
+    counts_trials = loop == "gies" and options.get("max_trials_per_iteration") is None
+    if counts_trials and budget == trials:
+        # Not which step is the result: cross validation may have selected another (review).
+        text += (" GIES's max_iterations counts trials, accepted or rejected, so these "
+                 f"{trials} trials were the budget.")  # fmt: skip
+    return text
+
+
+def rejected_trials(summary: RunSummary) -> int:
+    """Return how many of a run's records are rejected trials (0 for an older summary)."""
+    if not summary.accepted_iterations:
+        return 0
+    return len(summary.iterations) - len(summary.accepted_iterations)
 
 
 def _converged(
@@ -576,10 +612,14 @@ def run_rules(facts: RunReportFacts) -> NarrativeReport:
     running = facts.stop is not None and facts.stop.code == "running"
     # A run still running reads "stopped" in its steps (its summary is not complete).
     status = "running" if running else steps.status
+    # The rejected trials too, as the web UI's run page says them (2026-11-15); an older
+    # summary without accepted iterations says nothing of them.
+    rejected = rejected_trials(s)
+    rejected_text = f" ({rejected} rejected trial{'s' * (rejected != 1)})" if rejected > 0 else ""
     overview = (
         # The prior counted apart, as `apex summary` does ("4 steps after the prior").
         f"{s.method} run **{s.name}** is {status}: {max(len(steps.steps) - 1, 0)} steps "
-        "after the prior, "
+        f"after the prior{rejected_text}, "
         f"{steps.forecasts} forecasts, {s.simulator_runs} simulator runs, "
         f"{s.members} members {'so far' if running else 'at the end'}. The "
         f"{'latest' if running else 'result'} is step {result_step}"

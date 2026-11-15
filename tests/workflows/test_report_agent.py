@@ -585,3 +585,46 @@ def test_a_model_report_keeps_the_stop_reason_and_accurate_warnings(
     stub = StubProvider([answer("It converged.")])
     result = Reporter(service, stub).run_report(run_dir)
     assert any("left out recorded warnings" in c for c in result.corrections)
+
+
+def test_a_budget_stop_says_how_its_trials_split_and_what_the_budget_counts(
+    tmp_path: Path,
+) -> None:
+    """A reported issue (2026-11-15): a GIES run with max_iterations = 4 made 4 trials, 2
+    accepted and 2 rejected; the report said "2 steps after the prior" and "its whole
+    iteration budget (max_iterations = 4)", and the assistant read a stop before the budget.
+    The stop and the overview say the trials; GIES's counting is said only where it holds."""
+    # _summary's records: 3 trials after the prior, 2 accepted (iterations 1 and 3).
+    gies = {"name": "gies", "max_iterations": 3, "strategy": {"name": "rlmmac"}}
+    run = _write_run(tmp_path / "gies", complete=True, converged=False, events=[], method=gies)
+    stop = run_stop(run, _summary("complete", False))
+    assert stop.code == "iteration_budget"
+    assert "It made 3 update trials after the prior: 2 accepted, 1 rejected." in stop.text
+    assert "GIES's max_iterations counts trials, accepted or rejected" in stop.text
+    assert stop.text.endswith("these 3 trials were the budget.")
+    assert "result is step" not in stop.text  # cross validation may select another (review)
+    # CHOP on GIES's loop (its default inner method) counts the same way.
+    chop = {"name": "chop", "max_iterations": 3, "options": {}}
+    run = _write_run(tmp_path / "chop", complete=True, converged=False, events=[], method=chop)
+    assert "counts trials" in run_stop(run, _summary("complete", False)).text
+
+    # Outer iterations (max_trials_per_iteration): the split, but no claim about counting.
+    outer = {**gies, "options": {"max_trials_per_iteration": 3}}
+    run = _write_run(tmp_path / "outer", complete=True, converged=False, events=[], method=outer)
+    stop = run_stop(run, _summary("complete", False))
+    assert "2 accepted, 1 rejected." in stop.text
+    assert "counts trials" not in stop.text
+    # Another budget than the trials made: no claim either.
+    other = {**gies, "max_iterations": 5}
+    run = _write_run(tmp_path / "other", complete=True, converged=False, events=[], method=other)
+    assert "counts trials" not in run_stop(run, _summary("complete", False)).text
+
+    # The overview names the rejected trials, as the run page does.
+    facts = RunReportFacts(summary=_summary("complete", False), steps=_steps(), monitor={},
+                           causes=[], stop=stop, warnings=[])  # fmt: skip
+    overview = {x.heading: x.text for x in run_rules(facts).sections}["Overview"]
+    assert "after the prior (1 rejected trial), " in overview
+    # An older summary without accepted iterations says nothing of the split.
+    older = _summary("complete", False).model_copy(update={"accepted_iterations": []})
+    run = _write_run(tmp_path / "older", complete=True, converged=False, events=[], method=gies)
+    assert "trials" not in run_stop(run, older).text
