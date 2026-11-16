@@ -47,6 +47,8 @@ def test_the_rules_convert_a_deck_that_validates(tmp_path: Path, small_deck: Pat
     # Every rate and pressure with data; WGPR is 0 throughout and is left out.
     assert {o.vector for o in outcome.choices.observations} == {
         "WOPR:PROD", "WWPR:PROD", "WBHP:PROD", "WWIR:INJ", "WBHP:INJ"}  # fmt: skip
+    # The deck skills keep the default observed types: the well rates and pressures.
+    assert "WOPR/WWPR/WGPR/WWIR/WGIR/WBHP" in outcome.choices.reason
     assert outcome.validation.plan is not None
     assert outcome.validation.plan.members == 20
     assert (tmp_path / "out" / CONFIG).is_file()

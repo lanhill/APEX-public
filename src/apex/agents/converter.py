@@ -67,8 +67,9 @@ TRUTH_SEED = 20261024
 NOISE_SEED = 20261025
 CONFIG = "config.toml"
 NOTES = "CONVERSION.md"
-#: Vector types the rules observe: well rates and bottom-hole pressures.
-OBSERVED = ("WOPR", "WWPR", "WGPR", "WWIR", "WGIR", "WBHP")
+#: Vector types the rules observe by default: well rates and bottom-hole pressures (a skill's
+#: own ``observed`` replaces them, e.g. temperatures and pressures at points).
+OBSERVED = ConverterSkill.observed
 #: The largest |bound| of a 'log' variable: e^50 is beyond any property's value, so a larger
 #: one is a bound of the value given by mistake.
 LOG_LIMIT = 50.0
@@ -160,13 +161,19 @@ def choice_problems(choices: ConversionChoices, facts: CaseFacts) -> list[str]:
     return problems
 
 
-def rules(facts: CaseFacts, settings: CaseConverterSection, name: str) -> ConversionChoices:
-    """Return the rules' choices (see the module).
+def rules(
+    facts: CaseFacts,
+    settings: CaseConverterSection,
+    name: str,
+    observed: tuple[str, ...] = OBSERVED,
+) -> ConversionChoices:
+    """Return the rules' choices (see the module); ``observed``: the vector types to observe.
 
     Raises
     ------
     ConfigError
-        If no property can carry the state, or no vector has non-zero data.
+        If no property can carry the state, or no vector of the ``observed`` types has
+        non-zero data.
     """
     variables = [
         VariableChoice(property=p, transform=t)  # type: ignore[arg-type]
@@ -187,15 +194,15 @@ def rules(facts: CaseFacts, settings: CaseConverterSection, name: str) -> Conver
             floor=settings.floor_fraction * c.largest,
         )
         for c in facts.candidates
-        if c.vector.split(":", 1)[0] in OBSERVED and c.largest > 0
+        if c.vector.split(":", 1)[0] in observed and c.largest > 0
     ]
     if not observations:
-        raise ConfigError("no well rate or pressure of the case has data to match")
+        raise ConfigError(f"no vector the rules observe ({', '.join(observed)}) has data to match")
     return ConversionChoices(
         name=name, variables=variables, observations=observations, method="gies",
         iterations=settings.iterations, ensemble_size=settings.ensemble_size,
-        reason="rules: PERMX (log) and PORO where the case sets them as arrays; every well "
-        "rate and pressure with data",
+        reason="rules: PERMX (log) and PORO where the case sets them as arrays; every "
+        f"{'/'.join(observed)} vector with data",
     )  # fmt: skip
 
 
@@ -328,7 +335,7 @@ class CaseConverter:
                               f"{self.max_cells}; use `apex agent convert import`")  # fmt: skip
         supervised = AgentContext(self.service.root, NAME)
         settings = supervised.thresholds(self.settings)
-        fallback = rules(facts, settings, name or case_name(source))
+        fallback = rules(facts, settings, name or case_name(source), chosen.observed)
         errors: list[str] = []
         first_errors: list[str] = []
         previous: ConversionChoices | None = None

@@ -175,6 +175,11 @@ class ConverterSkill:
     guidance: ClassVar[str] = ""
     #: What it refuses, and why (shown to the model and the user).
     unsupported: ClassVar[tuple[str, ...]] = ()
+    #: The vector types (the part of a candidate's vector before ``:``) the case-converter's
+    #: rules observe when no model chooses: by default well rates and bottom-hole pressures,
+    #: a deck's usual data; a skill whose cases observe other data (temperatures at points)
+    #: names its own.
+    observed: ClassVar[tuple[str, ...]] = ("WOPR", "WWPR", "WGPR", "WWIR", "WGIR", "WBHP")
     #: Which files a case may include (a web-UI user's folders), set by the agent; ``None``:
     #: any file. A skill that follows includes must check each one with it.
     allowed: Callable[[Path], bool] | None = None
