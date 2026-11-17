@@ -389,3 +389,40 @@ def test_the_example_deck_is_its_template_rendered_and_converts(tmp_path: Path) 
     assert [(v.property, v.transform) for v in outcome.choices.variables] == [
         ("PERMX", "log"), ("PORO", "none")]  # fmt: skip
     assert {f.name for f in (tmp_path / "box").iterdir()} >= {"pvt.txt", "Schdl.sch"}
+
+
+def test_candidates_shown_to_the_model_take_their_types_in_turn() -> None:
+    """A cut at max_candidates keeps every vector type (many points: PRESSURE:* first)."""
+    from apex.agents.converter import _interleaved
+
+    listed = [{"vector": f"PRESSURE:P{i}"} for i in range(3)] + [
+        {"vector": f"TEMPERATURE:P{i}"} for i in range(2)
+    ]
+    assert [c["vector"] for c in _interleaved(listed)[:4]] == [
+        "PRESSURE:P0", "TEMPERATURE:P0", "PRESSURE:P1", "TEMPERATURE:P1"]  # fmt: skip
+
+
+def test_only_a_cut_interleaves_the_candidates_shown(tmp_path: Path) -> None:
+    """Uncut, the model sees the skill's own order; cut, the types in turn, and a note."""
+    from apex.core.conversion import CaseFacts, ObservationCandidate
+    from apex.core.plugins import converter_skills
+    from apex.services.api import ApexService
+
+    vectors = ["PRESSURE:P0", "PRESSURE:P1", "PRESSURE:P2", "TEMPERATURE:P0"]
+    facts = CaseFacts(
+        format="eclipse_deck", skill="opm_flow", source="CASE.DATA",
+        candidates=[ObservationCandidate(vector=v, source="csv", times=1) for v in vectors],
+    )  # fmt: skip
+    converter = CaseConverter(ApexService(tmp_path / "service"), None)
+    skill = converter_skills.create("opm_flow")
+
+    whole = json.loads(converter._task(skill, facts, None, None, None, []))
+    converter.settings = converter.settings.model_copy(update={"max_candidates": 2})
+    cut = json.loads(converter._task(skill, facts, None, None, None, []))
+
+    assert [c["vector"] for c in whole["facts"]["candidates"]] == vectors
+    assert "note" not in whole
+    assert [c["vector"] for c in cut["facts"]["candidates"]] == ["PRESSURE:P0", "TEMPERATURE:P0"]
+    assert cut["note"] == (
+        "4 candidates; 2 are shown, interleaved by vector type (each type's own order kept)"
+    )

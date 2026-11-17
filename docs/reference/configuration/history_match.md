@@ -299,7 +299,7 @@ Forecasts by a fitted surrogate, checked by the simulator.
 | `max_refits` | integer | 2 | Refits allowed before a failing check stops the run. |
 | `model_file` | string | required | The surrogate's manifest (`.json`, its arrays beside it), e.g. `runs/<build>/model/surrogate.json`. |
 | `on_check_failure` | string | stop | A check that fails: `stop` the run before the update (resumable); `refit` the surrogate with the checked runs added and repeat the iteration's forecast; or use the `simulator` for the rest of the run. |
-| `outside` | string | stop | Members outside the surrogate's validated domain: `stop` the run, or run them by the `simulator` (recorded as such). |
+| `outside` | string | stop | Members outside the surrogate's validated domain: `stop` the run, run them by the `simulator` (recorded as such), or answer them by the `surrogate` anyway (an explicit choice to extrapolate: logged at every forecast and counted in the summary). Keys or times outside the domain stop the run whatever the choice. |
 | `refit_held_out` | number | 0.5 | A refit's share of the checked runs held out for its gate (the rest are fitted on), drawn from the stream `surrogate`. |
 | `sigma_ratio` | number or null | | The checks' tolerance: may only tighten the model's own gate. |
 | `variance_in_errors` | boolean | false | Add the surrogate's predictive variance (a plugin with `predict_std`), the members' mean per datum, to the observation errors of the update it serves. |

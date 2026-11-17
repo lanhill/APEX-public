@@ -18,6 +18,11 @@ from apex.simulation.deck import case_dir_files
         # The trade-off: a call's closing parenthesis stays (the copy warns of it).
         ("include(${case_dir}/x.inc)", ["x.inc)"]),
         ("INCLUDE\n '${case_dir}/include/' /\n", ["include"]),
+        # OpenGeoSys's projects: the XML element's closing tag is no part of the name.
+        (
+            "<mesh>${case_dir}/injector.vtu</mesh><mesh>${case_dir}/sub/b.vtu</mesh>",
+            ["injector.vtu", "sub/b.vtu"],
+        ),
     ],
 )
 def test_the_named_files_end_at_quotes_spaces_and_list_punctuation(

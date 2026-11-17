@@ -136,7 +136,9 @@ def templates_names(paths: Sequence[Path]) -> frozenset[str] | None:
 #: ``"{ ${case_dir}/pvdo.txt, ${case_dir}/pvtw.txt }"``, where they are no part of a name.
 #: Parentheses and semicolons may be (``PERM(1).GRDECL``). A computed path
 #: (``grid_${level}.inc``, ``f(${i}).inc``) keeps its ``$`` and so is recognised.
-_CASE_PATH = re.compile(r"\$\{case_dir\}/([^'\"\s,{}]+)")
+# A name ends at a quote, a blank, list punctuation (GEOS) or an XML tag's angle bracket
+# (OpenGeoSys's <mesh>${case_dir}/a.vtu</mesh>): none is part of a deck's file names.
+_CASE_PATH = re.compile(r"\$\{case_dir\}/([^'\"\s,{}<>]+)")
 
 
 def case_dir_files(template_path: Path) -> list[str] | None:

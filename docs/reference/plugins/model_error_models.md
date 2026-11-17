@@ -20,6 +20,7 @@ name = "pg_lstm"
 
 | option | type | default | description |
 |---|---|---|---|
+| `causal_mask` | boolean | false | Declare the network's structure to the run's localization (`MaskingModel`): a well's LSTM acts on its own outputs at every report time, report time `t`'s output layer (each output's row and bias) on that output at `t` only. Needs `adaptive_prior`; `nn_params` in its `unlocalized` list gives the mask alone. |
 | `hidden_size` | integer | 20 | LSTM hidden size. |
 | `initial_schedule_file` | string or null | | Schedule text read before `schedule_file`: the deck's own SCHEDULE keywords before its included history (e.g. a first COMPDAT), if any. |
 | `injector_data` | array | ["WBHP"] | Their data types, e.g. `["WOPR", "WBHP", "WWCT"]` and `["WBHP"]`. |
@@ -27,7 +28,9 @@ name = "pg_lstm"
 | `phases` | array | ["oil", "water"] | The deck's phases, one or more of oil, water and gas: they set the dynamic features, each phase's density and saturation (`feature_names`; without oil, its density and saturation are 0). |
 | `producer_data` | array | ["WOPR", "WBHP", "WWCT"] | Their data types, e.g. `["WOPR", "WBHP", "WWCT"]` and `["WBHP"]`. |
 | `producers` | array | | Well names. |
+| `report_dates` | array | | The ISO date of each report step, in order. Needed by `causal_mask` and `save_inputs`, which must place a datum at its report step before any run; every case's own report dates are checked against them. |
 | `report_steps` | array | required | 1-based report steps of the network's report times (the observation times). |
+| `save_inputs` | boolean | false | Also answer the inputs, `MEC:X<j>:<well>` at each report date (feature `j` of the well's inputs), saved with the residuals: a run of the prior gives a per-step prior's sequential pass its inputs. |
 | `schedule_file` | string | required | The history schedule: one COMPDAT, WCONHIST and WCONINJH block per report step. |
 | `shut_wells` | string | zero | `"zero"` (the manuscript): no residual while a well is shut (WBHP excepted); `"ignore"`: residuals at every report time ('s published runs). |
 | `state_variable` | string | nn_params | The state variable holding the parameters of every well's network, producers then injectors, each in torch's layout. |

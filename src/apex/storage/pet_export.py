@@ -413,9 +413,10 @@ def _observations(
     return dates, columns
 
 
-#: ``${case_dir}/<path>`` in a template (as ``simulation.deck``'s, which storage may not
-#: import): the files a template includes from its case folder.
-_CASE_PATH = re.compile(r"\$\{case_dir\}/([^'\"\s,{}]+)")
+#: ``${case_dir}/<path>`` in a template: the files a template includes from its case folder.
+#: The same pattern as ``simulation.deck``'s, which storage may not import (a sibling layer,
+#: import-linter): a test holds the two equal (``<>`` ends a name, as an XML tag does).
+_CASE_PATH = re.compile(r"\$\{case_dir\}/([^'\"\s,{}<>]+)")
 
 
 def case_dir_files(template: Path) -> list[str] | None:

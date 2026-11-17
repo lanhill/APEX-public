@@ -14,7 +14,9 @@
 4. **Code validates** it (:meth:`~apex.services.api.ApexService.validate`). Errors go back to
    the model, up to ``max_revisions`` times; then the rules convert.
 5. **The rules** (:func:`rules`): the deck's PERMX as its logarithm and PORO (else its
-   first property that can carry the state); every rate and pressure with data, with
+   first property that can carry the state); every vector of the skill's ``observed`` types
+   with data (by default the wells' rates and pressures; ``opengeosys``: temperatures and
+   pressures at points), with
    errors of ``relative_error`` and a floor of ``floor_fraction`` of the vector's largest
    value; GIES with ``rlmmac`` and ``adaptive_prior``.
 
@@ -80,7 +82,9 @@ SYSTEM = (
     "You are APEX's case-converter. You turn a simulator's case into an APEX history-matching "
     "case. From the facts only, choose: the state variables (properties whose 'choosable' is "
     "true; permeability usually as its logarithm, transform 'log', which needs positive "
-    "values), the observations (vectors among the candidates, each with a relative error "
+    "values), the observations (vectors among the candidates, of the kinds the skill's "
+    "guidance names: well rates and pressures, or temperatures and pressures at points; each "
+    "with a relative error "
     "and a floor, its smallest standard deviation in the vector's units: zero rates need "
     "a floor), the method (gies by default, esmda when asked), its iterations and "
     "ensemble size, and the localization (adaptive_prior unless the user asks for none). "
@@ -204,6 +208,23 @@ def rules(
         reason="rules: PERMX (log) and PORO where the case sets them as arrays; every "
         f"{'/'.join(observed)} vector with data",
     )  # fmt: skip
+
+
+def _interleaved(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the candidates with their vector types taken in turn, each in its own order.
+
+    For every skill, so that a cut at ``max_candidates`` keeps every type (a case with many
+    points lists every ``PRESSURE:*`` before every ``TEMPERATURE:*``; a deck's, every well's
+    WOPR before its WWPR): more types survive a cut, fewer wells of each. Only what the
+    model is shown changes; its choices are held to the full facts.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        groups.setdefault(str(candidate["vector"]).split(":", 1)[0], []).append(candidate)
+    ordered: list[dict[str, Any]] = []
+    for row in range(max((len(g) for g in groups.values()), default=0)):
+        ordered += [g[row] for g in groups.values() if row < len(g)]
+    return ordered
 
 
 def case_name(source: Path) -> str:
@@ -654,7 +675,11 @@ class CaseConverter:
         shown["wells"] = {w: {"kind": f.kind, "phase": f.phase, "completions": len(f.cells)}
                           for w, f in facts.wells.items()}  # fmt: skip
         limit = self.settings.max_candidates
-        shown["candidates"] = shown["candidates"][:limit]
+        cut = len(facts.candidates) > limit
+        if cut:
+            # Only a cut reorders them, so that every vector type survives it; uncut, the
+            # model sees the skill's own order (deck prompts unchanged).
+            shown["candidates"] = _interleaved(shown["candidates"])[:limit]
         task: dict[str, Any] = {
             "request": request or "(none: a history match with APEX's defaults)",
             "name": name or case_name(Path(facts.source)),
@@ -668,8 +693,11 @@ class CaseConverter:
                          "floor_fraction_of_largest": self.settings.floor_fraction},
             "facts": shown,
         }  # fmt: skip
-        if len(facts.candidates) > limit:
-            task["note"] = f"{len(facts.candidates)} candidates; the first {limit} are shown"
+        if cut:
+            task["note"] = (
+                f"{len(facts.candidates)} candidates; {limit} are shown, interleaved by vector "
+                "type (each type's own order kept)"
+            )
         if previous is not None:
             task["previous_choices"] = previous.model_dump(mode="json")
             task["validation_errors"] = list(errors)[:20]

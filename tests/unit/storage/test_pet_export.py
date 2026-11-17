@@ -175,3 +175,15 @@ def test_simulator_options_pet_has_no_place_for_are_noted(tmp_path: Path) -> Non
     notes = export_pet_case(config, tmp_path / "out").notes
 
     assert any("keep_files, threads" in n for n in notes)
+
+
+def test_the_case_folder_pattern_is_the_deck_simulators(tmp_path: Path) -> None:
+    """Storage may not import simulation (sibling layers): its copy must stay the same."""
+    from apex.simulation import deck
+    from apex.storage import pet_export
+
+    assert pet_export._CASE_PATH.pattern == deck._CASE_PATH.pattern
+    template = tmp_path / "deck.mako"
+    template.write_text("<mesh>${case_dir}/injector.vtu</mesh>\nINCLUDE\n '${case_dir}/g.inc' /\n")
+    assert pet_export.case_dir_files(template) == deck.case_dir_files(template)
+    assert pet_export.case_dir_files(template) == ["g.inc", "injector.vtu"]

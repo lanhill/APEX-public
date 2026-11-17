@@ -18,12 +18,14 @@ items:
   - config:optimization:objectives
   - config:prediction:prediction
   - config:service:approval
+  - config:service:service
   - plugin:methods:esmda
   - plugin:methods:gies
   - plugin:methods:gn_enrml
   - plugin:methods:lm_enrml
   - plugin:priors:file
   - plugin:surrogate_designs:file
+  - plugin:surrogate_designs:prior
   - plugin:surrogate_designs:run
   - plugin:update_strategies:full
   - webui:agents
@@ -61,9 +63,10 @@ The pages `jobs`, `runs`, `optimizations` and `studies` are empty until work has
   - To see what your terminal uses, run `echo "$APEX_HOME"`. If it prints a path, that path is the root. If it prints an empty line, the variable is unset and the default applies.
   - The web UI must use the same root as your terminal. Ask whoever started the web UI which `APEX_HOME` it was started with (or whether it was unset), and give your terminal the same value.
   - The commands `apex submit`, `apex validate`, `apex study compare`, `apex approve` and `apex gc` accept `--root` to name the root; without it they take `$APEX_HOME`, else the default.
+- **Service settings**: the `[service]` section of `service.toml` (`service:service`) has `max_concurrent_jobs` (default 2), `poll_s` (default 1.0), `max_retries` (default 2) and `routines` (default true, on/off).
 - **Workspace folder**: the folder that holds your configurations. The `editor` page lists the configurations in it, and `examples` copies files into it. Terminal commands that take a configuration need the path of the file, for example the path of your saved copy.
 - **Workflow**: the kind of work a configuration is for, for example a history-matching run or a prediction. The `examples` page groups its catalogue by workflow, and the `plugins` page also groups plugins by workflow.
-- **Registry**: a named group of plugins within a workflow, as the `plugins` page shows them. For example, `file` is a plugin of the `priors` registry (it reads a stored ensemble from an `.npz` file), and `full` is a plugin of the `update_strategies` registry (a full LM update with the prior-increment term). The `surrogate_designs` registry has plugins named `file` and `run` too; `run` takes the forecasts a history-matching run already holds, with no simulator runs.
+- **Registry**: a named group of plugins within a workflow, as the `plugins` page shows them. For example, `file` is a plugin of the `priors` registry (it reads a stored ensemble from an `.npz` file), and `full` is a plugin of the `update_strategies` registry (a full LM update with the prior-increment term). The `surrogate_designs` registry has plugins named `file` (columns of a stored ensemble), `prior` (draws from the case's prior generators) and `run` (the forecasts a history-matching run already holds, with no simulator runs).
 - **History-matching run**: a run that adjusts an ensemble of models so that it matches observed data. It proceeds in **analysis steps**. `apex run` starts one in your terminal. Its `[method]` section names the ensemble algorithm from the `methods` registry (`name` is required) and takes `max_iterations` (default 10) for iterative methods. The methods you will meet are `esmda` (a fixed schedule of inflation factors), `gies`, `gn_enrml` and `lm_enrml`; the `history_match:method` configuration is that `[method]` section.
 - **Data mismatch**: how far the simulated results are from the observed data. A run is doing its job when the mismatch goes down from step to step.
 - **Checkpoint**: a point where a run can be stopped and later continued. You see its effect when a stop request takes effect.
@@ -102,7 +105,7 @@ The plugins page picture was taken with some optional add-on packages installed,
 
 ![The agents page](img/webui-agents.png)
 
-The editor and agents pictures may differ in detail from the pages you see; the table above describes what each page is for.
+The editor and agents pictures may differ in detail from the pages you see (both pages have been updated since the pictures were taken); the table above describes what each page is for.
 
 ### Following work in progress
 
