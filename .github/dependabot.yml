@@ -1,0 +1,16 @@
+# APEX-public's Dependabot: version updates for the workflows' GitHub Actions only, monthly,
+# grouped into one pull request (the actions are pinned to commit SHAs, which security updates
+# do not move). Python and npm dependencies get security updates through the repository's
+# settings; their version bumps come with APEX's releases, which replace the repository's
+# files with the export. Pull requests are carried over, not merged here: a bump is made in
+# the workflows' sources, or the next release reverts it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"

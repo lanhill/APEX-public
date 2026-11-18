@@ -2233,6 +2233,76 @@ def test_a_method_the_goal_names_is_planned_or_the_draft_refused(
     assert named_methods("how well are the data assimilated by GIES", names) == {"gies"}
 
 
+def test_a_method_the_users_message_names_survives_a_rewritten_goal(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #266 again (2026-11-17): the model rewrote the goal without the named method.
+
+    The user's messages since the chat's last draft are read too: a plan whose goal and
+    methods leave out a method they ask for is refused (a follow-up such as "yes, go
+    ahead" included), and the model's task states the methods named.
+    """
+    from apex.agents.chat import _task
+    from apex.agents.planner import mentions_name, plan_facts, requested_methods
+
+    _, services, store, assistant = _planning(tmp_path, linear_case, None)
+    variants = [{"name": "baseline", "patch": {}, "rationale": "as configured"},
+                {"name": "loc", "patch": {"method": {"localization": {"name": "adaptive"}}},
+                 "rationale": "localized"}]  # fmt: skip
+
+    def tool(chat_id: str) -> Any:  # noqa: ANN401 (a LocalTool)
+        return {t.name: t for t in assistant.planning_tools(chat_id, None)}["plan_study"]
+
+    def call(chat_id: str, goal: str) -> dict[str, Any]:
+        plan = tool(chat_id)
+        result: dict[str, Any] = plan.handler(plan.arguments(
+            case="alpha/config.toml", budget=5000, variants=variants, goal=goal))  # fmt: skip
+        return result
+
+    chat = store.create("plan")
+    store.add_turn(chat.id, "user", "Set up a study comparing the GIES method against "
+                   "the case's own algorithm.", {})  # fmt: skip
+    store.add_turn(chat.id, "assistant", "Which budget?", {})
+    store.add_turn(chat.id, "user", "Yes, 5000 runs, go ahead.", {})
+    case = services.workspace().file("alpha/config.toml")
+    assert plan_facts(services, case, budget=5000).method != "gies"  # not vacuous
+    # The follow-up names no method; the earlier message still asks for GIES.
+    with pytest.raises(ValueError, match=r"user's message names the method\(s\) gies"):
+        call(chat.id, "Compare the case's own algorithm against variants of it.")
+    # Kept when the goal says it is not compared (the user's call to make).
+    assert call(chat.id, "Localization variants of the case's algorithm, not GIES.")["draft"]
+
+    fresh = store.create("plan")
+    store.add_turn(fresh.id, "user", "Does localization help?", {})
+    assert call(fresh.id, "Does localization help the case's own algorithm?")["draft"]
+
+    names = ["assimilated", "esmda", "gies"]
+    asked = "Compare the assimilated method against the case's own algorithm."
+    assert requested_methods(asked, names) == {"assimilated"}
+    assert requested_methods("How well are the data assimilated, not GIES?", names) == set()
+    # A word name is accounted for by the goal without "method" beside it (the escape).
+    assert mentions_name("Localization variants, not assimilated.", "assimilated")
+    assert mentions_name("compare ES-MDA", "esmda")
+    assert not mentions_name("compare es", "esmda")
+    assert "registry methods: assimilated" in _task(asked, {}, ["assimilated"])
+    assert _task("hello", {}) == "hello"
+
+
+def test_a_request_about_logs_has_the_job_events_read() -> None:
+    """Issue #301 (2026-11-17): asked for errors or warnings in the logs, the
+    assistant called the run healthy from monitor_run alone, without reading the job's
+    events; the message and the tools now say to read them first."""
+    from apex.agents.chat import LOGS_NOTE, _task
+
+    asked = ("Can you check whether my latest APEX run is healthy? Look at its status, any "
+             "errors or warnings in the logs, and whether the outputs look normal.")  # fmt: skip
+    assert _task(asked, {}).endswith(LOGS_NOTE)
+    assert "job_events" in LOGS_NOTE
+    assert _task("Is my latest run healthy?", {}) == "Is my latest run healthy?"
+    assert _task("Use a log-normal prior.", {}) == "Use a log-normal prior."
+    assert "call job_events for the run's job before saying it is healthy" in SYSTEM
+
+
 def test_a_card_proposes_the_chats_latest_draft_of_its_kind(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
@@ -2364,6 +2434,61 @@ def test_a_follow_up_report_updates_the_chat_s_report_in_place(
     record.write_text("[]")  # a damaged record: the report counts as edited, kept
     again = report.handler(report.arguments(run=run))
     assert again["saved"].endswith("-2.md")
+
+
+def test_a_follow_up_report_by_another_id_of_the_run_updates_the_same_report(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #302 (2026-11-18): the report by job id, the section by run id: a second file."""
+    case, service, store, assistant = _planning(tmp_path, linear_case, None)
+    handle = service.submit_run(case.config)
+    assert service.wait(handle.id, timeout_s=120, poll_s=0.2).state == "complete"
+    chat = store.create("report")
+    report = {t.name: t for t in assistant.local_tools(None, chat.id)}["write_report"]
+
+    first = report.handler(report.arguments(run=handle.id))
+    compared = report.handler(report.arguments(run=handle.run_ids[0][:12], compare_with=handle.id))
+
+    assert compared["saved"] == first["saved"]
+    assert compared["replaced"]
+    assert (tmp_path / compared["saved"]).read_text() == compared["markdown"]
+    assert compared["markdown"] != first["markdown"]
+    assert [p.name for p in (tmp_path / compared["saved"]).parent.glob("report_*.md")] == [
+        Path(compared["saved"]).name
+    ]
+
+    # A chat from before the fix: its report saved under the job id takes the run's name.
+    folder = (tmp_path / compared["saved"]).parent
+    earlier = folder / f"report_{handle.id}.md"
+    (folder / Path(compared["saved"]).name).rename(earlier)
+    record = folder / ".reports.json"
+    digests = json.loads(record.read_text())
+    digests[earlier.name] = digests.pop(Path(compared["saved"]).name)
+    record.write_text(json.dumps(digests))
+    again = report.handler(report.arguments(run=handle.run_ids[0][:12]))
+    assert again["saved"] == compared["saved"]
+    assert again["replaced"]
+    assert not earlier.exists()
+
+
+def test_reports_of_two_runs_sharing_a_folder_name_are_kept_apart(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """The review of #302: every case's ``runs/alpha`` must not replace another's report."""
+    case, _, store, assistant = _planning(tmp_path, linear_case, None)
+    other = tmp_path / "other"
+    shutil.copytree(case.directory, other)
+    composition.start(case.config)
+    composition.start(other / "config.toml")
+    chat = store.create("report")
+    report = {t.name: t for t in assistant.local_tools(None, chat.id)}["write_report"]
+
+    first = report.handler(report.arguments(run=str(case.directory / "runs" / "alpha")))
+    second = report.handler(report.arguments(run=str(other / "runs" / "alpha")))
+
+    assert first["saved"] != second["saved"]
+    assert not second["replaced"]
+    assert (tmp_path / first["saved"]).read_text() == first["markdown"]
 
 
 def test_named_methods_reads_multiword_names_and_a_wrappers_inner_counts(

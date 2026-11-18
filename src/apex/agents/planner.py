@@ -805,6 +805,31 @@ def _cues(text: str, cues: re.Pattern[str], names: Iterable[str]) -> bool:
     return False
 
 
+def requested_methods(text: str, names: Iterable[str]) -> set[str]:
+    """Return the methods a user's message asks for: named plainly, not negated or aside.
+
+    "Compare the assimilated method against the case's own algorithm" asks for
+    ``assimilated``; "not GIES", "like GIES" and "how well the data are assimilated" ask for
+    none (issue #266: the assistant dropped a named method from its plan).
+    """
+    return {m.name for m in _method_mentions(text, names) if m.kind == "plain"}
+
+
+def mentions_name(text: str, name: str) -> bool:
+    """Whether a text names a method in any way: as an arm, "not X", or a bare word.
+
+    Looser than :func:`named_methods` (a word name counts without "method" beside it): it
+    decides only whether a goal still accounts for a method the user asked for (#266).
+    """
+    tokens = [_compact(w) for w in _WORD.findall(text)]
+    key = _compact(name)
+    return any(
+        "".join(tokens[i : i + size]) == key
+        for size in (1, 2, 3)
+        for i in range(len(tokens) - size + 1)
+    )
+
+
 def _compared_names(facts: PlanFacts, goal: str) -> tuple[list[str], list[str]]:
     """Return the algorithms a goal compares, and the others it names (not negated)."""
     compared, others, _ = _reading(facts, goal)

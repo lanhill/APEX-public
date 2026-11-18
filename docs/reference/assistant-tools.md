@@ -89,7 +89,7 @@ List runs, newest first (the first is the latest), optionally by annotation or n
 
 ## `monitor_run`
 
-Check a run's health with the run monitor's rules, and a diagnosis (advisory; it never stops anything). Call the run healthy only when 'healthy' is true (null: not confirmed, say so).
+Check a run's health with the run monitor's rules, and a diagnosis (advisory; it never stops anything). Call the run healthy only when 'healthy' is true (null: not confirmed, say so). It does not read the job's events: for logs, errors or warnings, call job_events too.
 
 
 ## `plan_study`

@@ -52,6 +52,7 @@ from apex.agents.optimization_advice import (
 )
 from apex.agents.planner import (
     MIN_COMPARISON_REPLICATES,
+    PlanFacts,
     Planner,
     StudyProposal,
     VariantProposal,
@@ -59,16 +60,18 @@ from apex.agents.planner import (
     ert_localization_obstacle,
     goal_methods,
     match_strategies,
+    mentions_name,
     method_differences,
     place_cases,
     plan_facts,
+    requested_methods,
     study_toml,
 )
 from apex.agents.planner import rules as plan_rules
 from apex.agents.reporter import Reporter
 from apex.agents.trace import CallRecorder
 from apex.core.advice import advise_prompt
-from apex.core.errors import ApexError, PlanningRefused
+from apex.core.errors import ApexError, ConfigError, PlanningRefused
 from apex.core.llm import LLMProvider, Message
 from apex.domain.optimization import OptimizationConfig
 from apex.domain.optimization_study import METRIC_KEYS
@@ -583,7 +586,9 @@ SYSTEM = (
     "never guess a number a tool can give. Answer a follow-up with only what it asks, and "
     "point to your earlier answer (or the draft) for the rest: never repeat the earlier "
     "answer or the whole draft. The agents are tools: monitor_run checks a "
-    "run's health, diagnose_run explains its problems and what to change, write_report "
+    "run's health (it does not read the job's events: when the user asks about logs, "
+    "errors or warnings, call job_events for the run's job before saying it is healthy), "
+    "diagnose_run explains its problems and what to change, write_report "
     "writes its narrative, plot_run draws its result figures (a request in words, or a "
     "preset such as brugge_classic; they appear on the run's page; say what its options "
     "cannot set; if the run cannot give a figure, offer the latest run that can), "
@@ -1040,6 +1045,19 @@ class ChatAssistant:
                 )
             planner = Planner(service, None)
             facts = plan_facts(service, case, budget=args.budget)
+            if dropped := self._dropped_methods(chat_id, access, facts, args):
+                # #266: a method the user named is planned or asked about, never replaced
+                # by another comparison (a guard in code: the model had rewritten the goal
+                # without it).
+                raise ValueError(
+                    f"the user's message names the method(s) {', '.join(dropped)} (registry "
+                    "methods) since this chat's last draft, but neither the goal nor the "
+                    "methods include them: plan each as an arm (name it in the goal, or "
+                    "give it in methods), or, if the user did not ask to compare it here, "
+                    f"name it in the goal as not compared (e.g. 'not {dropped[0]}'); if "
+                    "one cannot be planned, ask the user what they meant instead of "
+                    "planning another comparison"
+                )
             if not (args.variants or args.methods) and ert_localization_goal(facts, args.goal):
                 obstacle = ert_localization_obstacle(facts)
                 if obstacle is not None:
@@ -1865,7 +1883,19 @@ class ChatAssistant:
                 if chat_id is None:
                     raise ValueError("a report is saved in a chat's drafts folder")
                 shown, folder = self.drafts(chat_id)
-                stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(args.study or args.run or "x").name)
+
+                def stem_of(name: str) -> str:
+                    return re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(name).name)
+
+                # A run's report is named after the run itself, however the model named it
+                # (issue #302, 2026-11-18: the report by its job id, the follow-up by its run
+                # id, saved a second file and left the first without the section): its folder
+                # and its catalogue id, since runs of different cases share folder names.
+                stem = stem_of(args.study or args.run or "x")
+                run_dir: Path | None = None
+                if args.run is not None:
+                    run_dir = Path(RunMonitor(service, None).resolve(args.run)[0]).resolve()
+                    stem = f"{stem_of(str(run_dir))}-{_run_key(service, run_dir)}"
                 folder.mkdir(parents=True, exist_ok=True)
                 # The chat's report is updated in place (#277, 2026-11-03: a section asked
                 # for went into a second file): a file still as the assistant wrote it is
@@ -1878,8 +1908,32 @@ class ChatAssistant:
                     digests = {}
                 if not isinstance(digests, dict):
                     digests = {}
+                # This chat's earlier report of the same run, saved under the id the model
+                # gave (before #302), takes the run's name when it is still as the assistant
+                # wrote it; one the user edited stays where it is and is named as kept.
+                canonical = folder / f"report_{stem}.md"
+                earlier_kept: list[str] = []
+                if run_dir is not None and not canonical.exists():
+                    for earlier in sorted(digests):
+                        other = re.fullmatch(r"report_(.+)\.md", earlier)
+                        path = folder / earlier
+                        if other is None or not path.is_file():
+                            continue
+                        try:
+                            found = RunMonitor(service, None).resolve(other.group(1))[0]
+                        except ConfigError:
+                            continue  # not an id of a run (a study's report, a -2 copy, ...)
+                        if Path(found).resolve() != run_dir:
+                            continue
+                        there = path.read_text(encoding="utf-8", errors="replace")
+                        if digests[earlier] != _digest(there):
+                            earlier_kept.append(earlier)
+                            continue
+                        path.rename(canonical)
+                        digests[canonical.name] = digests.pop(earlier)
+                        break
                 # Reports saved before the record existed count as edited: kept, not lost.
-                name, number, kept = f"report_{stem}.md", 1, []
+                name, number, kept = f"report_{stem}.md", 1, list(earlier_kept)
                 while (folder / name).exists():
                     there = (folder / name).read_text(encoding="utf-8", errors="replace")
                     if there == result.text or digests.get(name) == _digest(there):
@@ -1947,7 +2001,9 @@ class ChatAssistant:
                       "positions). Read-only.", CaseArgument, case),
             LocalTool("monitor_run", "Check a run's health with the run monitor's rules, "
                       "and a diagnosis (advisory; it never stops anything). Call the run "
-                      "healthy only when 'healthy' is true (null: not confirmed, say so).",
+                      "healthy only when 'healthy' is true (null: not confirmed, say so). "
+                      "It does not read the job's events: for logs, errors or warnings, "
+                      "call job_events too.",
                       RunArgument, monitor),
             LocalTool("diagnose_run", "Diagnose a run: causes (with evidence) and "
                       "recommended changes, with validated patches.", RunArgument, diagnose),
@@ -2112,6 +2168,54 @@ class ChatAssistant:
             return []  # no workspace: no drafts to write
         return self.planning_tools(chat_id, access)
 
+    def _method_names(self, access: "Access | None") -> list[str]:
+        """Return the methods this user may use (a UI user's list; everyone's otherwise).
+
+        The registry's names only, not the plugin catalogue: this runs on every turn.
+        """
+        return [
+            name for name in REGISTRIES["methods"].names()
+            if access is None or access.plugin("methods", name)
+        ]  # fmt: skip
+
+    def _requested(self, chat_id: str, access: "Access | None") -> list[str]:
+        """Return the methods the user asked for since this chat's last draft (issue #266).
+
+        Every user message since then counts, not only the last: "compare the assimilated
+        method", then "yes, alpha, 2000 runs" still asks for it. A draft written (by any
+        tool) settles what was asked before it.
+        """
+        settled = max(
+            (e.created for e in self.store.events(chat_id) if e.kind == "draft"), default=""
+        )
+        names = self._method_names(access)
+        asked: set[str] = set()
+        for turn in self.store.turns(chat_id):
+            # Times are to the second: a message in the draft's own second still counts.
+            if turn.role == "user" and turn.created >= settled:
+                asked |= requested_methods(turn.content, names)
+        return sorted(asked)
+
+    def _dropped_methods(
+        self, chat_id: str, access: "Access | None", facts: PlanFacts, args: PlanArguments
+    ) -> list[str]:
+        """Return the methods the user asked for that a plan_study call leaves out (#266).
+
+        The case's own method (and the inner method it wraps) is the study's base whatever
+        the goal says. A method counts as kept when the goal names it in any way (as an arm,
+        "not X", or a bare word) or ``methods`` gives it, as an arm or a wrapper's inner.
+        """
+        own = {facts.method}
+        if split := wrapped("methods", facts.method, facts.case_method.get("options") or {}):
+            own.add(split[1])
+        asked = set(self._requested(chat_id, access)) - own
+        kept: set[str] = set()
+        for entry in (args.methods or {}).values():
+            kept.add(entry.name)
+            if inner := wrapped("methods", entry.name, entry.options or {}):
+                kept.add(inner[1])
+        return sorted(m for m in asked - kept if not mentions_name(args.goal, m))
+
     def _unproposed_drafts(self, chat_id: str, first: int, turn: "_Turn") -> list[str]:
         """Return the drafts this turn wrote or revised and did not propose (#273).
 
@@ -2272,7 +2376,7 @@ class ChatAssistant:
             abandoned=self._abandoned.setdefault(chat_id, {}),
         )  # fmt: skip
         outcome = loop.run(
-            _task(text, context),
+            _task(text, context, self._requested(chat_id, access)),
             ChatAnswer,
             Fallback("the model gave no valid answer", lambda: ChatAnswer(answer=_unavailable(
                 "the model gave no valid answer"))),
@@ -2334,6 +2438,18 @@ def _case_kind(run_dir: Path) -> dict[str, Any]:
     return {"kind": kind, "truth": truth,
             "note": "a synthetic case with a truth: RMSE and SSIM can be drawn" if truth
             else "no truth: figures of RMSE, SSIM or the truth are skipped"}  # fmt: skip
+
+
+def _run_key(service: ApexService, run_dir: Path) -> str:
+    """Return a short key of a run for its report's name: its catalogue id, else its path's.
+
+    ``run_dir`` is resolved. Folder names repeat across cases (every case's ``runs/gies``), so
+    the folder alone would let one run's report replace another's (the review of #302).
+    """
+    for entry in service.store.entries():
+        if Path(entry.path).resolve() == run_dir:
+            return entry.run_id[:12]
+    return hashlib.sha256(str(run_dir).encode("utf-8")).hexdigest()[:12]
 
 
 def _digest(text: str) -> str:
@@ -3726,7 +3842,31 @@ def _shown_value(
     return "(not set: the plugin's default)" if ".options." in key else "(not set)"
 
 
-def _task(text: str, context: Mapping[str, Any]) -> str:
+#: A message that names logs, errors or warnings (issue #301, the user's decision of
+#: 2026-11-17): monitor_run does not read a job's events, so the assistant called a run
+#: healthy before reading them, though they had been asked for.
+_ASKS_FOR_LOGS = re.compile(r"\b(logs|errors?|warnings?)\b(?!-)", re.IGNORECASE)
+LOGS_NOTE = (
+    "\n\n(This message asks about logs, errors or warnings: read the job's events with "
+    "job_events before stating a run's health; monitor_run does not read them.)"
+)
+
+
+def _task(text: str, context: Mapping[str, Any], methods: Sequence[str] = ()) -> str:
+    """Return the model's task: the user's message, where they are, the methods it names.
+
+    The methods are stated as a fact (issue #266): a name that is also a word
+    ("the assimilated method") is otherwise easily read as a word, and dropped. A message
+    about logs, errors or warnings gets :data:`LOGS_NOTE` (#301).
+    """
+    if methods:
+        text += (
+            "\n\n(Methods this message names, registry methods: "
+            + ", ".join(methods)
+            + ". Plan or answer about each as named; if one is unclear, ask.)"
+        )
+    if _ASKS_FOR_LOGS.search(text):
+        text += LOGS_NOTE
     if not context:
         return text
     where = ", ".join(f"{k} {v}" for k, v in context.items() if v)
