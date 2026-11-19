@@ -22,6 +22,7 @@ run like any configuration of theirs:
 """
 
 import datetime as dt
+import inspect
 import json
 import logging
 import os
@@ -36,7 +37,8 @@ from typing import Any
 from pydantic import ValidationError
 
 import apex
-from apex.core.errors import ConfigError, validation_problems
+from apex.core.errors import ConfigError, UnknownPluginError, validation_problems
+from apex.core.plugins import simulators
 from apex.core.service_files import is_service_file, service_roots
 from apex.domain.examples import ExampleManifest
 from apex.services.settings import ExamplesSection
@@ -453,19 +455,40 @@ def _absolute_references(text: str, example: Example, config: str) -> str:
     return text
 
 
+def _takes_case_dir(name: object) -> bool:
+    """Return whether the simulator ``name`` takes a ``case_dir`` option.
+
+    A simulator not registered here (a plugin of a package not installed or that fails to
+    import, or core's own before composition imports them) is assumed to, as before this
+    check.
+    """
+    if not isinstance(name, str):
+        return True
+    try:
+        parameters = inspect.signature(simulators.factory(name)).parameters
+    except (UnknownPluginError, ImportError, TypeError, ValueError):
+        return True
+    return "case_dir" in parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+    )
+
+
 def _own_case_dir(text: str, example: Example, target: Path, path: Path) -> str:
     """Return a copied configuration that reads its deck's includes from the copy.
 
     Its deck template stays in the examples root (code; ``_absolute_references``), where
     ``${case_dir}`` would name the original's folder: the copy's data files would be ignored.
     The simulator's ``case_dir`` option names the copy's matching folder instead, relative to
-    the configuration. Left as it is if the simulator sets ``case_dir`` itself, the template
-    lies outside the example, or the option cannot be placed beside ``deck_template_file``.
+    the configuration. Left as it is if the simulator sets ``case_dir`` itself, takes no such
+    option (e.g. ``openfoam``, whose case is its template's whole folder), the template lies
+    outside the example, or the option cannot be placed beside ``deck_template_file``.
     """
     document = tomllib.loads(text)
     simulator = document.get("simulator")
     options = simulator.get("options") if isinstance(simulator, dict) else None
     if not isinstance(options, dict) or "case_dir" in options:
+        return text
+    if not _takes_case_dir(simulator.get("name") if isinstance(simulator, dict) else None):
         return text
     template = options.get("deck_template_file")
     folder = example.folder.resolve()

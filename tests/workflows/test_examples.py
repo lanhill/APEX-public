@@ -380,6 +380,29 @@ def test_a_copied_deck_reads_its_includes_from_the_copy(tmp_path: Path) -> None:
     assert str(copied.folder / "grid" / "Schdl.sch") in files  # type: ignore[operator]
 
 
+def test_a_simulator_without_a_case_dir_option_is_not_given_one(tmp_path: Path) -> None:
+    """A review: the copy added ``case_dir`` to any simulator whose
+    template lay inside the example; ``openfoam``, whose case is its template's folder, has
+    no such option and would refuse the copy. Core's ``linear`` stands in for it here."""
+    import apex.services.composition  # noqa: F401 - registers core's simulators
+    from apex.core.plugins import simulators
+    from apex.services.examples import _takes_case_dir
+
+    root = _deck_examples(tmp_path)
+    config = root / "deckcase" / "config_esmda.toml"
+    text = config.read_text()
+    assert 'name = "opm_flow"' in text
+    config.write_text(text.replace('name = "opm_flow"', 'name = "linear"', 1))
+    copied = copy_example(get_example(root, "deckcase"), tmp_path / "copies")
+    assert "case_dir" not in (copied.folder / "config_esmda.toml").read_text("utf-8")
+    assert "case_dir" in (copied.folder / "synthetic" / "config_esmda.toml").read_text("utf-8")
+    assert {"opm_flow", "linear"} <= set(simulators.names())  # else the checks pass vacuously
+    assert _takes_case_dir("opm_flow")
+    assert not _takes_case_dir("linear")
+    assert _takes_case_dir("not_installed")  # unknown: as before the check
+    assert _takes_case_dir(None)
+
+
 def test_a_parent_example_copies_into_the_folder_its_nested_examples_made(
     tmp_path: Path,
 ) -> None:

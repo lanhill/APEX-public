@@ -2498,7 +2498,21 @@ def prepare_remote(executor: object, simulator: Simulator, config: HistoryMatchC
                           f"cannot be loaded: {error}") from error  # fmt: skip
 
     template = config.simulator.options.get("deck_template_file")
-    includes = None if template is None else case_dir_files(Path(str(template)))
+    # A simulator whose case is its template's whole folder (OpenFOAM's case.foam names no
+    # file) lists what a member needs of it; else the paths the template names.
+    declared = _remote_case_files(simulator)
+    includes: list[str] | None
+    if declared is not None:
+        if "case_dir" in config.simulator.options:
+            # The list is relative to the template's folder; CaseMirror would apply it to the
+            # case_dir folder too.
+            raise ConfigError(
+                f"{config.simulator.name} lists its case's files for remote members, which "
+                "cannot be combined with a case_dir option"
+            )
+        includes = list(declared())
+    else:
+        includes = None if template is None else case_dir_files(Path(str(template)))
     document = json.loads(config.model_dump_json())
     programs = _program_options(config, document)
     attach(
@@ -2514,6 +2528,24 @@ def prepare_remote(executor: object, simulator: Simulator, config: HistoryMatchC
             programs=programs,
         )
     )
+
+
+def _remote_case_files(simulator: object) -> Callable[[], Sequence[str]] | None:
+    """Return the stack's ``remote_case_files`` (see :func:`prepare_remote`), or ``None``.
+
+    Looked up through the wrappers' ``inner`` simulators: not every wrapper forwards its
+    inner simulator's attributes (geophysics' and model error's do not), and a wrapped
+    OpenFOAM would otherwise mirror none of its case.
+    """
+    seen: set[int] = set()
+    current: object | None = simulator
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        found = getattr(current, "remote_case_files", None)
+        if callable(found):
+            return found  # type: ignore[no-any-return]
+        current = getattr(current, "inner", None)
+    return None
 
 
 def _program_options(

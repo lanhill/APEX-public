@@ -150,7 +150,9 @@ class RemoteSpec:
     config
         The resolved configuration (``config.json``'s document), with this machine's paths.
     includes
-        The paths the deck template names under ``${case_dir}`` (``None``: all of it).
+        The paths the deck template names under ``${case_dir}`` (``None``: all of it), or
+        those the simulator lists itself (``remote_case_files()``, relative to the template's
+        folder, e.g. an OpenFOAM case's files; refused with a ``case_dir`` option).
     code
         Prepares the copies on the given hosts and says which to use; called once, before
         the first forecast (a run built only to be validated or read deploys nothing).
