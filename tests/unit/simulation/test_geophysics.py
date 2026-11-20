@@ -402,7 +402,7 @@ def test_restart_headers_are_copied_not_viewed(
             tmp_path / f"u{unified}" / "C", SHAPE, restarts, actnum=ACTNUM, unified=unified
         )
         state = CaseState(case)
-        monkeypatch.setattr(state, "_file", _Releasing)
+        monkeypatch.setattr(state.reader, "_file", _Releasing)
         assert state.restart_dates == dates
         assert state.restart(dates[2], ["PRESSURE"])["PRESSURE"][0] == 203.0
 

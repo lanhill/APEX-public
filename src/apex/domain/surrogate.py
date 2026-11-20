@@ -1069,8 +1069,9 @@ class SurrogateCaseSection(_Frozen):
     field_cells: int | None = Field(
         default=None,
         gt=0,
-        description="The fields' cells, for a simulator that answers field keys itself; a "
-        "deck's grid gives them otherwise.",
+        description="The fields' cells, when no deck template's grid (DIMENS or SPECGRID) "
+        "gives them: for a simulator that answers field keys itself, or one whose case-state "
+        "reader has no deck template (an unstructured mesh's cells, say).",
     )
 
     @model_validator(mode="after")

@@ -7,9 +7,11 @@ the deck simulator and the field keys to a :class:`~apex.core.simulation.CaseFie
 (the geophysical forward model of :mod:`apex.workflows.geophysics`), which reads the run's files
 through :class:`CaseState`.
 
-:class:`CaseState` reads a case's grid (EGRID), INIT and restarts in SI units: restarts
-are found by their own date (INTEHEAD), not by step index, so a deck's report steps never
-need counting. Unified (``.UNRST``) and separate (``.Xnnnn``) restarts are both read.
+:class:`CaseState` reads a case's grid (EGRID), INIT and restarts in SI units, through a
+case-state reader (the files are read by
+:class:`~apex.simulation.eclipse_files.EclipseFiles`): restarts are found by their own date
+(INTEHEAD), not by step index, so a deck's report steps never need counting. Unified
+(``.UNRST``) and separate (``.Xnnnn``) restarts are both read.
 
 Ported from SimulatorWrap
 -------------------------
@@ -27,15 +29,16 @@ over the active cells ``(n_active,)``, in the simulator's active order.
 
 import datetime as dt
 import logging
+import os
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
+from apex.core.case_state import CaseStateReader, CornerGeometryReader
 from apex.core.errors import ConfigError, SimulationError
 from apex.core.simulation import (
     CaseFieldModel,
@@ -44,10 +47,15 @@ from apex.core.simulation import (
     Simulator,
     StatefulFieldModel,
 )
+from apex.domain.case_state import CornerGrid, StateTime, UnitSystem
 from apex.domain.observations import DataKey
-
-if TYPE_CHECKING:
-    from resdata.resfile import ResdataFile
+from apex.simulation.eclipse_files import (
+    UNIT_SYSTEMS,
+    EclipseFiles,
+    Grid,
+    column_centres,
+    grid_unit_stated,
+)
 
 __all__ = [
     "UNIT_SYSTEMS",
@@ -55,256 +63,72 @@ __all__ = [
     "GeophysicsSimulator",
     "Grid",
     "UnitSystem",
+    "column_centres",
     "grid_unit_stated",
 ]
 
 logger = logging.getLogger(__name__)
 
-#: INTEHEAD items (0-based): the unit system, the phases, the date (day, month, year).
-_UNITS_ITEM, _PHASES_ITEM, _DATE_ITEMS = 2, 14, (64, 65, 66)
-
-
-@dataclass(frozen=True)
-class UnitSystem:
-    """A deck's unit system, as factors to SI (Pa, kg/m³, m, and m³ of reservoir volume)."""
-
-    name: str
-    pressure: float
-    density: float
-    length: float
-    volume: float
-
-
-#: INTEHEAD's unit-system codes (Eclipse file format): pressure bar, psia or atm.
-UNIT_SYSTEMS = {
-    1: UnitSystem("METRIC", 1.0e5, 1.0, 1.0, 1.0),
-    2: UnitSystem("FIELD", 6894.757293168361, 16.018463373960138, 0.3048, 0.158987294928),
-    3: UnitSystem("LAB", 101325.0, 1000.0, 0.01, 1.0e-6),
-    4: UnitSystem("PVT-M", 101325.0, 1.0, 1.0, 1.0),
-}
-
-#: INTEHEAD's phase bits, and each phase's saturation and density arrays.
-_PHASE_BITS = {"oil": 1, "water": 2, "gas": 4}
 _SATURATION = {"oil": "SOIL", "water": "SWAT", "gas": "SGAS"}
 _DENSITY = {"oil": "OIL_DEN", "water": "WAT_DEN", "gas": "GAS_DEN"}
 
 
-@dataclass(frozen=True)
-class Grid:
-    """A corner-point grid's geometry in SI units.
-
-    Attributes
-    ----------
-    shape
-        ``(n_x, n_y, n_z)``.
-    actnum
-        ``(n_x, n_y, n_z)``: whether each cell is active.
-    top, bottom
-        ``(n_x, n_y, n_z)``: each cell's top and base depth (m, positive down), the means
-        of its four upper and four lower corners; defined for inactive cells too.
-    centres
-        ``(n_x, n_y, n_z, 3)``: each cell's x, y and depth (m), the means of its eight
-        corners.
-    boxes
-        ``(n_x, n_y, n_z, 4)``: the horizontal extent of each cell's corners, ``x_min,
-        x_max, y_min, y_max`` (m).
-    volume
-        ``(n_x, n_y, n_z)``: each cell's bulk volume (m³).
-    """
-
-    shape: tuple[int, int, int]
-    actnum: NDArray[np.bool_]
-    top: NDArray[np.float64]
-    bottom: NDArray[np.float64]
-    centres: NDArray[np.float64]
-    boxes: NDArray[np.float64]
-    volume: NDArray[np.float64]
-
-    @property
-    def active_columns(self) -> NDArray[np.bool_]:
-        """``(n_x, n_y)``: whether each column has an active cell."""
-        out: NDArray[np.bool_] = self.actnum.any(axis=2)
-        return out
-
-    def active(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Return a grid array's values ``(n_x, n_y, n_z, ...)`` over the active cells.
-
-        In the simulators' active order, F (i fastest): ``(n_active, ...)``.
-        """
-        flat = values.reshape(int(np.prod(self.shape)), -1, order="F")
-        out: NDArray[np.float64] = flat[self.actnum.ravel(order="F")]
-        return out.reshape((-1, *values.shape[3:]))
-
-    @classmethod
-    def read(cls, path: Path, length: float = 1.0) -> "Grid":
-        """Read an EGRID file in m, in the grid's own frame (before MAPAXES).
-
-        Lengths are converted by the file's ``GRIDUNIT``, or by ``length`` (m per the
-        file's unit) when it has none. Coordinates are the grid's COORD and ZCORN, not
-        mapped by MAPAXES: the frame of SimulatorWrap's stations and of the AVO regions
-        (:func:`column_centres`), so stations, seabed tables and refinement points are
-        given in it.
-
-        Raises
-        ------
-        OSError, ValueError
-            If the file cannot be read as a grid, or its length unit is unknown.
-        """
-        from resdata.grid import Grid as ResGrid  # optional dependency (the reservoir extra)
-
-        if not path.is_file():
-            raise OSError(f"no grid file {path}")
-        grid = ResGrid(str(path), apply_mapaxes=False)
-        length = _grid_unit(path, length)
-        shape = (int(grid.nx), int(grid.ny), int(grid.nz))
-        index = grid.export_index(active_only=False)  # every cell, global (F) order
-        corners = np.asarray(grid.export_corners(index), dtype=np.float64) * length  # (n, 24)
-        x, y, z = corners[:, 0::3], corners[:, 1::3], corners[:, 2::3]
-        top = z[:, :4].mean(axis=1)  # the eight corners: the first four are the top
-        bottom = z[:, 4:].mean(axis=1)
-        centres = np.column_stack((x.mean(axis=1), y.mean(axis=1), z.mean(axis=1)))
-        boxes = np.column_stack((x.min(axis=1), x.max(axis=1), y.min(axis=1), y.max(axis=1)))
-        volume = np.asarray(grid.export_volume(index), dtype=np.float64) * length**3
-        actnum = np.asarray(index["active"].to_numpy() >= 0)
-
-        def cells(values: NDArray[np.float64]) -> NDArray[np.float64]:
-            out: NDArray[np.float64] = values.reshape((*shape, *values.shape[1:]), order="F")
-            return out
-
-        return cls(
-            shape,
-            actnum.reshape(shape, order="F"),
-            cells(top),
-            cells(bottom),
-            cells(centres),
-            cells(boxes),
-            cells(np.abs(volume)),
-        )
-
-
-#: EGRID ``GRIDUNIT`` lengths in m.
-_GRID_UNITS = {"METRES": 1.0, "FEET": 0.3048, "CM": 0.01}
-
-
-def column_centres(path: Path) -> NDArray[np.float64]:
-    """Return ``(n_x, n_y, 2)``: each column's x and y (m), from an EGRID's pillars.
-
-    A column's centre is the mean of the tops of its four pillars (``COORD``), as the
-    reference places its region of interest; the lengths are converted with ``GRIDUNIT``.
-
-    Raises
-    ------
-    OSError, ValueError
-        If the file cannot be read as a grid, or its length unit is unknown.
-    """
-    from resdata.grid import Grid as ResGrid  # optional dependency (the reservoir extra)
-
-    if not path.is_file():
-        raise OSError(f"no grid file {path}")
-    grid = ResGrid(str(path))
-    nx, ny = int(grid.nx), int(grid.ny)
-    # numpy_view does not own its buffer: the keyword is held until the copy is made (a
-    # temporary would be freed as soon as numpy_view returns).
-    keyword = grid.export_coord()
-    coord = np.array(keyword.numpy_view(), dtype=np.float64, copy=True)
-    del keyword
-    # COORD: one pillar (x, y, z top, x, y, z bottom) per corner node, I fastest.
-    tops = coord.reshape(ny + 1, nx + 1, 6)[:, :, :2].transpose(1, 0, 2)  # (nx+1, ny+1, 2)
-    centres = 0.25 * (tops[:-1, :-1] + tops[1:, :-1] + tops[:-1, 1:] + tops[1:, 1:])
-    out: NDArray[np.float64] = centres * _grid_unit(path, 1.0)
-    return out
-
-
-def grid_unit_stated(path: Path) -> bool:
-    """Return whether an EGRID states its length unit (``GRIDUNIT``)."""
-    from resdata.resfile import ResdataFile  # optional dependency (the reservoir extra)
-
-    egrid = ResdataFile(str(path))
-    return "GRIDUNIT" in egrid and bool(str(egrid["GRIDUNIT"][0][0]).strip())
-
-
-def _grid_unit(path: Path, default: float) -> float:
-    """Return the m per length unit of an EGRID: its ``GRIDUNIT``, else ``default``.
-
-    Raises
-    ------
-    ValueError
-        If the unit is unknown.
-    """
-    from resdata.resfile import ResdataFile  # optional dependency (the reservoir extra)
-
-    egrid = ResdataFile(str(path))
-    unit = str(egrid["GRIDUNIT"][0][0]).strip().upper() if "GRIDUNIT" in egrid else ""
-    if not unit:  # not stated (resdata writes a blank one for PVT-M)
-        return default
-    if unit not in _GRID_UNITS:
-        raise ValueError(f"{path.name}: unknown GRIDUNIT {unit!r}")
-    return _GRID_UNITS[unit]
-
-
-def _date(intehead: NDArray[np.float64]) -> dt.date:
-    day, month, year = (int(intehead[i]) for i in _DATE_ITEMS)
-    try:
-        return dt.date(year, month, day)
-    except ValueError as error:
-        raise SimulationError(f"a restart's INTEHEAD holds no date: {error}") from error
-
-
 class CaseState:
-    """Reads one simulated case's grid, INIT and restarts, in SI units.
+    """Geophysics' view of one simulated case: its grid, INIT and restarts by date.
+
+    Reads through a :class:`~apex.core.case_state.CornerGeometryReader`: the
+    Eclipse-format reader (:class:`~apex.simulation.eclipse_files.EclipseFiles`) for a
+    case's path, or the reader the services chose for the simulator. Its conversions to SI
+    and its rules (the later of two restarts on one day, a missing restart told apart as
+    the member's failure or the deck's) are geophysics' own.
+
+    Parameters
+    ----------
+    case
+        The run's path without a suffix (``str`` or path), or an opened reader.
 
     Raises
     ------
     SimulationError
         If the grid or INIT cannot be read (the run did not finish as it should).
+    ConfigError
+        If ``case`` is neither, or a reader lacks the corner-point capability geophysics
+        needs.
     """
 
-    def __init__(self, case: Path) -> None:
-        from resdata.resfile import ResdataFile  # optional dependency (the reservoir extra)
-
-        self.case = case
-        self._file = ResdataFile
-        self.init = self._open(Path(f"{case}.INIT"))
-        header = self._array(self.init, "INTEHEAD")
-        code = int(header[_UNITS_ITEM])
-        if code not in UNIT_SYSTEMS:
-            raise SimulationError(f"{case.name}.INIT: unknown unit system code {code}")
-        self.units = UNIT_SYSTEMS[code]
-        bits = int(header[_PHASES_ITEM])
-        self.phases = tuple(p for p, bit in _PHASE_BITS.items() if bits & bit)
-
-    def _open(self, path: Path) -> "ResdataFile":
-        """Open a result file; a run's unreadable file is that member's failure."""
-        try:
-            return self._file(str(path))
-        except (OSError, ValueError) as error:
-            raise SimulationError(f"cannot read {path.name}: {error}") from error
-
-    @staticmethod
-    def _array(view: "ResdataFile", name: str) -> NDArray[np.float64]:
-        """Return a copy of ``name``'s first occurrence in ``view``.
-
-        Copied while ``view``, which owns the buffer, is alive: ``numpy_view()`` keeps no
-        reference to it, so a view kept past its file reads freed memory.
-        """
-        if name not in view:
-            raise SimulationError(f"a result file lacks {name} (truncated or corrupt?)")
-        return np.array(view[name][0].numpy_view(), dtype=np.float64, copy=True)
+    def __init__(self, case: "str | os.PathLike[str] | CaseStateReader") -> None:
+        if isinstance(case, str | os.PathLike):
+            reader: CaseStateReader = EclipseFiles(Path(case))
+        elif isinstance(case, CaseStateReader):
+            reader = case
+        else:
+            raise ConfigError(
+                f"CaseState takes a case's path or a case-state reader, not a {type(case).__name__}"
+            )
+        if not isinstance(reader, CornerGeometryReader):
+            raise ConfigError(
+                f"{reader.case.name}: geophysics needs a corner-point grid with a deck's "
+                f"unit system and phases, which the {type(reader).__name__} reader does not "
+                "give"
+            )
+        self.reader = reader
+        self.case = reader.case
+        self.units = reader.unit_system
+        self.phases = reader.phases
 
     @cached_property
-    def grid(self) -> Grid:
+    def init(self) -> frozenset[str]:
+        """The names of the INIT's arrays (``"EQLNUM" in state.init``)."""
+        return self.reader.static_names()
+
+    @cached_property
+    def grid(self) -> CornerGrid:
         """The case's grid (EGRID)."""
-        try:
-            # The deck's length unit when the EGRID states none.
-            return Grid.read(Path(f"{self.case}.EGRID"), self.units.length)
-        except (OSError, ValueError) as error:
-            raise SimulationError(f"cannot read {self.case.name}.EGRID: {error}") from error
+        return self.reader.corner_geometry()
 
     def static(self, name: str) -> NDArray[np.float64]:
         """Return an INIT array over the active cells, as written (deck units)."""
-        if name not in self.init:
-            raise SimulationError(f"{self.case.name}.INIT has no {name}")
-        return self._array(self.init, name)
+        return self.reader.static(name)
 
     @cached_property
     def depth(self) -> NDArray[np.float64]:
@@ -314,37 +138,20 @@ class CaseState:
     @cached_property
     def run_end(self) -> dt.date | None:
         """The date the run's summary ends at, or ``None`` if it has no readable summary."""
-        from resdata.summary import Summary
-
-        try:
-            end = Summary(str(self.case)).end_date
-        except (OSError, ValueError):
-            return None
-        return end.date() if isinstance(end, dt.datetime) else end
+        reached = self.reader.reached()
+        return None if reached is None else reached.date
 
     @cached_property
-    def _unified(self) -> "ResdataFile | None":
-        path = Path(f"{self.case}.UNRST")
-        return self._open(path) if path.exists() else None
-
-    @cached_property
-    def _restarts(self) -> dict[dt.date, tuple[Path, int | None]]:
-        """Each restart's date: its file and, in a unified file, its SEQNUM block.
+    def _restarts(self) -> dict[dt.date, StateTime]:
+        """Each restart's date and time.
 
         Two restarts on one date (two report steps on a day) give the later one, as the
         summary's values are its report steps' last (``deck.report_values``).
         """
-        found: dict[dt.date, tuple[Path, int | None]] = {}
-        unified = self._unified
-        if unified is not None:
-            # By SEQNUM block, each block's own (global) INTEHEAD first: local grids add
-            # INTEHEADs of their own, so counting INTEHEADs would shift the blocks.
-            for n in range(unified.num_named_kw("SEQNUM")):
-                view = unified.restart_view(seqnum_index=n)
-                found[_date(self._array(view, "INTEHEAD"))] = (Path(f"{self.case}.UNRST"), n)
-            return found
-        for path in sorted(self.case.parent.glob(f"{self.case.name}.X[0-9][0-9][0-9][0-9]")):
-            found[_date(self._array(self._open(path), "INTEHEAD"))] = (path, None)
+        found: dict[dt.date, StateTime] = {}
+        for time in self.reader.times():
+            if time.date is not None:
+                found[time.date] = time
         return found
 
     @property
@@ -382,16 +189,7 @@ class CaseState:
                 f"{message}; the deck's RPTRST must write one at every vintage, e.g. RPTRST "
                 "BASIC=2 (every report step) with a report step at each vintage's date"
             )
-        path, block = self._restarts[date]
-        if block is None:
-            view = self._open(path)
-        else:
-            assert self._unified is not None
-            view = self._unified.restart_view(seqnum_index=block)
-        try:
-            return {n: self._array(view, n) for n in names if n in view}
-        except (OSError, ValueError) as error:
-            raise SimulationError(f"cannot read {path.name} at {date}: {error}") from error
+        return self.reader.state(self._restarts[date], names, skip_missing=True)
 
     def pore_volume(self, date: dt.date) -> NDArray[np.float64]:
         """Return each active cell's pore volume at reservoir conditions (m³), RPORV.

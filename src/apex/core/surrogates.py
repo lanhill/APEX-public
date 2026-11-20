@@ -38,6 +38,13 @@ Optional capabilities, read with ``getattr`` as the simulators' are:
   through :class:`apex.simulation.sensitivity.SensitivityRun`); a build is refused where the
   stack cannot give them (no sensitivities, parameterizations, state fields, a coarse stack,
   a plan other than ``prior``, ``lhs`` and ``file``);
+- ``unstructured_fields``, a ``bool`` (``False`` by default): the plugin takes state fields
+  (``SnapshotSet.fields``) on an unstructured mesh, each field over the mesh's cells in its
+  case-state reader's order (decision 5); without it a build with ``[case] fields``
+  needs a reader that always gives a structured grid (``structured_mesh``), on whose whole
+  grid the fields are, in Eclipse (F) order with inactive cells 0. A plugin with
+  ``unstructured_fields`` on a reader that gives a structured grid still gets that whole
+  grid, padded with zeros on the inactive cells;
 - ``requires``, a ``tuple[str, ...]`` of simulator capabilities the plugin needs to be
   trained (the intrusive reduced models); none by default;
 - ``version``, a ``str`` recorded in the manifest.

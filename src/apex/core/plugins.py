@@ -1,10 +1,11 @@
 """Plugin registries: simulators, executors, priors, transforms, metrics, rules, scores, ....
 
 Also LLM providers, run summarizers, figures and figure presets, the converter,
-geomodeling and simulation skills, and surrogate models.
+geomodeling and simulation skills, surrogate models, and case-state readers.
 
 """
 
+from apex.core.case_state import CaseStateReader
 from apex.core.conversion import ConverterSkill
 from apex.core.engines import RunEngine
 from apex.core.figures import Figure, FigurePreset
@@ -99,3 +100,8 @@ surrogate_models: Registry[SurrogateModel] = Registry("surrogate_models")
 #: and adaptive plans, registered by packages through the entry-point group
 #: ``apex.surrogate_designs``.
 surrogate_designs: Registry[BuiltinDesign | AdaptiveDesign] = Registry("surrogate_designs")
+
+#: Readers of a simulated case's state by simulator name: core's Eclipse-format
+#: reader for the deck simulators, others registered by packages through the entry-point
+#: group ``apex.case_state_readers``. Each factory takes the case's path.
+case_state_readers: Registry[CaseStateReader] = Registry("case_state_readers")

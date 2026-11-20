@@ -31,7 +31,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.algorithms.model_error.lstm import WellNetwork, well_residuals
-from apex.core.errors import SimulationError
+from apex.core.case_state import CaseStateReaderFactory, CornerGeometryReader
+from apex.core.errors import ConfigError, SimulationError
 from apex.core.options import InputFile, Text, TextList
 from apex.core.plugins import model_error_models
 from apex.core.simulation import BlockStates
@@ -125,6 +126,9 @@ class PGLSTMModel:
         if not steps or min(steps) < 1 or steps != sorted(set(steps)):
             raise ValueError(f"report_steps must be increasing positive steps, got {steps}")
         self.state_variable = str(state_variable)
+        # The simulator's case-state reader, set by the services; None reads
+        # the Eclipse-format files.
+        self.case_state_reader: CaseStateReaderFactory | None = None
         self.report_steps = tuple(steps)
         self.shut_wells: ShutWells = shut_wells
         self.phases = tuple(str(p).lower() for p in phases)
@@ -306,9 +310,31 @@ class PGLSTMModel:
         """
         return self.state_residuals(self.case_states(case), theta, keys)
 
+    def use_case_state_reader(self, reader: CaseStateReaderFactory) -> None:
+        """Read each case through the simulator's case-state reader.
+
+        Called by the services with the reader they chose for the simulator.
+        """
+        self.case_state_reader = reader
+
     def case_states(self, case: Path) -> BlockStates:
-        """Return a simulated case's block states: its INIT, restart and summary files."""
-        return CaseFiles(case)
+        """Return a simulated case's block states: its INIT, restart and summary files.
+
+        Raises
+        ------
+        ConfigError
+            If the simulator's reader is not of a corner-point grid with a deck's unit
+            system and phases, which the model's features need.
+        """
+        if self.case_state_reader is None:
+            return CaseFiles(case)
+        reader = self.case_state_reader(case)
+        if not isinstance(reader, CornerGeometryReader):
+            raise ConfigError(
+                f"pg_lstm reads a deck run's INIT, restarts and summary; the "
+                f"{type(reader).__name__} reader of {case.name} is not of that kind"
+            )
+        return CaseFiles(case, reader)
 
     def state_residuals(
         self, states: BlockStates, theta: NDArray[np.float64], keys: Sequence[DataKey]

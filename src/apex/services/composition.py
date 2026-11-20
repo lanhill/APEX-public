@@ -46,6 +46,7 @@ import apex.services.geomodeling_skills
 import apex.simulation.analytic
 import apex.simulation.conversion
 import apex.simulation.eclipse
+import apex.simulation.eclipse_files
 import apex.simulation.ert
 import apex.simulation.opm_flow
 import apex.storage.pet_skill
@@ -73,6 +74,7 @@ from apex.algorithms.geophysics import (
     petro_elastic_models,
     reflectivity,
 )
+from apex.core.case_state import CaseStateReaderFactory
 from apex.core.diagnostics import DiagnosticsPlan
 from apex.core.errors import (
     ConfigError,
@@ -83,6 +85,7 @@ from apex.core.errors import (
 )
 from apex.core.metrics import PerformanceMetric
 from apex.core.plugins import (
+    case_state_readers,
     data_transforms,
     executors,
     metrics,
@@ -1216,6 +1219,7 @@ def build_geophysics(config: HistoryMatchConfig) -> GeophysicsModel | None:
             section, pem, reflectivities, attributes, _completions(config), kernels,
             brine_as_oil=_co2store_oil_gas(config), parameters=parameters,
             temperature=cell_temperature,
+            reader=case_state_reader(config.simulator.name, "[geophysics]", "corner_geometry"),
         )  # fmt: skip
         if cell_temperature is not None and deck_gas:
             # CO₂'s table over the cells' temperatures, built (and checked) before any
@@ -1230,6 +1234,40 @@ def build_geophysics(config: HistoryMatchConfig) -> GeophysicsModel | None:
         raise ConfigError(f"[geophysics]: invalid settings: {error}") from error
     _check_field_size(config, model)
     return model
+
+
+def case_state_reader(
+    simulator: str, consumer: str, capability: str | None = None
+) -> CaseStateReaderFactory:
+    """Return the case-state reader of ``simulator`` for ``consumer``.
+
+    Readers are chosen here, by the simulator's name, and handed to the consumers (field
+    snapshots, geophysics, model error); ``capability`` is one a reader must declare in its
+    class's ``capabilities`` (``"corner_geometry"``: a corner-point grid with a deck's unit
+    system and phases). A reader plugin is a class (``CaseStateReaderFactory``): its
+    capabilities are known before any case exists; a function factory declares none.
+
+    Raises
+    ------
+    ConfigError
+        If the simulator has no reader, or its reader lacks ``capability``: every member
+        would fail the same way.
+    """
+    if simulator not in case_state_readers.names():
+        known = ", ".join(sorted(case_state_readers.names())) or "none"
+        raise ConfigError(
+            f"{consumer} reads each member's state, and the {simulator!r} simulator has no "
+            f"case-state reader (readers: {known})"
+        )
+    factory = case_state_readers.factory(simulator)
+    capabilities = frozenset(getattr(factory, "capabilities", ()))
+    if capability is not None and capability not in capabilities:
+        given = ", ".join(sorted(capabilities)) or "no more than the state"
+        raise ConfigError(
+            f"{consumer} needs a reader with {capability}, which the {simulator!r} "
+            f"simulator's reader does not give (it gives: {given})"
+        )
+    return factory
 
 
 def _deck_temperature(
@@ -1679,6 +1717,12 @@ def build_model_error(
             check(config.simulator.name, dict(config.simulator.options))
         except ValueError as error:
             raise ConfigError(f"[model_error] {section.name}: {error}") from error
+    # a model that reads each member's state reads it through the simulator's
+    # case-state reader. A simulator without one keeps the Eclipse-format reading (model
+    # error on other simulators needs readers with wells, a later phase).
+    use_reader = getattr(model, "use_case_state_reader", None)
+    if callable(use_reader) and config.simulator.name in case_state_readers.names():
+        use_reader(case_state_reader(config.simulator.name, "[model_error]", "corner_geometry"))
     sizes = {v.name: v.size for v in layout.variables}
     name = model.state_variable
     if name not in sizes:

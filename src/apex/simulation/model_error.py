@@ -29,7 +29,8 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from apex.core.errors import ConfigError, SimulationError
+from apex.core.case_state import CornerGeometryReader, MissingState
+from apex.core.errors import ConfigError, SimulationError, TransientSimulationError
 from apex.core.simulation import (
     SAVED_INPUT_PREFIX,
     BlockStateModel,
@@ -300,25 +301,33 @@ def well_schedules(
 
 
 class CaseFiles:
-    """Reads one simulated case's INIT, restart and summary files (ECLIPSE format)."""
+    """Reads one simulated case's INIT, restart and summary files (ECLIPSE format).
 
-    def __init__(self, case: Path) -> None:
+    The INIT and restarts are read through a case-state reader: the
+    Eclipse-format reader (:class:`~apex.simulation.eclipse_files.EclipseFiles`) unless the
+    services chose another for the simulator; arrays stay in the deck's units, by report
+    step (``BlockStates``). The grid's active indices and the summary are read here.
+    """
+
+    def __init__(self, case: Path, reader: CornerGeometryReader | None = None) -> None:
         from resdata.grid import Grid  # optional dependency (the reservoir extra)
-        from resdata.resfile import ResdataFile
         from resdata.summary import Summary
+
+        from apex.simulation.eclipse_files import EclipseFiles
 
         self.case = case
         try:
             self.grid = Grid(f"{case}.EGRID")
-            self.init = ResdataFile(f"{case}.INIT")
+            self.files: CornerGeometryReader = EclipseFiles(case) if reader is None else reader
             self.summary = Summary(str(case))
-        except (OSError, ValueError) as error:
+        except TransientSimulationError:
+            raise  # retried by the executors as it is (an I/O error, a stale file handle)
+        # The reader's own SimulationError (an unreadable INIT, an unknown unit system) is
+        # told as before: this member's grid, INIT or summary cannot be read.
+        except (OSError, ValueError, SimulationError) as error:
             raise SimulationError(
                 f"cannot read the grid, INIT or summary of {case}: {error}"
             ) from error
-        unified = Path(f"{case}.UNRST")
-        self._unified = ResdataFile(str(unified)) if unified.exists() else None
-        self._file = ResdataFile
         self._vectors: dict[str, NDArray[np.float64]] = {}
 
     @property
@@ -333,26 +342,20 @@ class CaseFiles:
 
     def static(self, name: str) -> NDArray[np.float64]:
         """Return an INIT array over the active cells."""
-        if name not in self.init:
-            raise SimulationError(f"{self.case.name}.INIT has no {name}")
-        return np.asarray(self.init[name][0].numpy_view(), dtype=np.float64).copy()
+        return self.files.static(name)
 
     def restart(self, step: int) -> dict[str, NDArray[np.float64]]:
         """Return the dynamic arrays at report step ``step``."""
-        if self._unified is not None:
-            view = self._unified.restart_view(report_step=step)
-        else:
-            path = Path(f"{self.case}.X{step:04d}")
-            if not path.exists():
-                raise SimulationError(
-                    f"{self.case.name} has no restart at report step {step} (the deck needs "
-                    "RPTRST BASIC=2 DEN, so that restarts hold the densities)"
-                )
-            view = self._file(str(path))
-        arrays: dict[str, NDArray[np.float64]] = {}
-        for name in ("PRESSURE", "SOIL", "SWAT", "SGAS", "OIL_DEN", "WAT_DEN", "GAS_DEN"):
-            if name in view:
-                arrays[name] = np.asarray(view[name][0].numpy_view(), dtype=np.float64).copy()
+        # Straight to the step (no other restart, nor any date, is read), as before.
+        try:
+            time = self.files.at_step(step)
+        except MissingState:
+            raise SimulationError(
+                f"{self.case.name} has no restart at report step {step} (the deck needs "
+                "RPTRST BASIC=2 DEN, so that restarts hold the densities)"
+            ) from None
+        names = ("PRESSURE", "SOIL", "SWAT", "SGAS", "OIL_DEN", "WAT_DEN", "GAS_DEN")
+        arrays = self.files.state(time, names, skip_missing=True)
         if "PRESSURE" not in arrays:
             raise SimulationError(f"{self.case.name}: no PRESSURE at report step {step}")
         if "SOIL" not in arrays:  # PET-fork: the unwritten saturation is 1 - the others

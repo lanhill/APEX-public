@@ -56,7 +56,7 @@ Registry = Literal[
     "reflectivity", "avo_attributes", "displacement_kernels", "chop_components",
     "converter_skills", "geomodeling_skills", "variogram_estimators", "simulation_skills",
     "surrogate_models",
-    "surrogate_designs",
+    "surrogate_designs", "case_state_readers",
 ]  # fmt: skip
 
 

@@ -186,6 +186,8 @@ module = [
     "torch.*",
     "meshio",
     "meshio.*",
+    "ogs",
+    "ogs.*",
 ]
 ignore_missing_imports = true
 

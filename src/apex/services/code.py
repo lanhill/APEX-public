@@ -144,6 +144,47 @@ def workspace_member(path: str, members: list[str], excluded: list[str]) -> bool
     return not any(fnmatch.fnmatchcase(path, posixpath.normpath(e)) for e in excluded)
 
 
+def workspace_extras(
+    show: Callable[[str], str], files: Sequence[str], *, strict: bool = False
+) -> set[str]:
+    """Return the extras a commit's ``pyproject.toml`` and its workspace members' define.
+
+    A copy syncs every package, so a member's extra is one the copy can have.
+    Members are the folders ``[tool.uv.workspace]`` names (:func:`workspace_member`, its
+    ``exclude`` honoured).
+
+    Parameters
+    ----------
+    show
+        Returns a file's text at the commit, by its path (``git show COMMIT:PATH``).
+    files
+        The commit's files (``git ls-tree -r --name-only COMMIT``).
+    strict
+        Raise on a member's ``pyproject.toml`` that is not valid TOML (else it is skipped).
+
+    Raises
+    ------
+    tomllib.TOMLDecodeError
+        If the root's ``pyproject.toml`` (or, with ``strict``, a member's) is not valid TOML.
+    """
+    root = tomllib.loads(show("pyproject.toml"))
+    defined = set(root.get("project", {}).get("optional-dependencies", {}))
+    workspace = root.get("tool", {}).get("uv", {}).get("workspace", {})
+    members, excluded = workspace.get("members", []), workspace.get("exclude", [])
+    for name in files:
+        folder = name.removesuffix("/pyproject.toml")
+        if folder == name or not workspace_member(folder, members, excluded):
+            continue
+        try:
+            project = tomllib.loads(show(name))
+        except tomllib.TOMLDecodeError:
+            if strict:
+                raise
+            continue
+        defined |= set(project.get("project", {}).get("optional-dependencies", {}))
+    return defined
+
+
 def _segments_match(parts: list[str], wanted: list[str]) -> bool:
     if not wanted:
         return not parts
@@ -245,26 +286,24 @@ class CodeCopies:
         every package, so a member's extra is one the copy can have.
         """
         try:
-            root = tomllib.loads(self._git("show", f"{commit}:pyproject.toml"))
-        except (CodeError, tomllib.TOMLDecodeError):
+            self._git("show", f"{commit}:pyproject.toml")
+        except CodeError:
             return None
-        defined = set(root.get("project", {}).get("optional-dependencies", {}))
-        workspace = root.get("tool", {}).get("uv", {}).get("workspace", {})
-        members, excluded = workspace.get("members", []), workspace.get("exclude", [])
         try:
             files = self._git("ls-tree", "-r", "--name-only", commit).splitlines()
         except CodeError:
-            return defined
-        for name in files:
-            folder = name.removesuffix("/pyproject.toml")
-            if folder == name or not workspace_member(folder, members, excluded):
-                continue
+            files = []
+
+        def show(path: str) -> str:
             try:
-                project = tomllib.loads(self._git("show", f"{commit}:{name}"))
-            except (CodeError, tomllib.TOMLDecodeError):
-                continue
-            defined |= set(project.get("project", {}).get("optional-dependencies", {}))
-        return defined
+                return self._git("show", f"{commit}:{path}")
+            except CodeError:
+                return ""  # a member's file the commit lacks: no extras
+
+        try:
+            return workspace_extras(show, files)
+        except tomllib.TOMLDecodeError:
+            return None
 
     @classmethod
     def from_settings(cls, settings: JobsSection, root: Path) -> "CodeCopies":

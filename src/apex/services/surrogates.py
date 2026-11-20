@@ -59,6 +59,7 @@ from apex.algorithms.surrogates.domain import (
     refuse_outside,
 )
 from apex.algorithms.surrogates.gate import gate
+from apex.core.case_state import CaseStateReaderFactory
 from apex.core.errors import (
     ApexError,
     ConfigError,
@@ -732,11 +733,14 @@ def surrogate_case(
     fields: Sequence[str] = (),
     field_times: Sequence[str] = (),
     field_cells: int | None = None,
+    field_plugin: str | None = None,
 ) -> SurrogateCase:
     """Compose the stack a build (or a check) runs, from the case's configuration.
 
     ``keys`` are what the full runs answer (:func:`case_keys`), ``variances`` their
     observation errors' for a gate against them (``None``: relative errors).
+    ``field_plugin`` is the surrogate the fields are saved for: whether it needs a
+    structured grid (:func:`field_reader`).
 
     Raises
     ------
@@ -768,7 +772,9 @@ def surrogate_case(
         executor = executors.create(case.execution.name, **case.execution.options)
         inner, cells = stack.simulator, 0
         if fields:
-            inner, cells = _field_stack(case, stack.simulator, fields, field_times, field_cells)
+            inner, cells = _field_stack(
+                case, stack.simulator, fields, field_times, field_cells, field_plugin
+            )
         simulator = parameterized(inner, properties)
         composition.check_executor(executor, simulator)
         composition.prepare_remote(executor, simulator, case)
@@ -869,12 +875,16 @@ def _field_stack(
     fields: Sequence[str],
     times: Sequence[str],
     cells: int | None,
+    plugin: str | None = None,
 ) -> tuple[Simulator, int]:
     """Return the stack that also answers the state fields' keys, and the fields' cells.
 
-    A deck simulator is wrapped with :class:`~apex.simulation.state_fields.StateFieldModel`
-    (restart arrays on the deck's grid, ``DIMENS``/``SPECGRID``); any other simulator must
-    answer the field keys itself (``field_cells`` given), e.g. ``linear`` with ``fields``.
+    A simulator that leaves case files is wrapped with
+    :class:`~apex.simulation.state_fields.StateFieldModel`, reading through the simulator's
+    case-state reader (:func:`field_reader`: the mesh and states, a structured grid
+    for a grid-based ``plugin``); a deck's grid (``DIMENS``/``SPECGRID``) gives the cells,
+    else ``field_cells``. Any other simulator must answer the field keys itself
+    (``field_cells`` given), e.g. ``linear`` with ``fields``.
 
     Raises
     ------
@@ -917,13 +927,54 @@ def _field_stack(
         total = int(np.prod(grid)) if grid is not None else int(cells or 0)
         if cells is not None and cells != total:
             raise ConfigError(f"[case] field_cells = {cells}, but the deck's grid has {total}")
-        return GeophysicsSimulator(simulator, StateFieldModel(fields, times, total)), total
+        # the snapshots read the reader's mesh and states alone.
+        reader, structured = field_reader(case.simulator.name, plugin)
+        model = StateFieldModel(fields, times, total, reader, structured=structured)
+        return GeophysicsSimulator(simulator, model), total
     if cells is None:
         raise ConfigError(
             f"[case] fields with the {case.simulator.name!r} simulator, which has no restart "
             "files: give field_cells, and the simulator must answer the field keys itself"
         )
     return simulator, int(cells)
+
+
+def field_reader(simulator: str, plugin: str | None) -> tuple[CaseStateReaderFactory, bool]:
+    """Return the case-state reader for field snapshots, and whether a grid is needed.
+
+    decision 5. The snapshots need a reader's mesh and states only. A
+    surrogate plugin takes an unstructured mesh (its cells in the reader's order) only when
+    it declares ``unstructured_fields = True`` (``apex.core.surrogates``); any other needs a
+    structured grid, so a reader that does not declare ``structured_mesh`` is refused before
+    any run. ``plugin`` ``None`` (or unknown: refused where the surrogate is created) asks
+    for no grid here; :class:`~apex.simulation.state_fields.StateFieldModel` is then not
+    told to refuse an unstructured mesh.
+
+    Raises
+    ------
+    ConfigError
+        If the simulator has no reader, or the plugin needs a structured grid the reader does
+        not promise.
+    """
+    reader = composition.case_state_reader(simulator, "[case] fields")
+    if plugin is None:
+        return reader, False
+    try:
+        factory = surrogate_models.factory(plugin)
+    except UnknownPluginError:
+        return reader, False
+    if bool(getattr(factory, "unstructured_fields", False)):
+        return reader, False
+    capabilities = frozenset(getattr(reader, "capabilities", ()))
+    if "structured_mesh" not in capabilities:
+        raise ConfigError(
+            f"[case] fields: the surrogate {plugin!r} needs its fields on a structured grid "
+            f"(nx, ny, nz), and the {simulator!r} simulator's case-state reader does not give "
+            "one (structured_mesh); fields on an unstructured mesh are never mapped onto a "
+            "grid (decision 5): use a surrogate that takes them "
+            "(unstructured_fields)"
+        )
+    return reader, True
 
 
 @dataclass(frozen=True)
@@ -1209,7 +1260,7 @@ def design_plan(config: SurrogateConfig) -> BuiltinDesign | AdaptiveDesign:
         if factory is not None and not callable(getattr(factory, "predict_fields", None)):
             raise ConfigError(
                 f"[case] fields: the surrogate {config.surrogate.model!r} predicts no fields "
-                "(predict_fields); use a field surrogate (unet_fields) or remove fields"
+                "(predict_fields); use a field surrogate (one with predict_fields) or remove fields"
             )
         if config.coarse is not None:
             raise ConfigError("[case] fields with a [coarse] stack are not supported yet")
@@ -2194,7 +2245,7 @@ def _build_case(
         case_config, keys, variances, execution=config.execution,
         output_dir=config.surrogate.output_dir, coarse=config.coarse,
         fields=config.case.fields, field_times=config.case.field_times,
-        field_cells=config.case.field_cells,
+        field_cells=config.case.field_cells, field_plugin=config.surrogate.model,
     )  # fmt: skip
     return _with_gradients(config, case) if _wants_gradients(config) else case
 
@@ -3284,6 +3335,7 @@ def check_surrogate(
             # The fields it was trained and gated on, on the same cells.
             fields=manifest.fields, field_times=manifest.field_times,
             field_cells=_field_cells(trained) if manifest.fields else None,
+            field_plugin=manifest.plugin,
         )  # fmt: skip
         mismatches = manifest.provenance.stack_mismatches(case.provenance)
         if mismatches:

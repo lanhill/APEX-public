@@ -96,6 +96,9 @@ REGISTRIES: dict[str, Registry[Any]] = {
     # a surrogate build's design plans, core's and adaptive ones (entry points
     # apex.surrogate_designs).
     "surrogate_designs": plugins.surrogate_designs,
+    # readers of a simulated case's state, by simulator name (entry points
+    # apex.case_state_readers); the services choose them, configurations name none.
+    "case_state_readers": plugins.case_state_readers,
 }
 
 #: The workflow each registry serves, for front ends that group plugins (the web UI).
@@ -132,6 +135,7 @@ WORKFLOWS: dict[str, str] = {
     "simulation_skills": "simulation",
     "surrogate_models": "simulation",
     "surrogate_designs": "simulation",
+    "case_state_readers": "simulation",
     **dict.fromkeys(
         ("petro_elastic_models", "reflectivity", "avo_attributes", "displacement_kernels"),
         "simulation",
@@ -163,6 +167,8 @@ SUPPLIED: dict[str, frozenset[str]] = {
     "update_strategies": frozenset({"localization", "state_variables", "property_map"}),
     "localizations": frozenset({"block_sizes", "variable_names"}),
     "executors": frozenset({"pools"}),
+    # A reader opens the case the services give it.
+    "case_state_readers": frozenset({"case"}),
 }
 
 

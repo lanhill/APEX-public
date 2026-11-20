@@ -87,7 +87,9 @@ from apex.algorithms.geophysics import (
     regular_stations,
     time_window,
 )
+from apex.core.case_state import CaseStateReaderFactory
 from apex.core.errors import ConfigError, SimulationError
+from apex.domain.case_state import CornerGrid
 from apex.domain.config import (
     AVOOptions,
     ConstantOverburdenSection,
@@ -260,7 +262,7 @@ class AVOSurvey:
         """Return each field datatype and its angle's index."""
         return {avo_datatype(self.datatype, a): n for n, a in enumerate(self.model.angles_deg)}
 
-    def values(self, grid: Grid, vp: Array, vs: Array, rho: Array) -> Array:
+    def values(self, grid: CornerGrid, vp: Array, vs: Array, rho: Array) -> Array:
         """Return the fields ``(n_angle, field_size)`` from the grid's elastic properties.
 
         ``vp``, ``vs`` and ``rho`` are ``(n_x, n_y, n_z)``; inactive cells' values are
@@ -575,6 +577,9 @@ class GeophysicsModel:
         oil phase's saturation and density are the water's for the petro-elastic model.
         ``None`` when the deck's text cannot tell (a templated RUNSPEC): an oil-gas run
         with a CO₂ petro-elastic model is then refused.
+    reader
+        The case-state reader the services chose for the simulator: each
+        member's case is opened with it; ``None`` reads the Eclipse-format files.
     """
 
     pem: PetroElasticModel | None
@@ -584,6 +589,7 @@ class GeophysicsModel:
     brine_as_oil: bool | None = False
     parameters: tuple[PemParameter, ...] = ()
     temperature: CellTemperature | None = None
+    reader: CaseStateReaderFactory | None = None
     _fields: dict[str, tuple[int, int]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -857,7 +863,7 @@ class GeophysicsModel:
             If a key is not one of the configured fields, or the case lacks a restart or
             an array at a vintage.
         """
-        state = CaseState(case)
+        state = CaseState(case if self.reader is None else self.reader(case))
         if (
             self.brine_as_oil is None
             and set(state.phases) == {"oil", "gas"}
@@ -967,7 +973,7 @@ class GeophysicsModel:
             except ValueError as error:
                 raise ConfigError(f"[geophysics] pem: {error}") from error
 
-    def _check_grid(self, grid: Grid, case: Path) -> None:
+    def _check_grid(self, grid: CornerGrid, case: Path) -> None:
         if grid.shape != self.reference.shape:
             raise ConfigError(
                 f"{case.name}'s grid is {grid.shape}, grid_file's {self.reference.shape}"
@@ -992,7 +998,9 @@ class GeophysicsModel:
                     "cells (an updated porosity under MINPV can deactivate cells)"
                 )
 
-    def _elastic(self, state: CaseState, grid: Grid, date: dt.date) -> tuple[Array, Array, Array]:
+    def _elastic(
+        self, state: CaseState, grid: CornerGrid, date: dt.date
+    ) -> tuple[Array, Array, Array]:
         """Return Vp, Vs and density on the grid ``(n_x, n_y, n_z)`` at ``date``."""
         # The configuration gives AVO data both.
         assert self.pem is not None
@@ -1372,13 +1380,15 @@ def build_geophysics_model(
     brine_as_oil: bool | None = False,
     parameters: Sequence[PemParameter] = (),
     temperature: CellTemperature | None = None,
+    reader: CaseStateReaderFactory | None = None,
 ) -> GeophysicsModel:
     """Build the forward model of ``[geophysics]`` from its plugins, one per datum.
 
     ``reflectivities``, ``attributes`` and ``kernels`` are the plugins of each
     ``[[geophysics.data]]``, in order (``None`` where a kind has none), created by the
     composition root from the registries. ``completions`` are the deck's wells' completed
-    columns, 1-based ``(I, J)``, for a region around them.
+    columns, 1-based ``(I, J)``, for a region around them. ``reader`` is the simulator's
+    case-state reader, chosen by the composition root.
 
     Raises
     ------
@@ -1423,5 +1433,5 @@ def build_geophysics_model(
         raise ValueError("[geophysics]: AVO data need a petro-elastic model")
     return GeophysicsModel(
         pem, _overburden(section, reference), tuple(surveys), reference, brine_as_oil,
-        tuple(parameters), temperature,
+        tuple(parameters), temperature, reader,
     )  # fmt: skip

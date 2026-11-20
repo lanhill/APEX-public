@@ -1550,6 +1550,40 @@ def test_a_build_saves_state_fields_and_gates_their_prediction(tmp_path: Path) -
         surrogate_models.remove("test_affine_fields")
 
 
+def test_builds_and_checks_tell_the_field_stack_their_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether a grid is needed is the plugin's (``field_reader``), so both
+    a build and a check name it to the field stack."""
+    told: list[str | None] = []
+    original = surrogates._field_stack
+
+    def spy(*args: object) -> tuple[object, int]:
+        told.append(cast(str | None, args[5]))
+        return original(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(surrogates, "_field_stack", spy)
+    surrogate_models.register("test_affine_fields")(_AffineFields)
+    try:
+        _field_case(tmp_path)
+        path = write_build(tmp_path, name="fields")
+        path.write_text(
+            path.read_text()
+            .replace('model = "test_affine_build"', 'model = "test_affine_fields"')
+            .replace('config_file = "case.toml"', f'config_file = "case.toml"\n{FIELDS}')
+        )
+        result = surrogates.build(path)
+        assert told
+        assert set(told) == {"test_affine_fields"}
+        told.clear()
+        surrogates.check_surrogate(
+            result.path / "model" / "surrogate.json", tmp_path / "case.toml", runs=2, seed=9
+        )
+        assert told == ["test_affine_fields"]
+    finally:
+        surrogate_models.remove("test_affine_fields")
+
+
 def test_what_state_fields_refuse(tmp_path: Path) -> None:
     _field_case(tmp_path)
     path = write_build(tmp_path, name="plain")

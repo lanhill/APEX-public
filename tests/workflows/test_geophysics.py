@@ -15,7 +15,7 @@ import pytest
 from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError
-from apex.core.plugins import model_error_models, simulators
+from apex.core.plugins import case_state_readers, model_error_models, simulators
 from apex.core.simulation import MemberInput
 from apex.domain.config import (
     FileWaveletSection,
@@ -27,6 +27,7 @@ from apex.domain.config import (
 )
 from apex.domain.observations import DataKey, ObservationSet
 from apex.services import composition
+from apex.simulation.eclipse_files import EclipseFiles
 from apex.simulation.geophysics import GeophysicsSimulator, Grid
 from apex.simulation.model_error import RESIDUAL_PREFIX, ModelErrorSimulator
 from apex.workflows.geophysics import AVOSurvey, GeophysicsModel
@@ -104,11 +105,14 @@ class ScalarOffset:
 @pytest.fixture(autouse=True)
 def plugins() -> Iterator[None]:
     simulators.register("test_box_flow")(BoxFlow)
+    # Its runs are Eclipse-format files: their reader is core's.
+    case_state_readers.add("test_box_flow", EclipseFiles)
     model_error_models.register("test_scalar_offset")(ScalarOffset)
     try:
         yield
     finally:
         simulators._factories.pop("test_box_flow")
+        case_state_readers.remove("test_box_flow")
         model_error_models._factories.pop("test_scalar_offset")
 
 
@@ -284,7 +288,9 @@ def test_a_simulator_without_files_is_refused_with_geophysics(tmp_path: Path) ->
     )
     simulators.register("test_in_memory")(InMemory)
     try:
-        with pytest.raises(ConfigError, match="runs leave files"):
+        # Refused by the capability check, before the stack (its reader is the
+        # reason now; GeophysicsSimulator's own "runs leave files" check stays behind it).
+        with pytest.raises(ConfigError, match="has no case-state reader"):
             composition.build_run(in_memory)
     finally:
         simulators._factories.pop("test_in_memory")
@@ -641,6 +647,7 @@ stations = { spacing = 100.0, depth = 100.0 } }
 
 
 def test_gravity_and_displacement_are_matched(tmp_path: Path) -> None:
+    case_state_readers.add("test_box_potential", EclipseFiles)
     simulators.register("test_box_potential")(BoxPotential)
     try:
         _cases.write_grid(tmp_path / "REF.EGRID", SHAPE)
@@ -688,6 +695,7 @@ def test_gravity_and_displacement_are_matched(tmp_path: Path) -> None:
         result = composition.start(path)
     finally:
         simulators._factories.pop("test_box_potential")
+        case_state_readers.remove("test_box_potential")
     first, last = result.history[0], result.history[-1]
     assert last.data_mismatch_mean < 0.2 * first.data_mismatch_mean
 
@@ -827,6 +835,7 @@ options = { mean = 0.0, std = 1.5 }
 def test_patchiness_is_updated_with_the_reservoir_model(tmp_path: Path) -> None:
     """soft_sand's patchiness from the state variable pem_q (logit), auxiliary
     (no true value: the truth takes the fallback 0.85), updated by ES-MDA."""
+    case_state_readers.add("test_box_dense", EclipseFiles)
     simulators.register("test_box_dense")(BoxDense)
     try:
         _cases.write_grid(tmp_path / "REF.EGRID", SHAPE)
@@ -868,6 +877,7 @@ def test_patchiness_is_updated_with_the_reservoir_model(tmp_path: Path) -> None:
         result = composition.start(path)
     finally:
         simulators._factories.pop("test_box_dense")
+        case_state_readers.remove("test_box_dense")
     first, last = result.history[0], result.history[-1]
     assert last.data_mismatch_mean < first.data_mismatch_mean
     checkpoints = tmp_path / "runs" / "run" / "checkpoints"
