@@ -13,7 +13,9 @@ Shapes: grid arrays are ``(n_x, n_y, n_z)`` in Eclipse (F) order, i fastest; cel
 """
 
 import datetime as dt
-from collections.abc import Mapping
+import math
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -21,13 +23,111 @@ import numpy as np
 from numpy.typing import NDArray
 
 __all__ = [
+    "DEFAULT_BYTES_PER_VALUE",
     "SI_UNITS",
     "CaseMesh",
     "CornerGrid",
+    "StateAt",
+    "StateOutput",
     "StateTime",
     "UnitSystem",
+    "describe_state_time",
+    "parse_state_times",
+    "same_instant",
+    "state_output_bytes",
+    "state_window",
     "to_si",
 ]
+
+#: A time a consumer reads a state at: a date (the run's calendar
+#: day) or a number of seconds since the run's start (``StateTime.seconds``).
+StateAt = dt.date | float
+
+#: Text that is a number: seconds when it is a field time.
+_NUMBER = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?")
+
+
+def parse_state_times(labels: Sequence[str]) -> list[StateAt]:
+    """Return field-time labels as dates (ISO) or as seconds (numbers), never a mix.
+
+    A label that reads as a number is seconds since the run's start
+    (finite, not negative); any other must be an ISO date (``YYYY-MM-DD``). Eight digits that
+    are a valid date in ISO's basic form (``20200101``) are refused as ambiguous.
+
+    Raises
+    ------
+    ValueError
+        If a label is neither, a number is negative or not finite, or the labels mix dates
+        and seconds.
+    """
+    found: list[StateAt] = []
+    for label in labels:
+        text = str(label).strip()
+        if re.fullmatch(r"\d{8}", text) and _compact_date(text):
+            # ISO's basic form, which date.fromisoformat reads (and field times once meant):
+            # ambiguous with seconds, so neither is guessed.
+            raise ValueError(
+                f"{label!r} reads both as the date {text[:4]}-{text[4:6]}-{text[6:]} and as "
+                f"seconds: write the date as {text[:4]}-{text[4:6]}-{text[6:]}, or the seconds "
+                f"with a decimal point ({text}.0)"
+            )
+        if _NUMBER.fullmatch(text):
+            seconds = float(text)
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError(f"{label!r}: seconds since the run's start must be >= 0")
+            found.append(seconds)
+        else:
+            try:
+                found.append(dt.date.fromisoformat(text))
+            except ValueError:
+                raise ValueError(
+                    f"{label!r} is neither an ISO date nor a number of seconds"
+                ) from None
+    kinds = {isinstance(t, dt.date) for t in found}
+    if len(kinds) > 1:
+        raise ValueError(
+            "the times mix ISO dates and seconds: give all as dates or all as seconds since "
+            "the run's start"
+        )
+    return found
+
+
+def _compact_date(text: str) -> bool:
+    """Whether eight digits are a valid date in ISO's basic form (``YYYYMMDD``)."""
+    try:
+        dt.date(int(text[:4]), int(text[4:6]), int(text[6:]))
+    except ValueError:
+        return False
+    return True
+
+
+def state_window(time: StateAt, start: dt.datetime | None) -> tuple[float, float]:
+    """Return the seconds ``[low, high)`` since ``start`` in which a state answers ``time``.
+
+    A date asks for its day (``start`` needed); seconds for their millisecond, as the
+    readers round a state's seconds to the millisecond before dating it.
+
+    Raises
+    ------
+    ValueError
+        If ``time`` is a date and there is no ``start``.
+    """
+    if isinstance(time, dt.date):
+        if start is None:
+            raise ValueError(f"{time.isoformat()} is a date, and the run has no start date")
+        low = (dt.datetime.combine(time, dt.time()) - start).total_seconds()
+        return low, low + 86400.0
+    return time - 0.0005, time + 0.0005
+
+
+def same_instant(a: float, b: float) -> bool:
+    """Whether two times in seconds are equal to the millisecond (see :func:`state_window`)."""
+    return round(a * 1000.0) == round(b * 1000.0)
+
+
+def describe_state_time(time: StateAt) -> str:
+    """Return a time for messages: an ISO date, or ``<seconds> s``."""
+    return time.isoformat() if isinstance(time, dt.date) else f"{time:.15g} s"
 
 
 @dataclass(frozen=True)
@@ -89,6 +189,60 @@ class CaseMesh:
     def structured(self) -> bool:
         """Whether the mesh is a structured grid (``dims`` given)."""
         return self.dims is not None
+
+
+@dataclass(frozen=True)
+class StateOutput:
+    """What a simulator's runs will write for a state reader, known before any run.
+
+    A simulator's answer to the states a consumer asks for: the size of the
+    fields its reader gives, and whether its mesh is a structured grid for this case (a
+    per-case answer, for a reader that cannot declare ``structured_mesh`` for every case).
+
+    Attributes
+    ----------
+    cells
+        The fields' size: ``n_x * n_y * n_z`` of a structured grid, else the mesh's cells
+        (:attr:`CaseMesh.cells`).
+    structured
+        Whether the reader's :class:`CaseMesh` of this case is a structured grid.
+    notes
+        What the simulator could not check before the run (its input's expressions, say):
+        the reader tells a missing state after the run.
+    bytes_per_value
+        About how many bytes the runs' files take per value of one field at one written
+        state, the format's overhead included (the folders' added size, an
+        estimate stated in ``apex validate``'s plan); ``None``: not known, and
+        :data:`DEFAULT_BYTES_PER_VALUE` is assumed.
+    """
+
+    cells: int
+    structured: bool
+    notes: tuple[str, ...] = ()
+    bytes_per_value: float | None = None
+
+
+#: The bytes per value assumed when a simulator states none: a 64-bit float.
+DEFAULT_BYTES_PER_VALUE = 8.0
+
+
+def state_output_bytes(cells: int, fields: int, states: int, bytes_per_value: float) -> int:
+    """Return about how many bytes one run's state files add for the field snapshots.
+
+    ``cells x fields x states x bytes_per_value``, rounded up. It is an
+    estimate: a simulator may write more arrays or states than are read (its template
+    decides), and compression may make the files smaller.
+
+    Raises
+    ------
+    ValueError
+        If a count is negative or ``bytes_per_value`` is not positive and finite.
+    """
+    if min(cells, fields, states) < 0:
+        raise ValueError("cells, fields and states must not be negative")
+    if not (math.isfinite(bytes_per_value) and bytes_per_value > 0):
+        raise ValueError(f"bytes_per_value must be positive and finite, not {bytes_per_value}")
+    return math.ceil(cells * fields * states * bytes_per_value)
 
 
 @dataclass(frozen=True)

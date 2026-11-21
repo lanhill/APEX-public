@@ -184,3 +184,38 @@ def test_hard_data_are_read_only_from_the_callers_folders(tmp_path: Path) -> Non
     assert hidden.status_code == missing.status_code == 404
     assert own.status_code == 200, own.text
     assert any("estimated from the hard data" in n for n in own.json()["notes"])
+
+
+def test_skill_options_are_listed_and_checked(tmp_path: Path) -> None:
+    """A skill's options are in the listing; an unknown one is refused
+    before any folder is made."""
+    _, http, owner = _world(tmp_path)
+    skills = http.get("/v1/agents/convert/skills", headers=owner).json()
+    assert all(isinstance(s["options"], dict) for s in skills)
+    body = {"source": "decks/CASE.DATA", "options": {"colour": "red"}}
+    refused = http.post("/v1/agents/convert", headers=owner, json=body)
+    assert refused.status_code == STATUS, refused.text
+    assert "takes no option colour" in refused.text
+    assert not (tmp_path / "UI" / "owner" / "drafts" / "case-converter").exists()
+
+
+def test_a_guests_options_are_held_to_their_access(tmp_path: Path) -> None:
+    """The review: options never open a skill or an agent a guest has not got, and a bad
+    option leaves nothing in their drafts."""
+    root, http, _ = _world(tmp_path)
+    (root / "ui_access.toml").write_text(GUEST_ACCESS)
+    guest = {"Authorization": f"Bearer {ui_token(root, create=True, guest='alice')}"}
+
+    private = http.post("/v1/agents/convert", headers=guest,
+                        json={"source": "decks/CASE.DATA", "skill": "intersect",
+                              "options": {"vtk_states": True}})  # fmt: skip
+    body = {"source": "decks/CASE.DATA", "options": {"vtk_states": True}}
+    unknown = http.post("/v1/agents/convert", headers=guest, json=body)
+    (root / "ui_access.toml").write_text(GUEST_ACCESS.replace('"case-converter", ', ""))
+    no_agent = http.post("/v1/agents/convert", headers=guest, json=body)
+
+    assert private.status_code == 404
+    assert unknown.status_code == STATUS, unknown.text
+    assert "takes no option vtk_states" in unknown.text
+    assert no_agent.status_code == 404
+    assert list(tmp_path.rglob("drafts/case-converter/*")) == []

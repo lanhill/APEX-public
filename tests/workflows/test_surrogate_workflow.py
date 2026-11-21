@@ -1550,6 +1550,32 @@ def test_a_build_saves_state_fields_and_gates_their_prediction(tmp_path: Path) -
         surrogate_models.remove("test_affine_fields")
 
 
+def test_the_shared_mean_affine_field_surrogate_builds(tmp_path: Path) -> None:
+    """``apex.testing.MeanAffineFields`` (the packages' end-to-end field builds
+    check 3) fits, gates its fields and round-trips its files on the linear field case."""
+    from apex.testing import MeanAffineFields
+
+    surrogate_models.register("test_mean_affine_fields")(MeanAffineFields)
+    try:
+        _field_case(tmp_path)
+        path = write_build(tmp_path, name="means")
+        path.write_text(
+            path.read_text()
+            .replace('model = "test_affine_build"', 'model = "test_mean_affine_fields"')
+            .replace('config_file = "case.toml"', f'config_file = "case.toml"\n{FIELDS}')
+        )
+        result = surrogates.build(path)
+        assert result.complete
+        gate = json.loads((result.path / "gate.json").read_text())
+        assert any(d["datatype"] == "PRESSURE" for d in gate["datatypes"])
+        check = surrogates.check_surrogate(
+            result.path / "model" / "surrogate.json", tmp_path / "case.toml", runs=2, seed=9
+        )
+        assert check.summary.gate is not None
+    finally:
+        surrogate_models.remove("test_mean_affine_fields")
+
+
 def test_builds_and_checks_tell_the_field_stack_their_plugin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1558,7 +1584,7 @@ def test_builds_and_checks_tell_the_field_stack_their_plugin(
     told: list[str | None] = []
     original = surrogates._field_stack
 
-    def spy(*args: object) -> tuple[object, int]:
+    def spy(*args: object) -> tuple[object, int, float | None]:
         told.append(cast(str | None, args[5]))
         return original(*args)  # type: ignore[arg-type]
 
@@ -1580,6 +1606,50 @@ def test_builds_and_checks_tell_the_field_stack_their_plugin(
             result.path / "model" / "surrogate.json", tmp_path / "case.toml", runs=2, seed=9
         )
         assert told == ["test_affine_fields"]
+    finally:
+        surrogate_models.remove("test_affine_fields")
+
+
+def test_the_plan_states_the_fields_state_files_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``apex validate`` states about how much the runs' state
+    files add: cells x fields x field times x the simulator's bytes per value, per run and
+    over the plan's runs; a simulator without state files (``linear``) states none."""
+    surrogate_models.register("test_affine_fields")(_AffineFields)
+    try:
+        _field_case(tmp_path)
+        path = write_build(tmp_path, name="fields")
+        path.write_text(
+            path.read_text()
+            .replace('model = "test_affine_build"', 'model = "test_affine_fields"')
+            .replace('config_file = "case.toml"', f'config_file = "case.toml"\n{FIELDS}')
+        )
+        plan = surrogates.plan_build(surrogates.load_surrogate_config(path))
+        assert plan.state_bytes_per_run is None
+        assert plan.state_bytes is None
+        original = surrogates._field_stack
+
+        def sized(*args: object, **kwargs: object) -> tuple[object, int, float | None]:
+            simulator, cells, _ = original(*args, **kwargs)  # type: ignore[arg-type]
+            return simulator, cells, 8.0
+
+        monkeypatch.setattr(surrogates, "_field_stack", sized)
+        plan = surrogates.plan_build(surrogates.load_surrogate_config(path))
+        assert plan.state_bytes_per_run == 5 * 1 * 2 * 8  # cells, fields, times, bytes
+        assert plan.state_bytes == plan.state_bytes_per_run * plan.simulator_runs
+        assert plan.state_bytes_per_value == 8.0
+        # Plans with no new fine runs of fields: plan 'run' and a [coarse] stack are refused
+        # with fields, so no size is ever stated for them (not "0 B in all").
+        text = path.read_text()
+        path.write_text(text.replace('plan = "prior"', 'plan = "run"\nrun_dir = "nowhere"'))
+        with pytest.raises(ConfigError, match="hold no fields"):
+            surrogates.plan_build(surrogates.load_surrogate_config(path))
+        path.write_text(text + '\n[coarse]\noptions = { forward_file = "forward.npz" }\n')
+        # (Refused first for this plugin's not correcting a coarse stack; with one that does,
+        # "[case] fields with a [coarse] stack are not supported yet".)
+        with pytest.raises(ConfigError, match=r"\[coarse\]"):
+            surrogates.plan_build(surrogates.load_surrogate_config(path))
     finally:
         surrogate_models.remove("test_affine_fields")
 

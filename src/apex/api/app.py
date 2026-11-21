@@ -1713,6 +1713,10 @@ class AgentConvertBody(_Body):
     request: str | None = Field(default=None, max_length=2000)
     name: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
     skill: str | None = None
+    options: dict[str, bool | int | float | str] | None = Field(
+        default=None,
+        description="The converter skill's options (`GET /v1/agents/convert/skills` lists them).",
+    )
     model: bool = False
 
 
@@ -1968,9 +1972,15 @@ def _agent_routes(
         for name in names:
             skill = converter_skills.create(name)
             summary = (type(skill).__doc__ or "").strip().splitlines()[0]
+            options = {
+                option: {"kind": spec.kind.__name__, "choices": list(spec.choices),
+                         "description": spec.description,
+                         "default": getattr(skill, option, None)}
+                for option, spec in sorted(skill.options.items())
+            }  # fmt: skip
             found.append({"name": name, "capabilities": sorted(skill.capabilities),
                           "formats": list(skill.formats), "simulator": skill.simulator,
-                          "summary": summary})  # fmt: skip
+                          "summary": summary, "options": options})  # fmt: skip
         return found
 
     @app.post("/v1/agents/convert")
@@ -1990,9 +2000,12 @@ def _agent_routes(
             converter.max_cells = service.jobs.settings.agents.case_converter.ui_max_cells
         skill = converter.skill_for(source, body.skill)
         skill_allowed(who, skill.name)
+        if body.options:
+            skill.configure(body.options)  # refused before a folder is made
         target, shown = convert_folder(who, body.name or case_name(source))
         outcome = converter.convert(source, target, history=history, request=body.request,
-                                    name=body.name, skill=skill.name)  # fmt: skip
+                                    name=body.name, skill=skill.name,
+                                    options=body.options)  # fmt: skip
         return {"draft": f"{shown}/config.toml", "skill": outcome.skill,
                 "valid": outcome.valid, "errors": outcome.validation.errors,
                 "plan": None if outcome.validation.plan is None

@@ -267,12 +267,21 @@ sigma_ratio = 0.5
 ```
 
 - **Deck simulators** (`opm_flow`, `eclipse`): every run reads the fields from its restart files at those dates, on the deck's whole grid (`DIMENS` or `SPECGRID`) in Eclipse order, with inactive cells 0. The deck must write a restart at each date with those arrays (`RPTRST`).
-- **Other simulators** must answer the field keys themselves; give `field_cells`.
+- **Other simulators** with a case-state reader read the fields through it; a simulator that states what its input writes checks it before any run. Any other simulator must answer the field keys itself; give `field_cells`.
+- **Unstructured meshes.** A reader whose mesh is not a structured grid gives the fields over its cells in its own order, never mapped onto a grid. Only a plugin that declares it takes such fields (`unstructured_fields`); a plugin that needs a grid is refused before any run, with the reason.
+- **The cells' faces.** A case-state reader may also give the faces between its cells (`connectivity`: each pair of cells sharing a face, with the face's area and the distance between the cells' centres; the deck simulators' reader gives the grid's faces between active cells, without non-neighbour connections). A surrogate that takes them gets the first run's, recorded in the build's `fields_connectivity.npz`.
+- **Times in seconds.** `field_times` may instead be numbers: seconds since the run's start, for a simulator whose run has no calendar (`field_times = [86400, 2592000]`). A state matches when its time equals the number to the millisecond, the later of two. A list is all dates or all seconds, never a mix. A number's label in the snapshots is its text as given. Eight digits that are also a date (`20200101`) are refused: write `2020-01-01`, or `20200101.0` for seconds. Seconds are never taken as the keys' times: they do not extend the times a surrogate is validated at. With a deck simulator, seconds skip the restart check before the run (that check is by date).
+- **Regions.** A simulator whose cases have several regions reads the fields of one: `field_region = "NAME"`. All the fields of a build come from that region's mesh (one cell count, one set of keys); a build per region reads two. A simulator of one region refuses `field_region` before any run.
+- **The state files' size.** `apex validate` states about how much the runs' state files add, per run and over the plan's runs: cells × fields × field times × the bytes the simulator's format takes per value (4 for a deck's restarts, over its active cells where the template's `ACTNUM` tells them; a simulator that states what its input writes gives its own, else 8). It is an estimate of the fields read: a simulator may write more arrays or times than are read (a deck's restarts hold every array it writes at every report step), and compression may shrink them. The web UI's editor shows it with the plan. The files stay in the runs' folders unless the simulator's options or `[output] keep_simulations` prune them.
 - **The snapshots** keep the fields beside the data (`snapshots.npz`), covered by its digest; the fields join the build's fingerprint.
 - **The gate** judges each predicted field by one pooled relative RMS error over its cells, dates and held-out runs: the RMS error over the RMS change from the first date for a pressure, over the field's range for other fields. Cells that are 0 throughout (inactive) are left out. The tolerance is `[gate] relative`'s for the field's kind (0.05 for pressures and saturations). `apex surrogate check` runs and gates the fields too.
 - **The deck's restarts** are checked before any run, as far as its text tells: a field date with no restart is refused.
 - **Refused:** a plugin that predicts no fields; fields with a `[coarse]` stack, an adaptive plan or plan `run`; a case with `[geophysics]`.
 - **History matching** still refuses field observations with a surrogate. Here the fields serve predictions and figures.
+
+## Capabilities
+
+Each surrogate plugin declares what it takes and gives: its inputs (the member's `state`, the wells' `controls`, the member's own `early_responses`, a `coarse_responses` forecast), its outputs (`responses` at data keys, state `fields`), and whether it extrapolates in time, gives an uncertainty (`predict_std`) or supplies gradients. `apex plugins` prints them under each surrogate plugin, with the workflows it serves (`--json`: `capabilities` and `serves`). Each workflow refuses a model that lacks what it needs, naming the plugin, the capability and what to use instead: a history match refuses a model that does not take the member's state (the state is what it updates); a prediction refuses a model that needs a coarse forecast (its coarse stack would have to run to the horizon); and an optimization refuses a model that does not take the wells' controls (the controls are what it changes) or one that needs each member's early responses. A build over an optimization's controls whose outputs are the objective's responses is for that optimization, so a plugin, with its options, that does not take controls is refused there before any run; other builds are not refused by these rules, since a model built on a history-matching case, or on an optimization's listed series, may serve predictions. A plugin written before declarations gets capabilities derived from its methods (the state and the controls).
 
 ## The gate
 
@@ -348,6 +357,7 @@ max_refits = 2
 
 1. Validate the run: `uv run apex validate CASE.toml`. The plan counts the surrogate's evaluations apart from the simulator's runs (the checks, the posterior's forecast, and every forecast where the simulator may take over); only the simulator's runs count towards approval. The run is refused when:
    - the model did not pass its gate, or its last check failed;
+   - its plugin does not take the member's state ([Capabilities](#capabilities));
    - it was built for another simulator stack or case;
    - the run observes a key (in any role: history matching, cross validation, test) the model was not gated on;
    - the case has `[model_error]` and the surrogate gives no block states, or its model-error model cannot read them, or `on_check_failure = "refit"` (see [Model error on a surrogate](mec.md#model-error-on-a-surrogate));
@@ -396,7 +406,7 @@ runs/<name>/
 
 ## Optimization with a surrogate
 
-1. Build a surrogate of the optimization (its configuration as `[case] config_file`, `outputs = "responses"`, `[design] plan = "lhs"`), and read its gate.
+1. Build a surrogate of the optimization (its configuration as `[case] config_file`, `outputs = "responses"`, `[design] plan = "lhs"`), and read its gate. Its plugin must take the wells' controls ([Capabilities](#capabilities)); one that does not is refused before any run.
 2. Add a `[surrogate]` section to the optimization's configuration:
 
    ```toml
@@ -410,7 +420,7 @@ runs/<name>/
    # max_evaluations = 50000  # the run's bound on surrogate evaluations
    ```
 
-3. Validate it: `uv run apex validate OPT.toml`. The plan gives the surrogate's evaluations apart from the simulator's runs; only the simulator's runs count towards approval. The run is refused when the model did not pass its gate or its last check failed, was built for another simulator stack, or on other inputs (controls, parameterizations, `[model]` arrays), or does not answer the objective's keys.
+3. Validate it: `uv run apex validate OPT.toml`. The plan gives the surrogate's evaluations apart from the simulator's runs; only the simulator's runs count towards approval. The run is refused when the model's plugin does not take the controls, the model did not pass its gate or its last check failed, was built for another simulator stack, or on other inputs (controls, parameterizations, `[model]` arrays), or does not answer the objective's keys.
 4. Run it: `uv run apex optimize OPT.toml`.
 
 What happens during the run:

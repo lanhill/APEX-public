@@ -59,6 +59,9 @@ export function stepText(event: ChatEvent): string | null {
       if (event.data.ok) return `${tool} answered`;
       // Usually a refusal the model then acts on (a planner asking for a revision), not a crash.
       return event.data.error ? `${tool} refused: ${String(event.data.error)}` : `${tool} refused the request`;
+    case "model_retry":
+      // The model took too long; it is asked once more with a shorter conversation.
+      return "retried after a timeout";
     case "fallback":
       return `no model answer: ${String(event.data.reason ?? "")}`;
     default:

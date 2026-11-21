@@ -8,12 +8,20 @@ and the agent needs no change.
 
 A skill does what its ``capabilities`` name; :class:`ConverterSkill`'s other methods refuse
 with the reason, so an unsupported request fails loudly, never silently.
+
+A skill may take options: it declares them in ``options``
+(:class:`SkillOption`: a description, a kind and, for text, its choices), each an attribute
+of the skill with its default; :meth:`ConverterSkill.configure` sets them on one instance,
+refusing a name it does not declare (with those it does) or a value of the wrong kind. The
+command line gives them as ``--option NAME=VALUE`` (:func:`parse_option_pairs`).
 """
 
 import datetime as dt
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -162,6 +170,116 @@ class ConversionResult:
     notes: list[str] = field(default_factory=list)
 
 
+#: An option's value, parsed (:meth:`SkillOption.parse`).
+OptionValue = bool | int | float | str
+_TRUE = ("true", "yes", "on", "1")
+#: A date option's text: ISO's extended form only (``20300101`` reads as a number).
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_FALSE = ("false", "no", "off", "0")
+
+
+@dataclass(frozen=True)
+class SkillOption:
+    """One option a converter skill takes (its attribute of the same name holds the default).
+
+    Attributes
+    ----------
+    description
+        What it does, for listings and refusals.
+    kind
+        ``bool``, ``int``, ``float``, ``str`` or ``datetime.date`` (an ISO date,
+        ``YYYY-MM-DD``, held as that text: a date is never free text either).
+    choices
+        A ``str`` option's allowed values (required: no option is free text, such as a
+        path, which a web-UI user's folders would have to confine).
+    """
+
+    description: str
+    kind: type[bool] | type[int] | type[float] | type[str] | type[dt.date] = bool
+    choices: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Refuse a text option without choices."""
+        if self.kind is str and not self.choices:
+            raise ValueError("a str option needs its choices")
+
+    def parse(self, name: str, value: object) -> OptionValue:
+        """Return ``value`` (text from a command line, or typed) as the option's kind.
+
+        Raises
+        ------
+        ConfigError
+            If it is not of the kind, or not one of the choices.
+        """
+        text = value.strip() if isinstance(value, str) else None
+        found: OptionValue | None = None
+        if self.kind is bool:
+            if isinstance(value, bool):
+                found = value
+            elif text is not None and text.lower() in (*_TRUE, *_FALSE):
+                found = text.lower() in _TRUE
+        elif self.kind is int:
+            if isinstance(value, int) and not isinstance(value, bool):
+                found = value
+            elif text is not None:
+                try:
+                    found = int(text)
+                except ValueError:
+                    found = None
+        elif self.kind is float:
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                found = float(value)
+            elif text is not None:
+                try:
+                    found = float(text)
+                except ValueError:
+                    found = None
+        elif self.kind is dt.date:
+            if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+                found = value.isoformat()
+            elif text is not None and _ISO_DATE.fullmatch(text):
+                try:
+                    found = dt.date.fromisoformat(text).isoformat()
+                except ValueError:
+                    found = None
+        elif text is not None and text in self.choices:
+            found = text
+        if found is None:
+            expected = (
+                f"one of {', '.join(self.choices)}" if self.kind is str
+                else "true or false" if self.kind is bool
+                else "an ISO date (YYYY-MM-DD)" if self.kind is dt.date
+                else f"a {self.kind.__name__}"
+            )  # fmt: skip
+            raise ConfigError(f"option {name}={value!r}: give {expected}")
+        return found
+
+    def describe(self) -> str:
+        """Return the option's kind (or choices) and description, for listings."""
+        kind = "|".join(self.choices) if self.kind is str else self.kind.__name__
+        return f"{kind}: {self.description}"
+
+
+def parse_option_pairs(pairs: Sequence[str]) -> dict[str, str]:
+    """Return ``NAME=VALUE`` pairs (the command line's ``--option``) as a mapping.
+
+    Raises
+    ------
+    ConfigError
+        If a pair has no ``=`` or no name, or a name is given twice.
+    """
+    found: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, value = pair.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ConfigError(f"--option {pair!r}: give NAME=VALUE")
+        if name in found:
+            raise ConfigError(f"--option {name} is given twice")
+        found[name] = value
+    return found
+
+
 class ConverterSkill:
     """A converter skill's interface; subclasses override what ``capabilities`` lists."""
 
@@ -183,6 +301,29 @@ class ConverterSkill:
     #: Which files a case may include (a web-UI user's folders), set by the agent; ``None``:
     #: any file. A skill that follows includes must check each one with it.
     allowed: Callable[[Path], bool] | None = None
+    #: The options it takes (:class:`SkillOption`), each an attribute of the same name
+    #: holding its default; :meth:`configure` sets them.
+    options: ClassVar[Mapping[str, SkillOption]] = MappingProxyType({})
+
+    def configure(self, values: Mapping[str, object]) -> None:
+        """Set options on this instance (text from a command line, or typed values).
+
+        Raises
+        ------
+        ConfigError
+            If a name is not one of ``options`` (naming those it takes), or a value is not
+            of its kind.
+        """
+        unknown = sorted(set(values) - set(self.options))
+        if unknown:
+            allowed = ", ".join(sorted(self.options)) or "none"
+            raise ConfigError(
+                f"the converter skill {getattr(self, 'name', type(self).__name__)!r} takes "
+                "no option "
+                f"{', '.join(unknown)} (its options: {allowed})"
+            )
+        for name, value in values.items():
+            setattr(self, name, self.options[name].parse(name, value))
 
     def accepts(self, source: Path) -> bool:
         """Whether ``source`` looks like this skill's input (by name or content)."""

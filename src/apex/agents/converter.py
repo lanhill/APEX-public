@@ -28,7 +28,7 @@ import math
 import os
 import re
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -329,14 +329,18 @@ class CaseConverter:
         request: str | None = None,
         name: str | None = None,
         skill: str | None = None,
+        options: Mapping[str, object] | None = None,
     ) -> ConversionOutcome:
         """Convert the case at ``source`` into ``output`` (see the module).
+
+        ``options`` are the skill's (:meth:`~apex.core.conversion.ConverterSkill.configure`),
+        set before it reads the case.
 
         Raises
         ------
         ConfigError
-            If the case cannot be read, ``output`` holds other files, or neither the model's
-            draft nor the rules' can be written.
+            If the case cannot be read, ``output`` holds other files, an option is not the
+            skill's, or neither the model's draft nor the rules' can be written.
         """
         given = Path(source)
         source = given.resolve()
@@ -348,6 +352,8 @@ class CaseConverter:
             raise ConfigError(f"{output} is not an empty folder: give a new one")
         self._written = []
         chosen = self.skill_for(source, skill)
+        if options:
+            chosen.configure(options)
         if "write_config" not in chosen.capabilities:
             raise ConfigError(f"the converter skill {chosen.name!r} cannot write APEX cases")
         facts = chosen.read(source, history)
@@ -580,20 +586,28 @@ class CaseConverter:
         return notes
 
     def translate(
-        self, skill: str, direction: Literal["to", "from"], source: Path, output: Path
+        self,
+        skill: str,
+        direction: Literal["to", "from"],
+        source: Path,
+        output: Path,
+        *,
+        options: Mapping[str, object] | None = None,
     ) -> ConversionResult:
         """Translate a case with ``skill``: an APEX case ``to`` its format, or ``from`` it.
 
         Code translates (no model). What the format refuses is reported to the installed
-        advisors (:meth:`AgentContext.report`).
+        advisors (:meth:`AgentContext.report`). ``options`` are the skill's.
 
         Raises
         ------
         ConfigError
-            If the skill cannot translate that way, ``output`` holds other files, or the
-            case uses what the other side cannot run.
+            If the skill cannot translate that way, an option is not the skill's, ``output``
+            holds other files, or the case uses what the other side cannot run.
         """
         chosen = converter_skills.create(skill)
+        if options:
+            chosen.configure(options)
         capability = "convert_to" if direction == "to" else "convert_from"
         if capability not in chosen.capabilities:
             raise ConfigError(f"the converter skill {skill!r} cannot translate {direction} its "

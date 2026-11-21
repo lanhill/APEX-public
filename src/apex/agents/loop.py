@@ -226,6 +226,10 @@ class LoopSettings:
     tool_timeout_s: float | None = None
     temperature: float = 0.0
     seed: int | None = None
+    #: Model calls that timed out (``LLMTimeout``) and are asked once more per task, with
+    #: the conversation trimmed (:func:`_trimmed_for_retry`), before the fallback decides.
+    #: 0: none (the agents' default); the chat sets ``[chat] timeout_retries``.
+    timeout_retries: int = 0
 
 
 @dataclass(frozen=True)
@@ -350,6 +354,8 @@ class AgentLoop:
         estimate sizes the system message as prose (``DEFINITION_CHARS_PER_TOKEN``).
         """
         native = self.provider.capabilities.tool_calls
+        #: Where this task's own messages start (after the system prompt and the history).
+        self._task_at = 1 + len(history)
         messages = [
             Message("system", self._system(system, response_model, native)),
             *history,
@@ -388,6 +394,7 @@ class AgentLoop:
 
         reason = f"no valid answer in {limit} turns"
         unavailable = timed_out = False
+        timeout_retries = self.settings.timeout_retries
         turn = -1
         while (turn := turn + 1) < limit:
             self._check_stop()
@@ -395,7 +402,7 @@ class AgentLoop:
             # The last turn offers no tools and asks for the answer, so that a model busy
             # looking things up still decides instead of running out of turns.
             last = turn == limit - 1
-            if last and self.tools and turn > 0:
+            if last and self.tools and turn > 0 and messages[-1].content != _LAST_TURN:
                 messages.append(Message("user", _LAST_TURN))
             messages = self._fit(messages)
             calls += 1
@@ -412,6 +419,19 @@ class AgentLoop:
                     break
                 messages.append(Message("user", _UNREADABLE + (_AGAIN if native else _PROMPTED)))
                 continue
+            except LLMTimeout as error:
+                self._check_stop()  # a call cut short by a stop (claude -p killed) is a stop
+                if timeout_retries > 0:
+                    # issue #284: a follow-up's call hung twice and the turn was lost. Ask
+                    # once more, the conversation shortened (a smaller prompt answers sooner),
+                    # rather than failing the answer; the turn is not counted against it.
+                    timeout_retries -= 1
+                    messages = self._retry_after_timeout(messages, error, turn)
+                    turn -= 1
+                    continue
+                reason = f"the provider failed: {error}"
+                unavailable = timed_out = True
+                break
             except LLMError as error:
                 self._check_stop()  # a call cut short by a stop (claude -p killed) is a stop
                 reason = f"the provider failed: {error}"
@@ -433,11 +453,19 @@ class AgentLoop:
                         )  # fmt: skip
                     invalid = 0
                     continue
-                answer = (
-                    completion.parsed
-                    if completion.parsed is not None
-                    else _json_or_text(completion.text, response_model)
-                )
+                try:
+                    answer = (
+                        completion.parsed
+                        if completion.parsed is not None
+                        else _json_or_text(completion.text, response_model)
+                    )
+                except _Invalid:
+                    # Not one JSON object (e.g. a call written twice in a fence) and not an
+                    # answer in prose: still a tool call if it is nothing else (#284).
+                    if native or (answer := self._written_call(completion.text)) is completion.text:
+                        raise
+                if not native:
+                    answer = self._written_call(answer)
                 if not native and isinstance(answer, dict) and "tool" in answer:
                     if last:
                         raise _Invalid("no tools are left on the last turn")
@@ -557,6 +585,58 @@ class AgentLoop:
             duration_s=time.monotonic() - began,
         )  # fmt: skip
         return completion
+
+    def _retry_after_timeout(
+        self, messages: list[Message], error: LLMTimeout, turn: int
+    ) -> list[Message]:
+        """Return the conversation to ask again after a timeout, and record the retry."""
+        trimmed = _trimmed_for_retry(messages, self._task_at)
+        before = sum(len(m.content) for m in messages)
+        after = sum(len(m.content) for m in trimmed)
+        logger.warning(
+            "the model timed out; asking again with the conversation trimmed (%d to %d "
+            "characters)", before, after,
+            extra={"event": "model_timeout_retry", "turn": turn + 1, "error": str(error)},
+        )  # fmt: skip
+        self.recorder.record_action(
+            "model_timeout_retry", turn=turn + 1, error=str(error), messages_before=len(messages),
+            messages_after=len(trimmed), chars_before=before, chars_after=after,
+        )  # fmt: skip
+        self._event("model_retry", turn=turn + 1, reason="the model took too long to answer")
+        self._task_at = len(trimmed) - (len(messages) - self._task_at)  # the task's onward kept
+        return trimmed
+
+    def _written_call(self, answer: object) -> object:
+        """Return a tool call a model wrote as its answer's text, else ``answer`` unchanged.
+
+        issue #284: Claude through ``claude -p`` replied with nothing but
+        ``{"tool": "list_runs", "arguments": {"limit": 1}}``, twice over; the reply did not
+        parse as one JSON object, so the one-text-field rule took it as prose and the chat
+        showed it. A text (the reply's prose, or an answer's only field) that is nothing but
+        tool calls (:func:`_only_tool_calls`: the same call once or repeated, bare or
+        fenced) runs as that call, once, when the tool is offered and its arguments
+        validate; anything else stays the answer it was.
+        """
+        if isinstance(answer, dict) and "tool" in answer:
+            return answer
+        text = _only_text(answer)
+        written = None if text is None else _only_tool_calls(text)
+        if written is None:
+            return answer
+        name, arguments = written["tool"], written.get("arguments", {})
+        if name not in {t.name for t in self.tools} or not isinstance(arguments, dict):
+            return answer
+        model = self.local[name].arguments if name in self.local else TOOLS[name].arguments
+        try:
+            model.model_validate(arguments)
+        except ValidationError:
+            return answer
+        logger.info(
+            "a tool call written as the answer's text is run", extra={
+                "event": "prompted_call_as_text", "tool": name,
+            },
+        )  # fmt: skip
+        return {"tool": name, "arguments": arguments}
 
     def _prompted_call(self, answer: Mapping[str, Any]) -> tuple[ToolCall, str]:
         """Return a prompted tool call to a known tool, and why its arguments are invalid.
@@ -951,6 +1031,85 @@ def _json(text: str) -> object:
                 )  # fmt: skip
                 return first
     raise _Invalid("the reply contains no JSON object" if stripped else "the reply is empty")
+
+
+#: The history messages kept, and their length each, when a conversation is trimmed to ask
+#: again after a timeout: the last exchange (the answer a follow-up refers to) is enough
+#: context, and a long answer is kept by its start, where its gist is.
+RETRY_HISTORY_MESSAGES = 2
+RETRY_HISTORY_CHARS = 4_000
+
+
+def _trimmed_for_retry(messages: Sequence[Message], task_at: int) -> list[Message]:
+    """Return a conversation trimmed to ask a model again after it timed out.
+
+    ``messages[0]`` is the system prompt and ``messages[task_at]`` the task (the user's
+    latest message); both are kept whole, as is everything since the task, except that tool
+    results are shortened to their leading fields (:func:`_shortened`). Of the history before
+    the task only the last :data:`RETRY_HISTORY_MESSAGES` are kept, each to
+    :data:`RETRY_HISTORY_CHARS` characters.
+    """
+    system = [m for m in messages[:task_at] if m.role == "system"]
+    history = [m for m in messages[1:task_at] if m.role != "system"][-RETRY_HISTORY_MESSAGES:]
+    kept = [
+        m if len(m.content) <= RETRY_HISTORY_CHARS
+        else replace(m, content=m.content[:RETRY_HISTORY_CHARS] + " ...(cut)")
+        for m in history
+    ]  # fmt: skip
+    since = [
+        replace(m, content=_shortened(m.content) or m.content) if _is_result(m) else m
+        for m in messages[task_at:]
+    ]
+    return [*system, *kept, *since]
+
+
+def _only_text(answer: object) -> str | None:
+    """Return the text of an answer that is only a text (``{"answer": "..."}``, nested)."""
+    while isinstance(answer, dict) and len(answer) == 1:
+        (answer,) = answer.values()
+    return answer if isinstance(answer, str) else None
+
+
+_FENCE = re.compile(r"^```[A-Za-z]*[ \t]*\n?|\n?```$")
+
+
+def _only_tool_calls(text: str) -> dict[str, Any] | None:
+    """Return the call of a text that is nothing but one tool call, maybe repeated.
+
+    The call is the prompted form ``{"tool": NAME, "arguments": {...}}``; the text may hold
+    it several times (identical), each bare or in a Markdown code fence, with white space
+    between. ``None`` for anything else: prose around it, different calls, other keys.
+    """
+    rest = text.strip()
+    calls: list[object] = []
+    decoder = json.JSONDecoder()
+    while rest:
+        fenced = rest.startswith("```")
+        if fenced:
+            end = rest.find("```", 3)
+            if end < 0:
+                return None
+            body, rest = _FENCE.sub("", rest[: end + 3]).strip(), rest[end + 3 :].strip()
+        else:
+            body, rest = rest, ""
+        while body:
+            try:
+                value, end = decoder.raw_decode(body)
+            except json.JSONDecodeError:
+                return None
+            calls.append(value)
+            body = body[end:].strip()
+            if not fenced and body.startswith("```"):
+                rest, body = (body + "\n" + rest).strip(), ""
+    first = calls[0] if calls else None
+    if (
+        not isinstance(first, dict)
+        or not isinstance(first.get("tool"), str)
+        or not set(first) <= {"tool", "arguments"}
+        or any(c != first for c in calls)
+    ):
+        return None
+    return first
 
 
 def _unwrapped(answer: Mapping[str, Any], response_model: type[BaseModel]) -> object:

@@ -196,7 +196,10 @@ def test_optimizations_refuse_an_early_start_model(monkeypatch: pytest.MonkeyPat
     optimization = SimpleNamespace(
         surrogate=SimpleNamespace(model_file="model.json"), simulator=object()
     )
-    with pytest.raises(ConfigError, match="optimizations cannot use it"):
+    with pytest.raises(
+        ConfigError,
+        match=r"cannot serve optimization: inputs: early_responses.*optimizations cannot use it",
+    ):
         surrogates.optimization_surrogate(cast(Any, optimization), cast(Any, None))
 
 

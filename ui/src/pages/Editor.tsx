@@ -17,6 +17,7 @@ import { anyOtherEngine, engineOf } from "../comparison";
 import { ErrorBox, Show, useApi, useAsync, useCan, useInOwnFolder, usePaths } from "../components/common";
 import { href } from "../router";
 import { submittedNote } from "../runs";
+import { stateFilesText } from "../surrogate";
 import { GeomodelPrior, PlanStudy } from "../components/Agents";
 import { Markdown } from "../components/Chat";
 import { isReadOnly, kindOf, syntaxError } from "../toml";
@@ -525,6 +526,12 @@ function SurrogatePlanView({ plan: p }: { plan: SurrogateBuildPlan }) {
         <dd>
           {p.keys} keys ({p.datatypes.join(", ")}) from {p.inputs} inputs
         </dd>
+        {stateFilesText(p) && (
+          <>
+            <dt>State files</dt>
+            <dd>{stateFilesText(p)}</dd>
+          </>
+        )}
         <dt>Output</dt>
         <dd>
           {paths.path(p.output_dir)}

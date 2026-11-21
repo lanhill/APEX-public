@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 from pydantic import BaseModel, Field
 
+from apex.core.conversion import parse_option_pairs
 from apex.core.errors import ApexError
 from apex.storage.run_directory import RunDirectory
 
@@ -782,6 +783,16 @@ def plot(
         _footer(outcome.decided_by, outcome.reason, (), outcome.trace)
 
 
+#: A converter skill's options (`apex agent convert skills` lists them).
+SkillOptions = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--option",
+        help="A converter skill's option, NAME=VALUE (repeatable; `apex agent convert skills` "
+        "lists each skill's).",
+    ),
+]
+
 convert_app = typer.Typer(
     no_args_is_help=True,
     help="The case-converter: a simulator's case as an APEX case, and back.",
@@ -807,6 +818,7 @@ def convert_import(
     skill: Annotated[
         str | None, typer.Option(help="The converter skill (default: the one that reads it).")
     ] = None,
+    option: SkillOptions = None,
     root: Root = None,
     no_llm: NoLLM = False,
     provider: Provider = None,
@@ -826,8 +838,9 @@ def convert_import(
     )
     try:
         outcome = CaseConverter(service, chosen, loop_settings=settings).convert(
-            case, output, history=history, request=request, name=name, skill=skill
-        )
+            case, output, history=history, request=request, name=name, skill=skill,
+            options=parse_option_pairs(option or []),
+        )  # fmt: skip
     except ApexError as error:
         raise _fail(error) from error
     if json_output:
@@ -951,14 +964,22 @@ def convert_observe(
         raise typer.Exit(1)
 
 
-def _translate(skill: str, direction: str, source: Path, output: Path, root: Path | None) -> None:
+def _translate(
+    skill: str,
+    direction: str,
+    source: Path,
+    output: Path,
+    root: Path | None,
+    options: list[str] | None = None,
+) -> None:
     from apex.agents.converter import CaseConverter
     from apex.services.api import ApexService
 
     try:
         result = CaseConverter(ApexService(root), None).translate(
-            skill, "to" if direction == "to" else "from", source, output
-        )
+            skill, "to" if direction == "to" else "from", source, output,
+            options=parse_option_pairs(options or []),
+        )  # fmt: skip
     except ApexError as error:
         raise _fail(error) from error
     typer.echo(f"written: {result.path}")
@@ -977,10 +998,11 @@ def convert_to(
         typer.Argument(help="The source, in what the skill takes (`apex agent convert skills`)."),
     ],
     output: Annotated[Path, typer.Argument(help="A new folder for the translated case.")],
+    option: SkillOptions = None,
     root: Root = None,
 ) -> None:
     """Translate a case into a skill's format (see `apex agent convert skills`); nothing runs."""
-    _translate(skill, "to", source, output, root)
+    _translate(skill, "to", source, output, root, option)
 
 
 @convert_app.command("from")
@@ -991,10 +1013,11 @@ def convert_from(
     ],
     source: Annotated[Path, typer.Argument(help="The case in the skill's format.")],
     output: Annotated[Path, typer.Argument(help="A new folder for the translated case.")],
+    option: SkillOptions = None,
     root: Root = None,
 ) -> None:
     """Translate a case from a skill's format; nothing runs."""
-    _translate(skill, "from", source, output, root)
+    _translate(skill, "from", source, output, root, option)
 
 
 @convert_app.command("to-pet")
@@ -1028,6 +1051,9 @@ def convert_skills() -> None:
         doc = (type(skill).__doc__ or "").replace("``", "").strip().splitlines()
         capabilities = ", ".join(sorted(skill.capabilities))
         typer.echo(f"{name:<12} {doc[0] if doc else ''} [{capabilities}]")
+        for option, spec in sorted(skill.options.items()):
+            default = getattr(skill, option, None)
+            typer.echo(f"{'':<12}   --option {option}=... ({spec.describe()}; default {default})")
 
 
 @agent_app.command("geomodel")

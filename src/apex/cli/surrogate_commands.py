@@ -46,8 +46,27 @@ def surrogate_plan_lines(plan: SurrogateBuildPlan) -> list[str]:
         f"  inputs: {plan.inputs} entries",
         f"  output: {plan.output_dir}",
     ]
+    if plan.state_bytes_per_run is not None:
+        total = "no new runs" if not plan.state_bytes else f"about {_size(plan.state_bytes)} in all"
+        lines.append(
+            f"  state files: about {_size(plan.state_bytes_per_run)} per run, {total} "
+            f"({plan.simulator}, an estimate for the fields read at about "
+            f"{plan.state_bytes_per_value or 0:.3g} bytes per value; a deck's restarts hold "
+            "every array it writes at every report step, so they can be larger; kept unless "
+            "the simulator or [output] keep_simulations prunes them)"
+        )
     lines += [f"  warning: {w}" for w in plan.warnings]
     return lines
+
+
+def _size(count: int) -> str:
+    """Format a byte count in decimal units (``1.5 MB``)."""
+    value = float(count)
+    for unit in ("B", "kB", "MB", "GB"):
+        if value < 1000:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.3g} {unit}"
+        value /= 1000
+    return f"{value:.3g} TB"
 
 
 def _gate_lines(gate: GateResult) -> list[str]:

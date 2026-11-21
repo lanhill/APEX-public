@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -520,6 +520,7 @@ def test_a_timed_out_model_is_said_in_plain_words_and_the_draft_still_named(
             "case": "alpha/config.toml", "goal": "baseline only", "budget": 200,
             "name": "slow", "variants": variants, "replicates": 1}),)),
         LLMTimeout("claude_code: no answer in 120 s (2 attempt(s))"),
+        LLMTimeout("claude_code: no answer in 120 s (2 attempt(s))"),  # asked again (#284)
     ])  # fmt: skip
     _, _, store, assistant = _planning(tmp_path, linear_case, stub)
     chat = store.create("plan")
@@ -538,6 +539,35 @@ def test_a_timed_out_model_is_said_in_plain_words_and_the_draft_still_named(
     [said] = [e for e in store.events(chat.id) if e.kind == "answer"]
     assert said.data["unavailable"] is True
     assert said.data["timed_out"] is True
+
+
+def test_a_follow_up_whose_model_call_times_out_is_asked_again_trimmed(tmp_path: Path) -> None:
+    """issue #284: the follow-up ("add a section comparing it with my previous run") got
+    no answer in 120 s and was lost. The chat asks once more, its conversation trimmed."""
+    from apex.core.llm import LLMTimeout
+
+    stub = StubProvider([
+        _answer("Your latest run converged. " + "Details. " * 2000),
+        LLMTimeout("claude_code: no answer in 120 s (2 attempt(s))"),
+        _answer("Compared with your previous run, ..."),
+    ], tool_calls=False)  # fmt: skip
+    assistant = _assistant(tmp_path, stub)
+    store = assistant.store
+    chat = store.create("report")
+    assistant.run(chat.id, "Could you write up a report on my latest run?")
+
+    answer = assistant.run(chat.id, "Can you add a short section on how it compares?")
+
+    assert answer == "Compared with your previous run, ..."
+    assert [e.data["reason"] for e in store.events(chat.id) if e.kind == "model_retry"] == [
+        "the model took too long to answer"
+    ]
+    timed_out, again = stub.requests[1:]
+    assert again.messages[-1] == timed_out.messages[-1]  # the follow-up, whole
+    assert sum(map(len, (m.content for m in again.messages))) < sum(
+        map(len, (m.content for m in timed_out.messages))
+    )
+    assert store.turns(chat.id)[-1].data["decided_by"] == "model"
 
 
 def test_the_closing_sentence_names_every_unproposed_draft() -> None:
@@ -2038,6 +2068,75 @@ def test_the_assistant_converts_a_deck_and_gives_it_a_prior(
     assert not created["valid"]
     assert "truth" in created["next"]
     assert store.proposals(chat.id)[-1].kind == "launch_run"
+
+
+def test_convert_case_takes_the_skills_options_as_rest_does(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up 9: ``convert_case``'s ``options`` reach the skill's ``configure``
+    (as ``POST /v1/agents/convert``'s); an option the skill does not take, or a value not of
+    its kind, is refused before a draft's folder is made."""
+    from types import MappingProxyType
+
+    from apex.core.conversion import SkillOption
+    from apex.simulation.conversion.skills import DeckSkill
+    from apex.testing import write_small_deck
+
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    write_small_deck(tmp_path / "decks")
+    chat = store.create("bring a deck")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, None)}
+    convert = tools["convert_case"]
+
+    with pytest.raises(ValueError, match=r"takes no option shiny \(its options: none\)"):
+        convert.handler(convert.arguments(source="decks/CASE.DATA", name="refused",
+                                          options={"shiny": True}))  # fmt: skip
+    assert not list(tmp_path.rglob("drafts/**/refused"))
+
+    configured: list[object] = []
+    original = DeckSkill.configure
+
+    def spy(self: DeckSkill, values: Mapping[str, object]) -> None:
+        original(self, values)
+        configured.append(self.shiny)  # type: ignore[attr-defined]
+
+    option = SkillOption("a test option")
+    monkeypatch.setattr(DeckSkill, "options", MappingProxyType({"shiny": option}))
+    monkeypatch.setattr(DeckSkill, "shiny", False, raising=False)
+    monkeypatch.setattr(DeckSkill, "configure", spy)
+    with pytest.raises(ValueError, match="shiny"):
+        convert.handler(convert.arguments(source="decks/CASE.DATA", name="bad",
+                                          options={"shiny": "perhaps"}))  # fmt: skip
+    assert not list(tmp_path.rglob("drafts/**/bad"))
+    made = convert.handler(convert.arguments(source="decks/CASE.DATA", name="small",
+                                             options={"shiny": "yes"}))  # fmt: skip
+    assert made["valid"], made["errors"]
+    # Once checked by the tool, once set on the skill that converts.
+    assert configured == [True, True]
+
+
+def test_a_guests_hidden_skill_is_refused_before_its_options(
+    tmp_path: Path, linear_case: CaseFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up 9, the review: a guest whose deck's skill is hidden gets "no
+    file" (as REST's 404), never the option's refusal, which would tell the skill's name."""
+    import apex.agents.converter as converter_module
+    from apex.services.access import Access, UIAccess
+    from apex.testing import write_small_deck
+
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    write_small_deck(tmp_path / "decks")
+    agents = {"names": ["planner", "case-converter"]}
+    rules = UIAccess.model_validate({"workspace": {"folders": ["decks"]}, "agents": agents})
+    chat = store.create("bring a deck")
+    tools = {t.name: t for t in assistant.planning_tools(chat.id, Access(rules, []))}
+    monkeypatch.setattr(converter_module, "visible_skills", lambda *, public_only: [])
+    convert = tools["convert_case"]
+
+    with pytest.raises(KeyError, match=r"no file 'decks/CASE\.DATA'"):
+        convert.handler(convert.arguments(source="decks/CASE.DATA", name="hidden",
+                                          options={"shiny": True}))  # fmt: skip
+    assert not list(tmp_path.rglob("drafts/**/hidden"))
 
 
 def test_the_converters_tools_are_offered_only_with_their_agents(

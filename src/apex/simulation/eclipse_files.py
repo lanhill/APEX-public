@@ -11,8 +11,13 @@ states each known one's unit from INTEHEAD's unit system; any other array passes
 with no unit stated. States are the restarts, each a
 :class:`~apex.domain.case_state.StateTime` whose index is its report step (``SEQNUM`` in a
 unified file, the suffix of a ``.Xnnnn`` one) and whose date is its INTEHEAD's; two
-restarts on one day are two states. Formatted files (``.FUNRST``, ``.Fnnnn``), dual
-porosity and local grids are not read.
+restarts on one day are two states. Its ``connectivity`` is the
+grid's logical faces between active cells (i±1, j±1, k±1), each face's area from the
+EGRID's corners (the lower cell's face along the axis) and the cells' centres' distance;
+the grid's non-neighbour connections (``NNC1``/``NNC2``: faults' displaced faces,
+pinch-outs) are not among them, and a face across a fault is the lower cell's whole face.
+Formatted files (``.FUNRST``, ``.Fnnnn``), dual porosity and local grids are not read (ADR
+0078 §6).
 
 Shapes: grid arrays are ``(n_x, n_y, n_z)`` in Eclipse (F) order, i fastest; cell arrays
 over the active cells ``(n_active,)``, in the simulator's active order.
@@ -32,6 +37,7 @@ from apex.core.case_state import MissingState, check_region
 from apex.core.errors import SimulationError
 from apex.core.plugins import case_state_readers
 from apex.domain.case_state import CaseMesh, CornerGrid, StateTime, UnitSystem
+from apex.domain.cell_graph import CellGraph, centre_distances, grid_faces
 
 if TYPE_CHECKING:
     from resdata.resfile import ResdataFile, ResdataFileView
@@ -41,6 +47,7 @@ __all__ = [
     "EclipseFiles",
     "Grid",
     "column_centres",
+    "face_areas",
     "grid_unit_stated",
 ]
 
@@ -162,6 +169,39 @@ def column_centres(path: Path) -> NDArray[np.float64]:
     return out
 
 
+#: Each cell's upper faces along i, j and k as its corners in resdata's order (0-3 the top
+#: at (i, j), (i+1, j), (i, j+1), (i+1, j+1); 4-7 the base, the same), going round.
+_UPPER_FACES = ((1, 3, 7, 5), (2, 3, 7, 6), (4, 5, 7, 6))
+
+
+def face_areas(path: Path, length: float = 1.0) -> NDArray[np.float64]:
+    """Return ``(nx * ny * nz, 3)``: each cell's i+, j+ and k+ face's area (m²), F order.
+
+    From the EGRID's corners (every cell, inactive ones too), in its ``GRIDUNIT``'s length
+    or ``length`` m per unit when it states none, as :meth:`Grid.read`. A face's area is
+    its quadrilateral's vector area (half the norm of its diagonals' cross product: exact for
+    a planar face, the mean normal's for a warped one).
+
+    Raises
+    ------
+    OSError, ValueError
+        If the file cannot be read as a grid, or its length unit is unknown.
+    """
+    from resdata.grid import Grid as ResGrid  # optional dependency (the reservoir extra)
+
+    if not path.is_file():
+        raise OSError(f"no grid file {path}")
+    grid = ResGrid(str(path), apply_mapaxes=False)
+    scale = _grid_unit(path, length)
+    index = grid.export_index(active_only=False)
+    corners = np.asarray(grid.export_corners(index), dtype=np.float64).reshape(-1, 8, 3) * scale
+    areas = np.empty((corners.shape[0], 3))
+    for axis, (a, b, c, d) in enumerate(_UPPER_FACES):
+        cross = np.cross(corners[:, c] - corners[:, a], corners[:, d] - corners[:, b])
+        areas[:, axis] = 0.5 * np.linalg.norm(cross, axis=1)
+    return areas
+
+
 def grid_unit_stated(path: Path) -> bool:
     """Return whether an EGRID states its length unit (``GRIDUNIT``)."""
     from resdata.resfile import ResdataFile  # optional dependency (the reservoir extra)
@@ -230,8 +270,11 @@ class EclipseFiles:
     """
 
     #: What it gives beyond the state: the grid's corner geometry, with the
-    #: deck's unit system and phases, and always a structured mesh.
-    capabilities: ClassVar[frozenset[str]] = frozenset({"corner_geometry", "structured_mesh"})
+    #: deck's unit system and phases, always a structured mesh, and the faces between its
+    #: active cells (revision 2).
+    capabilities: ClassVar[frozenset[str]] = frozenset(
+        {"connectivity", "corner_geometry", "structured_mesh"}
+    )
 
     def __init__(self, case: Path) -> None:
         from resdata.resfile import ResdataFile  # optional dependency (the reservoir extra)
@@ -401,6 +444,23 @@ class EclipseFiles:
             volumes=grid.active(grid.volume).reshape(-1),
             dims=grid.shape,
             active=grid.actnum.ravel(order="F"),
+        )
+
+    def connectivity(self, region: str | None = None) -> CellGraph:
+        """Return the faces between the active cells, their areas and distances (module)."""
+        grid = self.corner_geometry(region)
+        active = grid.actnum.ravel(order="F")
+        pairs, axis = grid_faces(grid.shape, active)
+        try:
+            areas = face_areas(Path(f"{self._case}.EGRID"), self._units.length)
+        except (OSError, ValueError) as error:
+            raise SimulationError(f"cannot read {self._case.name}.EGRID: {error}") from error
+        lower = np.flatnonzero(active)[pairs[:, 0]]
+        return CellGraph(
+            int(active.sum()),
+            pairs,
+            areas[lower, axis],
+            centre_distances(grid.active(grid.centres), pairs),
         )
 
     def static_names(self, region: str | None = None) -> frozenset[str]:

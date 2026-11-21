@@ -29,15 +29,17 @@ import dataclasses
 import datetime as dt
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import math
 import os
+import re
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
@@ -59,7 +61,7 @@ from apex.algorithms.surrogates.domain import (
     refuse_outside,
 )
 from apex.algorithms.surrogates.gate import gate
-from apex.core.case_state import CaseStateReaderFactory
+from apex.core.case_state import CaseStateReaderFactory, StateWriter
 from apex.core.errors import (
     ApexError,
     ConfigError,
@@ -92,6 +94,13 @@ from apex.core.surrogates import (
     EarlyStartSurrogate,
     FieldSurrogate,
     SurrogateModel,
+    capabilities_of,
+    refusal,
+)
+from apex.domain.case_state import (
+    DEFAULT_BYTES_PER_VALUE,
+    parse_state_times,
+    state_output_bytes,
 )
 from apex.domain.config import HistoryMatchConfig, PluginSection, SurrogateRunSection
 from apex.domain.observations import DataKey, ObservationSet
@@ -126,7 +135,12 @@ from apex.simulation.deck import deck_layout, restart_schedule
 from apex.simulation.geophysics import GeophysicsSimulator
 from apex.simulation.model_error import ModelErrorSimulator
 from apex.simulation.sensitivity import SensitivityRun
-from apex.simulation.state_fields import StateFieldModel, field_keys, split_fields
+from apex.simulation.state_fields import (
+    CellGraphRecorder,
+    StateFieldModel,
+    field_keys,
+    split_fields,
+)
 from apex.simulation.surrogate import SurrogateSimulator
 from apex.storage import provenance
 from apex.storage.inputs import read_observation_section
@@ -137,6 +151,7 @@ from apex.storage.surrogate_directory import (
     BUILD_FINGERPRINT,
     CHECK,
     CHECK_FINGERPRINT,
+    FIELDS_CONNECTIVITY,
     GATE,
     MODEL,
     SNAPSHOTS,
@@ -524,6 +539,9 @@ class SurrogateCase:
     fields: tuple[str, ...] = ()
     field_times: tuple[str, ...] = ()
     field_cells: int = 0
+    #: About how many bytes a run's files take per field value (``None``: the
+    #: simulator leaves no state files).
+    field_bytes_per_value: float | None = None
     objective: ResponseObjective | None = None
     realizations: Mapping[str, NDArray[np.float64]] = dataclasses.field(default_factory=dict)
     #: Every run also returns its sensitivities (a plugin with ``uses_gradients``):
@@ -734,13 +752,18 @@ def surrogate_case(
     field_times: Sequence[str] = (),
     field_cells: int | None = None,
     field_plugin: str | None = None,
+    field_region: str | None = None,
+    connectivity_file: Path | None = None,
 ) -> SurrogateCase:
     """Compose the stack a build (or a check) runs, from the case's configuration.
 
     ``keys`` are what the full runs answer (:func:`case_keys`), ``variances`` their
     observation errors' for a gate against them (``None``: relative errors).
     ``field_plugin`` is the surrogate the fields are saved for: whether it needs a
-    structured grid (:func:`field_reader`).
+    structured grid (:func:`field_reader`); ``field_region`` the region of a multi-region
+    case they are read from; ``connectivity_file`` where the first run writes its mesh and
+    cell graph for a plugin with ``uses_connectivity``, with or
+    without fields (:func:`_cell_graph_stack`), ``None``: not written.
 
     Raises
     ------
@@ -770,18 +793,28 @@ def surrogate_case(
         stack = composition.forecast_stack(case, layout)
         properties = PropertyMap(composition.build_parameterizations(case), layout)
         executor = executors.create(case.execution.name, **case.execution.options)
-        inner, cells = stack.simulator, 0
+        inner, cells, per_value = stack.simulator, 0, None
         if fields:
-            inner, cells = _field_stack(
-                case, stack.simulator, fields, field_times, field_cells, field_plugin
-            )
+            # The region and the connectivity file only when named: a build without them
+            # calls as before.
+            named = _FieldStackOptions()
+            if field_region is not None:
+                named["region"] = field_region
+            if connectivity_file is not None:
+                named["connectivity_file"] = connectivity_file
+            inner, cells, per_value = _field_stack(
+                case, stack.simulator, fields, field_times, field_cells, field_plugin, **named,
+            )  # fmt: skip
+        elif connectivity_file is not None:
+            # No fields, but a plugin that takes the runs' cell graph.
+            inner = _cell_graph_stack(case, stack.simulator, connectivity_file, executor)
         simulator = parameterized(inner, properties)
         composition.check_executor(executor, simulator)
         composition.prepare_remote(executor, simulator, case)
     except (TypeError, ValueError, PluginError) as error:
         raise ConfigError(f"invalid case for a surrogate: {error}") from error
     provenance_ = stack_provenance(case, stack.simulator).model_copy(
-        update={"model_error_left_out": left_out}
+        update={"model_error_left_out": left_out, "field_region": field_region if fields else None}
     )
     coarse_simulator, coarse_config = None, None
     if coarse is not None:
@@ -803,6 +836,7 @@ def surrogate_case(
         fields=tuple(str(f).upper() for f in fields),
         field_times=tuple(field_times),
         field_cells=cells,
+        field_bytes_per_value=per_value,
         run_sections=_RUN_SECTIONS,
     )
 
@@ -869,6 +903,13 @@ def _optimization_case(
     )
 
 
+class _FieldStackOptions(TypedDict, total=False):
+    """The keywords :func:`_field_stack` is given only when they are named."""
+
+    region: str
+    connectivity_file: Path
+
+
 def _field_stack(
     case: HistoryMatchConfig,
     simulator: Simulator,
@@ -876,26 +917,75 @@ def _field_stack(
     times: Sequence[str],
     cells: int | None,
     plugin: str | None = None,
-) -> tuple[Simulator, int]:
-    """Return the stack that also answers the state fields' keys, and the fields' cells.
+    *,
+    region: str | None = None,
+    connectivity_file: Path | None = None,
+) -> tuple[Simulator, int, float | None]:
+    """Return the stack that also answers the state fields' keys, and the fields' size.
+
+    The size is the fields' cells and about how many bytes a run's files take per value
+    (``None``: the simulator leaves no state files).
 
     A simulator that leaves case files is wrapped with
     :class:`~apex.simulation.state_fields.StateFieldModel`, reading through the simulator's
     case-state reader (:func:`field_reader`: the mesh and states, a structured grid
-    for a grid-based ``plugin``); a deck's grid (``DIMENS``/``SPECGRID``) gives the cells,
-    else ``field_cells``. Any other simulator must answer the field keys itself
-    (``field_cells`` given), e.g. ``linear`` with ``fields``.
+    for a grid-based ``plugin``). A :class:`~apex.core.case_state.StateWriter` checks that
+    its input writes the states and gives the cells and whether its mesh is a grid;
+    otherwise a deck's grid (``DIMENS``/``SPECGRID``) gives the cells, else
+    ``field_cells``. Any other simulator must answer the field keys itself (``field_cells``
+    given), e.g. ``linear`` with ``fields``.
+
+    ``times`` are all ISO dates or all seconds since the run's start;
+    ``region`` names the region of a multi-region case (``[case] field_region``), passed to
+    the writer and the reader; a simulator without a writer has one region and refuses it.
+    ``connectivity_file`` is handed to the snapshots when the reader gives its
+    ``connectivity``, else dropped.
 
     Raises
     ------
     ConfigError
-        If the case has ``[geophysics]`` (its field keys would clash), or the cells cannot be
-        known.
+        If the case has ``[geophysics]`` (its field keys would clash), the times are neither
+        dates nor seconds, a region is refused, or the cells cannot be known.
     """
     if case.geophysics is not None:
         raise ConfigError(
             "[case] fields with a [geophysics] case: build field surrogates on its flow stack "
             "(a case without [geophysics])"
+        )
+    try:
+        moments = parse_state_times(times)
+    except ValueError as error:
+        raise ConfigError(f"[case] field_times must be ISO dates or seconds ({error})") from None
+    writer = _state_writer(simulator)
+    if writer is not None and isinstance(simulator, CaseFileSimulator):
+        names = [str(f).upper() for f in fields]
+        if region is None:
+            output = writer.state_output(names, moments)
+        else:
+            if not _takes_region(writer):
+                raise ConfigError(
+                    f"[case] field_region = {region!r}: the {case.simulator.name!r} "
+                    "simulator's states have one region; leave field_region out"
+                )
+            output = writer.state_output(names, moments, region=region)
+        for note in output.notes:
+            logger.warning("[case] fields: not checked before the run: %s", note)
+        if cells is not None and cells != output.cells:
+            raise ConfigError(
+                f"[case] field_cells = {cells}, but the {case.simulator.name!r} simulator's "
+                f"fields have {output.cells} cells"
+            )
+        reader, structured = field_reader(case.simulator.name, plugin, structured=output.structured)
+        model = StateFieldModel(
+            fields, times, output.cells, reader, structured=structured, region=region,
+            connectivity_file=_connectivity_target(reader, connectivity_file),
+        )  # fmt: skip
+        per_value = output.bytes_per_value or DEFAULT_BYTES_PER_VALUE
+        return GeophysicsSimulator(simulator, model), output.cells, per_value
+    if region is not None:
+        raise ConfigError(
+            f"[case] field_region = {region!r}: the {case.simulator.name!r} simulator's "
+            "states have one region; leave field_region out"
         )
     if isinstance(simulator, CaseFileSimulator):
         template = case.simulator.options.get("deck_template_file")
@@ -911,13 +1001,19 @@ def _field_stack(
                 "[case] fields: the deck's grid (DIMENS or SPECGRID) cannot be read from its "
                 "template; give field_cells"
             )
-        if template is not None:
+        dates = [t for t in moments if isinstance(t, dt.date)]
+        if template is not None and len(dates) < len(moments):
+            logger.warning(
+                "[case] fields: the field times are seconds; the deck's restarts are not "
+                "checked before the run (the check is by date)"
+            )
+        elif template is not None:
             # Before any run (as [geophysics]' vintages): a date the deck certainly writes no
             # restart at would fail every member.
             schedule = restart_schedule(
                 Path(str(template)), None if case_dir is None else Path(str(case_dir))
             )
-            missing = schedule.missing([dt.date.fromisoformat(t) for t in times])
+            missing = schedule.missing(dates)
             if missing and not schedule.unresolved:
                 raise ConfigError(
                     "[case] fields: the deck writes no restart at "
@@ -929,26 +1025,73 @@ def _field_stack(
             raise ConfigError(f"[case] field_cells = {cells}, but the deck's grid has {total}")
         # the snapshots read the reader's mesh and states alone.
         reader, structured = field_reader(case.simulator.name, plugin)
-        model = StateFieldModel(fields, times, total, reader, structured=structured)
-        return GeophysicsSimulator(simulator, model), total
+        model = StateFieldModel(
+            fields, times, total, reader, structured=structured,
+            connectivity_file=_connectivity_target(reader, connectivity_file),
+        )  # fmt: skip
+        # A restart holds the active cells only; ACTNUM, where the template states it plainly.
+        # At least one cell: the estimate's bytes per value must stay positive.
+        active = max(_deck_active_cells(template, total), 1)
+        restart_bytes = _RESTART_BYTES_PER_VALUE * active / total if total else None
+        return GeophysicsSimulator(simulator, model), total, restart_bytes
     if cells is None:
         raise ConfigError(
             f"[case] fields with the {case.simulator.name!r} simulator, which has no restart "
             "files: give field_cells, and the simulator must answer the field keys itself"
         )
-    return simulator, int(cells)
+    return simulator, int(cells), None
 
 
-def field_reader(simulator: str, plugin: str | None) -> tuple[CaseStateReaderFactory, bool]:
+#: An Eclipse-format restart's arrays are 32-bit floats (``REAL``); the records' markers
+#: add a few bytes per thousand values. A restart holds active cells only, so the services
+#: scale it by the active fraction of the grid where the deck's text tells it.
+_RESTART_BYTES_PER_VALUE = 4.0
+
+
+def _deck_active_cells(template: object, total: int) -> int:
+    """Return the deck's active cells as its text tells them (``ACTNUM``), else ``total``.
+
+    An estimate's input only: a deck whose ``ACTNUM`` is not plain numbers in its template
+    (an include, a Mako expression, ``EQUALS``/``BOX``) counts every cell.
+    """
+    if template is None:
+        return total
+    try:
+        text = Path(str(template)).read_text(errors="replace")
+    except OSError:
+        return total
+    found = re.search(r"^\s*ACTNUM\b(.*?)/", text, flags=re.MULTILINE | re.DOTALL)
+    if found is None:
+        return total
+    body = re.sub(r"--[^\n]*", " ", found.group(1))
+    count = active = 0
+    for token in body.split():
+        repeat, star, value = token.rpartition("*")
+        try:
+            n = int(repeat) if star else 1
+            flag = int(value)
+        except ValueError:
+            return total
+        count += n
+        active += n if flag != 0 else 0
+    return active if count == total else total
+
+
+def field_reader(
+    simulator: str, plugin: str | None, *, structured: bool = False
+) -> tuple[CaseStateReaderFactory, bool]:
     """Return the case-state reader for field snapshots, and whether a grid is needed.
 
     decision 5. The snapshots need a reader's mesh and states only. A
     surrogate plugin takes an unstructured mesh (its cells in the reader's order) only when
     it declares ``unstructured_fields = True`` (``apex.core.surrogates``); any other needs a
     structured grid, so a reader that does not declare ``structured_mesh`` is refused before
-    any run. ``plugin`` ``None`` (or unknown: refused where the surrogate is created) asks
-    for no grid here; :class:`~apex.simulation.state_fields.StateFieldModel` is then not
-    told to refuse an unstructured mesh.
+    any run, unless the simulator answers for this case that its mesh is one
+    (``structured``, a :class:`~apex.core.case_state.StateWriter`'s
+    :class:`~apex.domain.case_state.StateOutput`). ``plugin`` ``None`` (or unknown: refused
+    where the surrogate is created) asks for no grid here;
+    :class:`~apex.simulation.state_fields.StateFieldModel` is then not told to refuse an
+    unstructured mesh.
 
     Raises
     ------
@@ -966,15 +1109,121 @@ def field_reader(simulator: str, plugin: str | None) -> tuple[CaseStateReaderFac
     if bool(getattr(factory, "unstructured_fields", False)):
         return reader, False
     capabilities = frozenset(getattr(reader, "capabilities", ()))
-    if "structured_mesh" not in capabilities:
+    if "structured_mesh" not in capabilities and not structured:
         raise ConfigError(
             f"[case] fields: the surrogate {plugin!r} needs its fields on a structured grid "
             f"(nx, ny, nz), and the {simulator!r} simulator's case-state reader does not give "
-            "one (structured_mesh); fields on an unstructured mesh are never mapped onto a "
-            "grid (decision 5): use a surrogate that takes them "
+            "one (structured_mesh) for this case; fields on an unstructured mesh are never "
+            "mapped onto a grid (decision 5): use a surrogate that takes them "
             "(unstructured_fields)"
         )
     return reader, True
+
+
+def _connectivity_target(reader: CaseStateReaderFactory, target: Path | None) -> Path | None:
+    """Return ``target`` when the reader declares ``connectivity``."""
+    if target is None:
+        return None
+    if "connectivity" not in frozenset(getattr(reader, "capabilities", ())):
+        logger.info(
+            "the surrogate's cell graph: the simulator's case-state reader gives no "
+            "connectivity; the surrogate keeps to its own geometry"
+        )
+        return None
+    return target
+
+
+def _cell_graph_stack(
+    case: HistoryMatchConfig, simulator: Simulator, target: Path, executor: object = None
+) -> Simulator:
+    """Return ``simulator``, recording the first run's cell graph at ``target`` when it can.
+
+    A build without ``[case] fields`` whose plugin takes the runs' cells and faces: the
+    simulator's runs must leave case files and its case-state reader must
+    declare ``connectivity``; otherwise the simulator is returned as it is (logged), and
+    the plugin keeps to its own geometry, as with fields. An executor that reads its members
+    remotely rebuilds the stack on its hosts without the recorder: no graph (warned).
+    """
+    if getattr(executor, "remote", False):
+        logger.warning(
+            "the surrogate's cell graph: the executor reads its members remotely, where the "
+            "graph is not recorded; the surrogate keeps to its own geometry (give its case "
+            "file the graph, or run the members' reading here)"
+        )
+        return simulator
+    if not isinstance(simulator, CaseFileSimulator):
+        logger.info(
+            "the surrogate's cell graph: the %r simulator leaves no case files; the surrogate "
+            "keeps to its own geometry",
+            case.simulator.name,
+        )
+        return simulator
+    try:
+        reader = composition.case_state_reader(case.simulator.name, "the surrogate's cell graph")
+    except ConfigError as error:
+        logger.info("%s; the surrogate keeps to its own geometry", error)
+        return simulator
+    found = _connectivity_target(reader, target)
+    return simulator if found is None else CellGraphRecorder(simulator, reader, found)
+
+
+def _wants_connectivity(plugin: str, options: Mapping[str, object]) -> bool:
+    """Whether a build's plugin takes the runs' cell graph (``uses_connectivity``).
+
+    A plugin class that declares it may still refine it per instance (e.g. only with some
+    coordinates); the instance's is read when the options make one, else the class's (an
+    instance the options cannot make fails where the build creates it).
+    """
+    try:
+        factory = surrogate_models.factory(plugin)
+    except UnknownPluginError:
+        return False
+    if not bool(getattr(factory, "uses_connectivity", False)):
+        return False
+    try:
+        model = surrogate_models.create(plugin, **options)
+    except (TypeError, ValueError, ImportError):
+        return True
+    return bool(getattr(model, "uses_connectivity", False))
+
+
+def _hand_connectivity(model: object, directory: SurrogateDirectory) -> None:
+    """Give a plugin with ``uses_connectivity`` the runs' mesh and cell graph, when written."""
+    if not bool(getattr(model, "uses_connectivity", False)):
+        return
+    found = directory.load_connectivity()
+    use = getattr(model, "use_connectivity", None)
+    if found is None or not callable(use):
+        return
+    use(*found)
+
+
+def _takes_region(writer: StateWriter) -> bool:
+    """Whether a writer's ``state_output`` takes ``region`` (single-region ones may not)."""
+    try:
+        parameters = inspect.signature(writer.state_output).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        (p.name == "region" and p.kind is not p.POSITIONAL_ONLY) or p.kind is p.VAR_KEYWORD
+        for p in parameters
+    )
+
+
+def _state_writer(simulator: object) -> StateWriter | None:
+    """Return the simulator, or the one it wraps (``inner``), that states its states' output."""
+    seen: set[int] = set()
+    current: object | None = simulator
+    # Bounded: a stand-in answering every attribute (a mock) has an endless ``inner`` chain.
+    while current is not None and id(current) not in seen and len(seen) < 16:
+        # The method on the class: a stand-in answering every attribute (a mock) is not one.
+        if isinstance(current, StateWriter) and callable(
+            getattr(type(current), "state_output", None)
+        ):
+            return current
+        seen.add(id(current))
+        current = getattr(current, "inner", None)
+    return None
 
 
 @dataclass(frozen=True)
@@ -1834,8 +2083,14 @@ def fingerprint_parts(
     parts["seed"] = str(config.surrogate.seed)
     if case.fields:
         # The runs save the fields too: absent without them.
-        parts["fields"] = _digest({"fields": list(case.fields), "times": list(case.field_times),
-                                   "cells": case.field_cells})  # fmt: skip
+        snapshot: dict[str, object] = {
+            "fields": list(case.fields),
+            "times": list(case.field_times),
+            "cells": case.field_cells,
+        }
+        if case.provenance.field_region is not None:
+            snapshot["region"] = case.provenance.field_region  # absent before: same digests
+        parts["fields"] = _digest(snapshot)  # fmt: skip
     if config.coarse is not None and case.provenance.coarse is not None:
         # The coarse stack's runs are runs too: what shapes them (absent without one).
         coarse = case.provenance.coarse.model_dump(
@@ -2080,6 +2335,9 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         case_config = _case_config(config.case.config_file)
         keys, variances = case_keys(case_config, config.case.outputs)
         loaded = (case_config, keys, variances)
+        purpose = _purpose_problem(config, case_config)
+        if purpose is not None:
+            problems.append(purpose)
     except (ConfigError, PluginError) as error:
         problems.append(str(error))
     except (TypeError, ValueError) as error:  # e.g. a response objective's options
@@ -2120,11 +2378,20 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         if config.design.plan == "run"
         else config.design.training + config.design.held_out + counted.runs
     )
+    fine_runs = runs
     if config.coarse is not None:
         # Every run also on the coarse stack, the calibration runs excepted
         # (their spread is the fine model's), and the members run on it only.
         runs = 2 * runs - (0 if config.design.plan == "run" else counted.runs)
         runs += config.design.coarse_only
+    # No new fine runs (plan 'run'; refused with fields today): no state files to state.
+    per_run = (
+        None
+        if not case.fields or case.field_bytes_per_value is None or fine_runs == 0
+        else state_output_bytes(
+            case.field_cells, len(case.fields), len(case.field_times), case.field_bytes_per_value
+        )
+    )
     return SurrogateBuildPlan(
         name=config.surrogate.name,
         model=config.surrogate.model,
@@ -2143,6 +2410,10 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         inputs=case.input_layout.n_state,
         output_dir=str(config.surrogate.output_dir),
         warnings=warnings,
+        state_bytes_per_run=per_run,
+        # The fine runs only: the coarse stack saves no fields.
+        state_bytes=None if per_run is None else per_run * fine_runs,
+        state_bytes_per_value=None if per_run is None else case.field_bytes_per_value,
     )
 
 
@@ -2225,6 +2496,35 @@ def _model_problems(config: SurrogateConfig) -> list[str]:
     return ["[surrogate]: " + "; ".join(plugin)] if plugin else []
 
 
+def _purpose_problem(
+    config: SurrogateConfig, case: HistoryMatchConfig | OptimizationConfig
+) -> str | None:
+    """Return why the plugin cannot serve what the build is for, or ``None``.
+
+    A build over an optimization's controls whose outputs are its objective's response keys
+    (``outputs = "responses"``) is for that optimization: the plugin, as its options make
+    it, must meet the optimization's requirement (the user,
+    2026-11-21: it takes the controls), refused before any run. Other builds are not: a
+    history-matching case's model may serve predictions, and an optimization's listed
+    series a prediction's control scenario, which do not need the state or the controls.
+    A plugin that is not installed, or refuses its options, is left to the checks that say
+    so (:func:`_model_problems`, the fit).
+    """
+    if not (isinstance(case, OptimizationConfig) and config.case.outputs == "responses"):
+        return None
+    try:
+        model = surrogate_models.create(config.surrogate.model, **config.surrogate.options)
+    except (PluginError, ImportError, TypeError, ValueError, ConfigError, OSError):
+        return None
+    problem = workflow_refusal("optimization", model, config.surrogate.model)
+    if problem is None:
+        return None
+    return (
+        f"[surrogate]: {problem}: the case is an optimization's and its outputs are the "
+        "objective's responses, so the model would serve that optimization"
+    )
+
+
 def _build_case(
     config: SurrogateConfig,
     loaded: tuple[
@@ -2246,6 +2546,13 @@ def _build_case(
         output_dir=config.surrogate.output_dir, coarse=config.coarse,
         fields=config.case.fields, field_times=config.case.field_times,
         field_cells=config.case.field_cells, field_plugin=config.surrogate.model,
+        field_region=config.case.field_region,
+        # the first run's cells and faces, for a plugin that takes them.
+        connectivity_file=(
+            config.surrogate.output_dir / FIELDS_CONNECTIVITY
+            if _wants_connectivity(config.surrogate.model, config.surrogate.options)
+            and (config.case.fields or not _wants_gradients(config)) else None
+        ),
     )  # fmt: skip
     return _with_gradients(config, case) if _wants_gradients(config) else case
 
@@ -2716,6 +3023,10 @@ def _build(
     # A complete build needs no plugin: its saved summary is returned as before, though
     # the plugin has since been uninstalled.
     problems = _model_problems(config)
+    if not problems and config.case.outputs == "responses":
+        # Only an optimization's responses are a build for a workflow (_purpose_problem).
+        purpose = _purpose_problem(config, _case_config(config.case.config_file))
+        problems = [] if purpose is None else [purpose]
     if problems:
         done = _completed_build(directory, config)
         if done is not None:
@@ -2979,6 +3290,7 @@ def _build(
     except (TypeError, ValueError) as error:
         raise ConfigError(f"[surrogate] {section.model}: {error}") from error
     try:
+        _hand_connectivity(model, directory)
         fitted = fit_and_gate(
             model, training, held_out, streams["surrogate"],
             tolerances=config.gate.tolerances(), variances=case.variances,
@@ -3335,7 +3647,7 @@ def check_surrogate(
             # The fields it was trained and gated on, on the same cells.
             fields=manifest.fields, field_times=manifest.field_times,
             field_cells=_field_cells(trained) if manifest.fields else None,
-            field_plugin=manifest.plugin,
+            field_plugin=manifest.plugin, field_region=manifest.provenance.field_region,
         )  # fmt: skip
         mismatches = manifest.provenance.stack_mismatches(case.provenance)
         if mismatches:
@@ -3718,6 +4030,22 @@ def _field_data(config: HistoryMatchConfig) -> bool:
     return bool(config.observations.fields) or config.geophysics is not None
 
 
+def workflow_refusal(workflow: str, model: object, plugin: str) -> str | None:
+    """Return why ``workflow`` refuses a surrogate by its capabilities.
+
+    ``model`` is the fitted model (its capabilities read by
+    :func:`apex.core.surrogates.capabilities_of`), ``plugin`` its registered name; ``None``
+    when the workflow's requirement (``core.surrogates.SURROGATE_REQUIREMENTS``) is met.
+    """
+    return refusal(plugin, capabilities_of(model), workflow)
+
+
+def _plugin_of(model: object, manifest: object) -> str:
+    """Return a model's registered name from its manifest (its class's name without one)."""
+    plugin = getattr(manifest, "plugin", None)
+    return plugin if isinstance(plugin, str) else type(model).__name__
+
+
 def refusals(config: HistoryMatchConfig) -> list[str]:
     """Return why ``config``'s ``[surrogate]`` is refused, from the configuration alone.
 
@@ -3833,6 +4161,9 @@ def refuse_model(
     assert section is not None
     manifest = model.manifest
     name = model.path
+    problem = workflow_refusal("history_matching", model.model, _plugin_of(model.model, manifest))
+    if problem is not None:
+        raise ConfigError(f"the surrogate {name}: {problem}")
     if isinstance(model.model, EarlyStartSurrogate) and isinstance(
         model.model, CoarseCorrectedSurrogate
     ):
@@ -3884,10 +4215,10 @@ def refuse_model(
     outside = check_request(model.domain, observations.keys)
     if not outside.inside:
         raise ConfigError(f"the surrogate {name} cannot forecast this run: {outside.message()}")
-    if section.variance_in_errors and not callable(getattr(model.model, "predict_std", None)):
+    if section.variance_in_errors and not capabilities_of(model.model).uncertainty:
         raise ConfigError(
             f"[surrogate] variance_in_errors: the plugin {manifest.plugin!r} gives no "
-            "predictive variance (predict_std)"
+            "predictive variance (predict_std; the capability uncertainty)"
         )
     if section.on_check_failure == "refit":
         if manifest.snapshots is None or manifest.snapshots.path is None:
@@ -4213,11 +4544,9 @@ def prediction_surrogate(
     loaded = active_model(path)
     manifest = loaded.manifest
     model = loaded.model
-    if isinstance(model, CoarseCorrectedSurrogate):
-        raise ConfigError(
-            f"the surrogate {path} corrects a coarse simulation: predictions with it are not "
-            "supported (its coarse stack would have to run to the horizon)"
-        )
+    problem = workflow_refusal("prediction", model, _plugin_of(model, manifest))
+    if problem is not None:
+        raise ConfigError(f"the surrogate {path}: {problem}: predictions with it are not supported")
     if manifest.gate is None or not manifest.gate.passed:
         failures = [] if manifest.gate is None else manifest.gate.failures()
         raise ConfigError(
@@ -4472,12 +4801,11 @@ def optimization_surrogate(
     path = Path(section.model_file)
     loaded = load_surrogate(path)
     manifest = loaded.manifest
-    if isinstance(loaded.model, EarlyStartSurrogate):
-        # Each evaluation would need its own early simulation first.
-        raise ConfigError(
-            f"the surrogate {path} continues each member's early simulation (an early-start "
-            "model): optimizations cannot use it"
-        )
+    # an early-start model's evaluations would each need their own early
+    # simulation first (revision 2: by its capabilities).
+    problem = workflow_refusal("optimization", loaded.model, _plugin_of(loaded.model, manifest))
+    if problem is not None:
+        raise ConfigError(f"the surrogate {path}: {problem}: optimizations cannot use it")
     if manifest.gate is None or not manifest.gate.passed:
         failures = [] if manifest.gate is None else manifest.gate.failures()
         raise ConfigError(

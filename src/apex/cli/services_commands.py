@@ -13,7 +13,7 @@ import json
 import subprocess
 import tomllib
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -107,6 +107,18 @@ def plan_lines(plan: RunPlan) -> list[str]:
     return lines
 
 
+def _capabilities_line(capabilities: dict[str, Any]) -> str:
+    """Return a surrogate's capabilities on one line."""
+    flags = [
+        name for name in ("extrapolates", "uncertainty", "gradients") if capabilities.get(name)
+    ]
+    text = (
+        f"inputs {'+'.join(capabilities.get('inputs', []))}; "
+        f"outputs {'+'.join(capabilities.get('outputs', []))}"
+    )
+    return f"{text}; {', '.join(flags)}" if flags else text
+
+
 def register(app: typer.Typer) -> None:
     """Add the services commands to the ``apex`` application."""
 
@@ -134,6 +146,9 @@ def register(app: typer.Typer) -> None:
             typer.echo(f"{info.registry:<18} {info.name:<18}{status} {info.summary}")
             if options:
                 typer.echo(f"{'':<37}options: {options}")
+            if info.capabilities is not None:
+                typer.echo(f"{'':<37}capabilities: {_capabilities_line(info.capabilities)}")
+                typer.echo(f"{'':<37}serves: {', '.join(info.serves or []) or 'no workflow'}")
 
     @app.command()
     def schema(

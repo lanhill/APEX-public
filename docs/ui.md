@@ -166,7 +166,7 @@ The `[plugins]` lists of `converter_skills`, `geomodeling_skills`, `variogram_es
 - answer from APEX's read-only tools: runs, jobs, studies, predictions and plugins;
 - use the agents: `monitor_run`, `diagnose_run`, `write_report` and `list_agents`;
 - read a case with `case_info`: its configuration, data, grid and each well's completion cells from the deck (the format of distance localization's `positions`).
-- bring a case in: `convert_case` imports a deck with its history as a run draft, `create_case` creates a synthetic case from a description (its truth run is yours to start), and `draft_prior` gives a run draft a prior for its fields.
+- bring a case in: `convert_case` imports a deck with its history as a run draft (with the converter skill's options when you ask for one, as the Agents page takes them; an option the skill does not take is refused), `create_case` creates a synthetic case from a description (its truth run is yours to start), and `draft_prior` gives a run draft a prior for its fields.
 
 It knows the page you are on, so "is this run healthy?" on a run's page means that run. It never submits, stops or resumes anything itself.
 
@@ -189,7 +189,7 @@ The history is kept on the server, in `<root>/chats.db`:
 - **Retention:** chats inactive for more than `[chat] retention_days`, default 92 (3 months), are deleted, at service start and daily. `apex gc --chats` applies both limits at once.
 - *Delete* removes a chat and the traces of its model calls.
 
-With the `claude_code` provider, each reply takes a few model calls of some seconds each; the panel shows each step while it works. **Stop** (in place of *Send* while it answers) ends the answer at once and frees the chat for a new message. Nothing it did before is undone, such as a draft it wrote. A tool still running is stopped too: the slow read-only ones (`case_info`, `monitor_run`, `diagnose_run`, `write_report`) run in a worker process of their own, which is killed (`[chat] isolate_tools`, on by default). Any other tool is left to finish in the background, and what it gives is dropped. A tool that runs longer than `[chat] tool_timeout_s` (120 s) is abandoned, and the assistant is told so. Without a working model, the chat says why and lists the agents' commands, which also run without a model (`--no-llm`).
+With the `claude_code` provider, each reply takes a few model calls of some seconds each; the panel shows each step while it works. **Stop** (in place of *Send* while it answers) ends the answer at once and frees the chat for a new message. Nothing it did before is undone, such as a draft it wrote. A tool still running is stopped too: the slow read-only ones (`case_info`, `monitor_run`, `diagnose_run`, `write_report`) run in a worker process of their own, which is killed (`[chat] isolate_tools`, on by default). Any other tool is left to finish in the background, and what it gives is dropped. A tool that runs longer than `[chat] tool_timeout_s` (120 s) is abandoned, and the assistant is told so. A model call that times out is asked once more with a shorter conversation (`[chat] timeout_retries`, 1), so a model that never answers takes up to about twice the provider's time limit for its attempts (with `claude_code`, `timeout_s` × (1 + `hang_retries`) × 2) before the chat says it took too long. Without a working model, the chat says why and lists the agents' commands, which also run without a model (`--no-llm`).
 
 ### The assistant's models
 

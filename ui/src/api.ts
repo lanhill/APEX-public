@@ -257,6 +257,12 @@ export interface SurrogateBuildPlan {
   warnings: string[];
   /** What an approval of the build names (its content). */
   identity?: string | null;
+  /** About how many bytes each run's state files add for [case] fields. */
+  state_bytes_per_run?: number | null;
+  /** The same over the plan's new runs. */
+  state_bytes?: number | null;
+  /** The bytes per value the estimate takes. */
+  state_bytes_per_value?: number | null;
 }
 
 /** One row of an optimization's history.jsonl: a start, an accepted step or an EPF update. */

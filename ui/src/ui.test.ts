@@ -73,7 +73,7 @@ import {
   plainNumber,
   unscaled,
 } from "./optimization";
-import { surrogateLabel } from "./surrogate";
+import { byteSize, stateFilesText, surrogateLabel } from "./surrogate";
 import { agentLabel, visibilityOf, visibleAgents, whereInUi } from "./agents";
 import { filterGroup, groupPlugins, optionRows, registryLabel, summaryParts, typeText } from "./plugins";
 import { dirname, isReadOnly, kindOf, syntaxError } from "./toml";
@@ -392,6 +392,11 @@ describe("the assistant's steps", () => {
       "plan_study refused: over the budget",
     );
     expect(stepText(event({ tool: "plan_study", ok: false }))).toBe("plan_study refused the request");
+  });
+
+  it("say when the model was asked again after a timeout", () => {
+    const retry = { n: 1, created: "", kind: "model_retry", data: { turn: 2 } };
+    expect(stepText(retry)).toBe("retried after a timeout");
   });
 });
 
@@ -1550,5 +1555,15 @@ describe("surrogate builds", () => {
   it("label a build by its folder's last parts", () => {
     expect(surrogateLabel("/w/UI/owner/surrogates/lin/0123abcd")).toBe("lin/0123abcd");
     expect(surrogateLabel(null)).toBe("–");
+  });
+
+  it("state the state files' size as an estimate (ADR 0078 §5)", () => {
+    expect(byteSize(999)).toBe("999 B");
+    expect(byteSize(1_500_000)).toBe("1.5 MB");
+    expect(stateFilesText({})).toBeNull();
+    expect(stateFilesText({ state_bytes_per_run: null })).toBeNull();
+    expect(
+      stateFilesText({ state_bytes_per_run: 1_500_000, state_bytes: 22_500_000, state_bytes_per_value: 8 }),
+    ).toBe("about 1.5 MB per run, about 22.5 MB in all (an estimate at about 8 bytes per value)");
   });
 });

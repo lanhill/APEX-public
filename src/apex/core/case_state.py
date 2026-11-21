@@ -12,8 +12,10 @@ Capabilities beyond the protocol are declared by a reader class's ``capabilities
 ``corner_geometry`` is a protocol of its own, :class:`CornerGeometryReader` (a corner-point
 grid's geometry, a deck's unit system and phases: what geophysics and model error need);
 ``structured_mesh`` says that :meth:`CaseStateReader.mesh` always gives a structured grid
-(``CaseMesh.dims``), what the grid-based field surrogates need, known before any run. A
-consumer checks the capability it needs and refuses a reader without it, with the reason.
+(``CaseMesh.dims``), what the grid-based field surrogates need, known before any run;
+``connectivity`` is a protocol of its own, :class:`ConnectivityReader` (the faces between the
+state's cells, what a graph network on the mesh needs). A consumer
+checks the capability it needs and refuses a reader without it, with the reason.
 
 Names: the canonical names consumers share (``PRESSURE``, ``SWAT``, ``SGAS``, ``SOIL``,
 ``TEMP``, ``RS``, ``WAT_DEN``, ``GAS_DEN``, ``OIL_DEN``, ``PORO``, ``PERMX``, ...) are each
@@ -29,13 +31,23 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError, SimulationError
-from apex.domain.case_state import CaseMesh, CornerGrid, StateTime, UnitSystem
+from apex.domain.case_state import (
+    CaseMesh,
+    CornerGrid,
+    StateAt,
+    StateOutput,
+    StateTime,
+    UnitSystem,
+)
+from apex.domain.cell_graph import CellGraph
 
 __all__ = [
     "CaseStateReader",
     "CaseStateReaderFactory",
+    "ConnectivityReader",
     "CornerGeometryReader",
     "MissingState",
+    "StateWriter",
     "check_region",
 ]
 
@@ -149,6 +161,58 @@ class CornerGeometryReader(CaseStateReader, Protocol):
 
     def corner_geometry(self, region: str | None = None) -> CornerGrid:
         """Return the grid's geometry in SI units."""
+
+
+@runtime_checkable
+class ConnectivityReader(CaseStateReader, Protocol):
+    """A reader that gives the faces between its state's cells.
+
+    The capability ``connectivity``. The graph is over the cells :meth:`state` returns, in
+    its order (``CaseMesh.cells``: a structured grid's active cells in Eclipse (F) order, an
+    unstructured mesh's cells in the simulator's own); a consumer that lays fields over a
+    whole grid maps them through ``CaseMesh.active``.
+    """
+
+    def connectivity(self, region: str | None = None) -> CellGraph:
+        """Return the region's cell graph: each face once, with its area and distance.
+
+        Raises
+        ------
+        ConfigError
+            If the case's mesh cannot give one (every member's would fail the same way),
+            naming why.
+        SimulationError
+            If the mesh's files cannot be read (this member).
+        """
+
+
+@runtime_checkable
+class StateWriter(Protocol):
+    """A simulator that states, before any run, what its runs write for its reader.
+
+    A consumer asks for states (names at dates), and the simulator checks that
+    its input writes them, refusing a configuration whose input cannot, with what to add.
+    The services ask it in place of reading a deck's template (an Eclipse-format deck's
+    grid and restart schedule); a simulator without it is read as a deck.
+    """
+
+    def state_output(
+        self, names: Sequence[str], times: Sequence[StateAt], *, region: str | None = None
+    ) -> StateOutput:
+        """Return what the runs write for the states ``names`` at ``times``.
+
+        ``times`` are all dates or all seconds since the run's start
+        (:func:`~apex.domain.case_state.state_window` gives the seconds each asks for).
+        ``region`` names one region of a multi-region case (``[case] field_region``); the
+        services pass it only when it is given, so a writer of single-region cases may
+        leave the keyword out, and one that takes it refuses a region its case lacks.
+
+        Raises
+        ------
+        ConfigError
+            If the simulator's input cannot write them (every member would fail the same
+            way), naming what is missing and what to add.
+        """
 
 
 #: A reader plugin: a class whose constructor opens one case (the run's path, without a

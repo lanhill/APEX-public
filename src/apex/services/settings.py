@@ -432,6 +432,10 @@ class ChatSection(_Strict):
     # minutes to read). What it gives is dropped; a tool in a worker process (isolate_tools)
     # is killed, another runs on in the background. 0: no limit.
     tool_timeout_s: float = Field(default=120.0, ge=0)
+    # Model calls that time out and are asked once more per answer, with the conversation
+    # trimmed (older turns dropped, tool results shortened), before the answer is given up
+    # (issue #284: a follow-up whose call hung twice was lost). 0: none.
+    timeout_retries: int = Field(default=1, ge=0)
     # Run the slow read-only tools (case_info, monitor_run, diagnose_run, write_report) in a
     # worker process each, killed when the tool is abandoned (a stop or tool_timeout_s), so
     # that it stops using CPU and memory. false: in a thread, which

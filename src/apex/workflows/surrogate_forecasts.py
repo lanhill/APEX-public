@@ -97,6 +97,24 @@ class ActiveModel:
         return self.simulator.fitted()[1]
 
 
+def carry_connectivity(fitted: object, model: object) -> None:
+    """Give a refit the cells and faces its model was fitted on.
+
+    A plugin with ``uses_connectivity`` keeps the runs' cell graph it was fitted on
+    (``fitted_connectivity()``, from its arrays); a refit has no build directory to read it
+    from, so it is handed over, and a model on a mesh refits on that mesh.
+    """
+    if not getattr(model, "uses_connectivity", False):
+        return
+    given = getattr(fitted, "fitted_connectivity", None)
+    use = getattr(model, "use_connectivity", None)
+    if not callable(given) or not callable(use):
+        return
+    found = given()
+    if found is not None:
+        use(*found)
+
+
 #: Loads a model's files as an :class:`ActiveModel`, refusing another identity (``None``: any).
 ModelLoader = Callable[[Path, str | None], ActiveModel]
 
@@ -334,6 +352,7 @@ class SurrogateForecasting:
         train_positions = [p for p, r in enumerate(combined.run_ids) if r not in held_ids]
         manifest = self.active.manifest
         model = self.plugin()
+        carry_connectivity(self.active.model, model)
         try:
             fitted = fit_and_gate(
                 model, combined.columns(train_positions), combined.columns(held_positions), rng,

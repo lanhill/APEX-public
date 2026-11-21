@@ -45,9 +45,24 @@ Optional capabilities, read with ``getattr`` as the simulators' are:
   grid the fields are, in Eclipse (F) order with inactive cells 0. A plugin with
   ``unstructured_fields`` on a reader that gives a structured grid still gets that whole
   grid, padded with zeros on the inactive cells;
+- ``uses_connectivity``, a ``bool`` (``False`` by default): the plugin takes the runs' cells
+  and the faces between them through a method
+  ``use_connectivity(mesh: CaseMesh, graph: CellGraph)``, which a build (with or without
+  ``[case] fields``) calls before ``fit`` when its simulator's case-state reader has the
+  capability ``connectivity`` (the graph of the first run read; the cells the reader gives,
+  ``apex.domain.cell_graph``); without the capability it is not called and the plugin keeps
+  to its own geometry. An instance may refine the class's word (``False`` for options that
+  take no graph): a build whose plugin instance does not take it records none. A refit in
+  history matching hands the new model the one the active model was fitted on, when the
+  plugin gives it (``fitted_connectivity()``);
 - ``requires``, a ``tuple[str, ...]`` of simulator capabilities the plugin needs to be
   trained (the intrusive reduced models); none by default;
-- ``version``, a ``str`` recorded in the manifest.
+- ``version``, a ``str`` recorded in the manifest;
+- ``capabilities``, a :class:`SurrogateCapabilities`: what the plugin
+  takes and gives, which each workflow's :class:`SurrogateRequirement` is checked against.
+  The class's value is what the plugin can do with some options; an instance may narrow it
+  for its own options (``self.capabilities = ...``). Read with :func:`capabilities_of`,
+  which derives one for a plugin that declares none.
 
 A plugin's options declare what their strings name (``core.options``), as every
 plugin's.
@@ -57,7 +72,11 @@ group ``apex.surrogate_designs``): core's own (:class:`BuiltinDesign`) and adapt
 (:class:`AdaptiveDesign`) that choose runs from a fitted surrogate.
 """
 
+import functools
+import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Protocol, Self, runtime_checkable
 
 import numpy as np
@@ -66,6 +85,8 @@ from numpy.typing import NDArray
 from apex.core.simulation import DatedStates
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import SnapshotSet
+
+logger = logging.getLogger(__name__)
 
 #: What a model is given: ``{variable: (size, n_members)}``.
 SurrogateInputs = Mapping[str, NDArray[np.float64]]
@@ -311,3 +332,290 @@ class EarlyStartSurrogate(Protocol):
         which a key among the early keys gets back unchanged.
         """
         ...
+
+
+# ============================================== capabilities
+
+#: What a surrogate may take: the member's ``state`` (after its parameterizations), the
+#: wells' ``controls`` (an optimization's, or a prediction's scenario), the member's own
+#: ``early_responses`` (its simulated responses up to a date, :class:`EarlyStartSurrogate`)
+#: and a ``coarse_responses`` forecast (:class:`CoarseCorrectedSurrogate`).
+SURROGATE_INPUTS = frozenset({"state", "controls", "early_responses", "coarse_responses"})
+
+#: What a surrogate may give: ``responses`` at data keys (every model's ``predict``), and
+#: state ``fields`` over time (:class:`FieldSurrogate`).
+SURROGATE_OUTPUTS = frozenset({"responses", "fields"})
+
+
+@dataclass(frozen=True)
+class SurrogateCapabilities:
+    """What a surrogate plugin takes and gives.
+
+    Attributes
+    ----------
+    inputs
+        A non-empty subset of :data:`SURROGATE_INPUTS`.
+    outputs
+        A non-empty subset of :data:`SURROGATE_OUTPUTS`.
+    extrapolates
+        Whether it predicts beyond its training runs' horizon in time.
+    uncertainty
+        Whether it gives a predictive standard deviation (``predict_std``).
+    gradients
+        Whether it supplies the derivatives of its outputs with respect to its inputs.
+    """
+
+    inputs: frozenset[str]
+    outputs: frozenset[str] = frozenset({"responses"})
+    extrapolates: bool = False
+    uncertainty: bool = False
+    gradients: bool = False
+
+    def __post_init__(self) -> None:
+        """Check the words against the vocabularies.
+
+        Raises
+        ------
+        ValueError
+            If ``inputs`` or ``outputs`` is empty or names an unknown word.
+        """
+        for name, given, known in (
+            ("inputs", self.inputs, SURROGATE_INPUTS),
+            ("outputs", self.outputs, SURROGATE_OUTPUTS),
+        ):
+            words = frozenset(given)
+            object.__setattr__(self, name, words)  # a list or set given: kept as frozen
+            if not words:
+                raise ValueError(f"a surrogate's {name} cannot be empty")
+            unknown = sorted(words - known)
+            if unknown:
+                raise ValueError(f"unknown surrogate {name} {unknown}: known are {sorted(known)}")
+
+    def without_inputs(self, *names: str) -> "SurrogateCapabilities":
+        """Return a copy without the inputs ``names``: an instance narrowing its class's.
+
+        Raises
+        ------
+        ValueError
+            If no input would be left.
+        """
+        return replace(self, inputs=self.inputs - frozenset(names))
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the capabilities as JSON values (sorted lists for the sets)."""
+        return {
+            "inputs": sorted(self.inputs),
+            "outputs": sorted(self.outputs),
+            "extrapolates": self.extrapolates,
+            "uncertainty": self.uncertainty,
+            "gradients": self.gradients,
+        }
+
+
+@dataclass(frozen=True)
+class SurrogateRequirement:
+    """What a workflow needs of a surrogate.
+
+    Attributes
+    ----------
+    workflow
+        The workflow's name (``history_matching``, ``prediction``, ``optimization``, ...).
+    outputs
+        The outputs it needs, each.
+    refused_inputs
+        ``(input, why)`` pairs: inputs it cannot give a model, with the reason.
+    required_inputs
+        ``(input, why)`` pairs: inputs a model must take, with the reason and what to use
+        instead.
+    extrapolates, uncertainty, gradients
+        The capabilities it needs (none by default).
+    """
+
+    workflow: str
+    outputs: frozenset[str] = frozenset({"responses"})
+    refused_inputs: tuple[tuple[str, str], ...] = field(default=())
+    required_inputs: tuple[tuple[str, str], ...] = field(default=())
+    extrapolates: bool = False
+    uncertainty: bool = False
+    gradients: bool = False
+
+
+#: Each workflow's requirement. They reproduce what each workflow
+#: accepted before capabilities were declared, with two stricter rows (the user,
+#: 2026-11-21): a history match needs a model of the member's ``state`` (the variables it
+#: updates) and takes any such model; a prediction refuses a coarse-corrected one (its
+#: coarse stack would have to run to the horizon; times beyond a model's keys are refused
+#: by the keys themselves, so it does not need ``extrapolates``); an optimization needs a
+#: model of the wells' ``controls`` (the variables it changes) and refuses an early-start
+#: one. A workflow added later (e.g. risk assessment) adds its row.
+SURROGATE_REQUIREMENTS: Mapping[str, SurrogateRequirement] = MappingProxyType(
+    {
+        "history_matching": SurrogateRequirement(
+            "history_matching",
+            required_inputs=(
+                (
+                    "state",
+                    "a history match updates each member's state, and a model that does not "
+                    "take it does not answer from the state it updates; use a surrogate that "
+                    "takes the state",
+                ),
+            ),
+        ),
+        "prediction": SurrogateRequirement(
+            "prediction",
+            refused_inputs=(
+                (
+                    "coarse_responses",
+                    "a prediction would have to run its coarse stack to the horizon",
+                ),
+            ),
+        ),
+        "optimization": SurrogateRequirement(
+            "optimization",
+            required_inputs=(
+                (
+                    "controls",
+                    "an optimization changes the wells' controls, and a model that does not "
+                    "take them does not answer from the controls it changes; use a surrogate "
+                    "that takes controls, built over the optimization's controls",
+                ),
+            ),
+            refused_inputs=(
+                (
+                    "early_responses",
+                    "each evaluation would need its own early simulation first",
+                ),
+            ),
+        ),
+    }
+)
+
+
+def missing_capabilities(
+    capabilities: SurrogateCapabilities, requirement: SurrogateRequirement
+) -> list[str]:
+    """Return what ``capabilities`` lack for ``requirement``, one phrase each (empty: none).
+
+    An output the workflow needs that the model does not give, an input the workflow needs
+    that the model does not take (with why and what to use instead), an input the model
+    takes that the workflow cannot give (with why), and each capability the workflow needs.
+    """
+    found = [
+        f"outputs: {name} (not given)"
+        for name in sorted(requirement.outputs - capabilities.outputs)
+    ]
+    found += [
+        f"inputs: {name} (not taken: {why})"
+        for name, why in requirement.required_inputs
+        if name not in capabilities.inputs
+    ]
+    found += [
+        f"inputs: {name} ({why})"
+        for name, why in requirement.refused_inputs
+        if name in capabilities.inputs
+    ]
+    found += [
+        f"{name} (not supplied)"
+        for name in ("extrapolates", "uncertainty", "gradients")
+        if getattr(requirement, name) and not getattr(capabilities, name)
+    ]
+    return found
+
+
+def refusal(plugin: str, capabilities: SurrogateCapabilities, workflow: str) -> str | None:
+    """Return why ``workflow`` refuses the plugin ``plugin``, or ``None`` if it serves.
+
+    Raises
+    ------
+    KeyError
+        If ``workflow`` has no requirement (:data:`SURROGATE_REQUIREMENTS`).
+    """
+    missing = missing_capabilities(capabilities, SURROGATE_REQUIREMENTS[workflow])
+    if not missing:
+        return None
+    return (
+        f"the surrogate plugin {plugin!r} cannot serve {workflow.replace('_', ' ')}: "
+        + "; ".join(missing)
+    )
+
+
+def serves(capabilities: SurrogateCapabilities) -> list[str]:
+    """Return the workflows whose requirement ``capabilities`` meet, in the table's order."""
+    return [
+        name
+        for name, requirement in SURROGATE_REQUIREMENTS.items()
+        if not missing_capabilities(capabilities, requirement)
+    ]
+
+
+def _has(model: object, *names: str) -> bool:
+    """Whether ``model`` (a class or an instance) has a callable of every name."""
+    return all(callable(getattr(model, name, None)) for name in names)
+
+
+def _early_start(model: object) -> bool:
+    """Whether ``model`` continues each member's early run (an instance by its protocol)."""
+    if isinstance(model, type):
+        return _has(model, "early_keys", "early_coordinates", "predict_from_early")
+    return isinstance(model, EarlyStartSurrogate)
+
+
+def _coarse_corrected(model: object) -> bool:
+    """Whether ``model`` corrects a coarse forecast (an instance by its protocol)."""
+    if isinstance(model, type):
+        return _has(model, "coarse_coordinates", "predict_corrected")
+    return isinstance(model, CoarseCorrectedSurrogate)
+
+
+@functools.cache
+def _derived_note(plugin: str) -> None:
+    """Log once per plugin type that its capabilities were derived (it declares none)."""
+    logger.debug("surrogate plugin %s declares no capabilities: derived from its methods", plugin)
+
+
+def capabilities_of(model: object) -> SurrogateCapabilities:
+    """Return the capabilities of a surrogate plugin's class or of a model (an instance).
+
+    A declared ``capabilities`` is taken as given, except that an instance's structural
+    capabilities are read from the instance itself: ``uncertainty`` is whether it has a
+    ``predict_std``, ``fields`` whether it has a ``predict_fields`` (``responses`` always:
+    every model predicts at keys), and ``early_responses``/``coarse_responses`` whether it
+    is an :class:`EarlyStartSurrogate` or a :class:`CoarseCorrectedSurrogate` (an instance
+    whose declared inputs would then be empty takes the ``state``). The workflows call
+    those methods, so a declaration can neither claim nor hide them (several plugins set
+    ``predict_std`` per instance, from their options).
+
+    A plugin that declares none (one written before declarations: the interface stays
+    stable) gets one derived from its methods: ``inputs`` ``{state, controls}``, plus
+    ``early_responses`` or ``coarse_responses`` as above; ``outputs`` ``responses``, plus
+    ``fields`` with ``predict_fields``; ``uncertainty`` with ``predict_std``; no
+    ``extrapolates`` or ``gradients``.
+    """
+    declared = getattr(model, "capabilities", None)
+    early, coarse = _early_start(model), _coarse_corrected(model)
+    if not isinstance(declared, SurrogateCapabilities):
+        kind = model if isinstance(model, type) else type(model)
+        _derived_note(f"{kind.__module__}.{kind.__qualname__}")
+        declared = SurrogateCapabilities(
+            inputs=frozenset({"state", "controls"}),
+            outputs=frozenset({"responses"}),
+            uncertainty=_has(model, "predict_std"),
+        )
+        if _has(model, "predict_fields"):
+            declared = replace(declared, outputs=declared.outputs | {"fields"})
+    elif isinstance(model, type):
+        return declared
+    extra = {"early_responses"} if early else set()
+    extra |= {"coarse_responses"} if coarse else set()
+    if isinstance(model, type):
+        return replace(declared, inputs=declared.inputs | extra) if extra else declared
+    # An instance: every structural word from the instance itself (every model predicts at
+    # keys, so it gives responses), the declaration adding only what structure cannot tell.
+    inputs = (declared.inputs - {"early_responses", "coarse_responses"}) | extra
+    outputs = {"responses"} | ({"fields"} if _has(model, "predict_fields") else set())
+    return replace(
+        declared,
+        inputs=frozenset(inputs or {"state"}),
+        outputs=frozenset(outputs),
+        uncertainty=_has(model, "predict_std"),
+    )

@@ -51,9 +51,11 @@ from apex.core.surrogates import (
 )
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
+    SECONDS_AXIS,
     DomainExtent,
     MahalanobisBound,
     TrainingDomain,
+    field_time_position,
     time_position,
 )
 
@@ -74,6 +76,17 @@ def _as_matrix(value: NDArray[np.float64], name: str) -> NDArray[np.float64]:
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} holds values that are not finite")
     return array
+
+
+def _dated(field_times: Sequence[str]) -> list[str]:
+    """Return the field times that join the keys' time range: the dates (as before).
+
+    Field times in seconds have an axis of their own
+    (:func:`~apex.domain.surrogate.field_time_position`), never the keys' steps nor dates:
+    they never join the range, so a key's time or a report date is never validated by a
+    field's seconds. The fields' own times are kept whole in ``field_times``.
+    """
+    return [t for t in field_times if field_time_position(t)[0] != SECONDS_AXIS]
 
 
 def _time_range(times: Sequence[str]) -> tuple[str, str] | None:
@@ -221,7 +234,7 @@ def domain_from_coordinates(
     upper = points.max(axis=-1)
     bound = float(residual.max())
     if time_range is None:
-        time_range = _time_range([k.time for k in keys] + list(field_times))
+        time_range = _time_range([k.time for k in keys] + _dated(field_times))
     return TrainingDomain(
         lower=lower,
         upper=upper,

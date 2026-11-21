@@ -40,6 +40,7 @@ from pydantic import (
     model_validator,
 )
 
+from apex.domain.case_state import parse_state_times
 from apex.domain.config import PluginSection
 from apex.domain.observations import DataKey
 from apex.domain.state import StateLayout
@@ -95,7 +96,9 @@ def time_position(label: str) -> tuple[int, float]:
     """Return a time label's place on its axis: ``(0, step)`` or ``(1, POSIX seconds)``.
 
     Time labels are step indices as text or ISO dates (date-times), as
-    :class:`~apex.domain.observations.DataKey` says; naive date-times are taken as UTC. The
+    :class:`~apex.domain.observations.DataKey` says; naive date-times are taken as UTC. Other
+    numbers (``1.5``) are refused: a key's decimal time could not be told from a step or a
+    field time's seconds (:func:`field_time_position`). The
     first element tells the two axes apart, so a step is never compared with a date.
 
     Raises
@@ -113,6 +116,28 @@ def time_position(label: str) -> tuple[int, float]:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=dt.UTC)
     return (1, moment.timestamp())
+
+
+#: A field time's axis of its own: seconds since the run's start.
+SECONDS_AXIS = 2
+
+
+def field_time_position(label: str) -> tuple[int, float]:
+    """Return a field time's place: ``(1, POSIX seconds)`` for a date, ``(2, seconds)`` else.
+
+    Field times are ISO dates or numbers of seconds since the run's start
+    (1). Seconds have an axis of their own, never the keys' steps: a field time ``86400`` is
+    not step 86400, so it is never within, nor widens, a range of the keys' times.
+
+    Raises
+    ------
+    ValueError
+        If the label is neither (:func:`~apex.domain.case_state.parse_state_times`).
+    """
+    (time,) = parse_state_times([label])
+    if isinstance(time, dt.date):
+        return time_position(label)
+    return (SECONDS_AXIS, float(time))
 
 
 # ----------------------------------------------------------------------------- snapshots
@@ -141,6 +166,11 @@ class SnapshotProvenance(_Frozen):
         description="The case has a [model_error], which the runs left out: they simulated "
         "the deck alone, g, never g + r.",
     )
+    field_region: str | None = Field(
+        default=None,
+        description="The region the field snapshots were read from (`[case] field_region`, "
+        "); none for a single-region case.",
+    )
 
     @model_serializer(mode="wrap")
     def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -152,6 +182,8 @@ class SnapshotProvenance(_Frozen):
             document.pop("coarse", None)
         if not document.get("model_error_left_out"):
             document.pop("model_error_left_out", None)
+        if document.get("field_region") is None:
+            document.pop("field_region", None)  # absent
         return document
 
     def stack_mismatches(self, other: "SnapshotProvenance") -> list[str]:
@@ -291,7 +323,7 @@ class SnapshotSet:
                 )
             fields[name] = array
         for time in self.field_times:
-            time_position(time)
+            field_time_position(time)
         object.__setattr__(self, "inputs", MappingProxyType(inputs))
         object.__setattr__(self, "outputs", outputs)
         object.__setattr__(self, "fields", MappingProxyType(fields))
@@ -647,7 +679,7 @@ class TrainingDomain:
         ):
             raise ValueError("a domain's ellipsoid covers coordinates it does not have")
         for time in self.field_times:
-            time_position(time)
+            field_time_position(time)
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
         object.__setattr__(self, "keys", tuple(self.keys))
@@ -1064,7 +1096,15 @@ class SurrogateCaseSection(_Frozen):
     )
     field_times: list[str] = Field(
         default_factory=list,
-        description="The dates (ISO) the fields are saved at; required with `fields`.",
+        description="The times the fields are saved at; required with `fields`: all ISO "
+        "dates, or all numbers, seconds since the run's start (for a simulator whose run has "
+        "no calendar). A number's label is its text.",
+    )
+    field_region: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The region whose states the fields are read from, for a simulator "
+        "whose case has several; a simulator of one region refuses it.",
     )
     field_cells: int | None = Field(
         default=None,
@@ -1074,12 +1114,32 @@ class SurrogateCaseSection(_Frozen):
         "reader has no deck template (an unstructured mesh's cells, say).",
     )
 
+    @field_validator("field_times", mode="before")
+    @classmethod
+    def _times_as_labels(cls, value: object) -> object:
+        """Keep a number's text as its label (seconds); refuse booleans."""
+        if not isinstance(value, list):
+            return value
+        labels: list[object] = []
+        for item in value:
+            if isinstance(item, bool):
+                raise ValueError(f"field_times: {item!r} is not a date nor seconds")
+            labels.append(repr(item) if isinstance(item, float) else
+                          str(item) if isinstance(item, int) else item)  # fmt: skip
+        return labels
+
     @model_validator(mode="after")
     def _fields_have_times(self) -> "SurrogateCaseSection":
         if self.fields and not self.field_times:
             raise ValueError("[case] fields need field_times (the dates they are saved at)")
         if self.field_times and not self.fields:
             raise ValueError("[case] field_times without fields")
+        if self.field_region is not None and not self.fields:
+            raise ValueError("[case] field_region without fields")
+        try:
+            parse_state_times(self.field_times)
+        except ValueError as error:
+            raise ValueError(f"[case] field_times: {error}") from None
         if len({f.upper() for f in self.fields}) != len(self.fields):
             raise ValueError("[case] fields repeat a name (restart arrays ignore case)")
         return self
@@ -1370,6 +1430,20 @@ class SurrogateBuildPlan(_Frozen):
     identity: str | None = Field(
         default=None,
         description="What the build computes, as a digest (the service's approval names it; ).",
+    )
+    state_bytes_per_run: int | None = Field(
+        default=None,
+        description="About how many bytes each run's state files add for [case] fields: cells "
+        "x fields x field times x bytes per value, an estimate; None without "
+        "fields or state files.",
+    )
+    state_bytes: int | None = Field(
+        default=None, description="The same over the plan's simulator runs, an estimate."
+    )
+    state_bytes_per_value: float | None = Field(
+        default=None,
+        description="The bytes per value the estimate takes (the simulator's format, overhead "
+        "included).",
     )
 
 

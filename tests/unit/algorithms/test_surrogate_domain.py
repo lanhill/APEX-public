@@ -20,9 +20,11 @@ from apex.algorithms.surrogates.domain import (
 from apex.core.errors import ApexError, SimulationError, SurrogateDomainError
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
+    SECONDS_AXIS,
     DomainExtent,
     TrainingDomain,
     TrainingDomainDocument,
+    field_time_position,
     time_position,
 )
 
@@ -301,3 +303,41 @@ def test_the_keys_guard_lets_members_outside_pass_but_not_keys(
     with pytest.raises(SurrogateDomainError, match="not trained and gated on") as raised:
         module.refuse_keys_outside(_box(), None, {}, [7])  # type: ignore[arg-type]
     assert "member 7" not in str(raised.value)
+
+
+def test_decimal_key_times_are_refused_as_before() -> None:
+    """The review: a key's decimal time is not mixed with steps."""
+    for label in ("1.5", "1e3", "inf"):
+        with pytest.raises(ValueError, match="neither a step index"):
+            time_position(label)
+
+
+def test_field_times_in_seconds_have_an_axis_of_their_own() -> None:
+    """Seconds never join, nor widen, the keys' range: steps, numbers or dates."""
+    assert field_time_position("86400") == (SECONDS_AXIS, 86400.0)
+    assert field_time_position("1500.5") == (SECONDS_AXIS, 1500.5)
+    assert field_time_position("2024-01-01")[0] == 1
+    points = np.array([[0.0, 1.0]])
+    steps = [DataKey("0", "WOPR:P1"), DataKey("2", "WOPR:P1")]
+    on_steps = domain_from_coordinates(points, np.zeros(2), steps, fields=["T"],
+                                       field_times=["31536000"])  # fmt: skip
+    assert on_steps.time_range == ("0", "2")
+    assert check_request(on_steps, times=["31536000"]).times_outside == ("31536000",)
+    assert check_request(on_steps, times=["1"]).times_outside == ()
+    dated = [DataKey("2024-01-01", "WOPR:P1"), DataKey("2024-02-01", "WOPR:P1")]
+    on_dates = domain_from_coordinates(points, np.zeros(2), dated, fields=["T"],
+                                       field_times=["86400"])  # fmt: skip
+    assert on_dates.time_range == ("2024-01-01", "2024-02-01")
+    assert on_dates.field_times == ("86400",)
+    alone = domain_from_coordinates(points, np.zeros(2), [], fields=["T"],
+                                    field_times=["86400", "3600.5"])  # fmt: skip
+    assert alone.time_range is None
+    assert check_request(alone, times=["5"]).times_outside == ("5",)
+    # Number keys (a decimal time) are refused as before, whatever the fields' times.
+    with pytest.raises(ValueError, match="neither a step index"):
+        domain_from_coordinates(points, np.zeros(2), [DataKey("0.5", "WOPR:P1")],
+                                fields=["T"], field_times=["86400"])  # fmt: skip
+    # Dated field times beside step keys are refused, as before.
+    with pytest.raises(ValueError, match="mix step indices and dates"):
+        domain_from_coordinates(points, np.zeros(2), steps, fields=["T"],
+                                field_times=["2024-01-01"])  # fmt: skip

@@ -24,7 +24,7 @@ from apex.cli.main import app
 from apex.core.errors import ConfigError, SurrogateDomainError
 from apex.core.plugins import simulators, surrogate_models
 from apex.core.simulation import MemberInput
-from apex.core.surrogates import SurrogateInputs, SurrogateParts
+from apex.core.surrogates import SurrogateCapabilities, SurrogateInputs, SurrogateParts
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import SnapshotSet
 from apex.services import optimization, surrogates
@@ -352,6 +352,33 @@ def test_a_robust_optimization_gives_each_design_member_a_realization(tmp_path: 
     result = layout.read_result(run.run_dir)
     assert len(result["objective_per_realization"]) == 3
     assert result["objective"] == pytest.approx(result["surrogate_objective"], rel=1e-10)
+
+
+class _StateOnlyFeatures(_Features):
+    """The same map, declared a model of the state alone."""
+
+    capabilities = SurrogateCapabilities(inputs=frozenset({"state"}))
+
+
+def test_a_build_for_an_optimization_refuses_a_plugin_without_controls(tmp_path: Path) -> None:
+    """An optimization needs a model of the
+    controls, so a build of its responses refuses one of the state alone before any run."""
+    _case(tmp_path, "case")
+    text = BUILD.format(name="state_only", bias=0.0, case="case.toml", box="")
+    (tmp_path / "state.toml").write_text(text.replace('"test_toy_features"', '"test_state_only"'))
+    surrogate_models.register("test_state_only")(_StateOnlyFeatures)
+    try:
+        with pytest.raises(ConfigError) as planned:
+            surrogates.plan_build(surrogates.load_surrogate_config(tmp_path / "state.toml"))
+        with pytest.raises(ConfigError) as built:
+            surrogates.build(tmp_path / "state.toml")
+    finally:
+        surrogate_models.remove("test_state_only")
+    for error in (planned, built):
+        message = str(error.value)
+        assert "plugin 'test_state_only' cannot serve optimization: inputs: controls" in message
+        assert "use a surrogate that takes controls" in message
+    assert ToyReservoir.runs == 0
 
 
 def test_validate_reports_an_unknown_plugin_and_a_bad_objective_option(tmp_path: Path) -> None:

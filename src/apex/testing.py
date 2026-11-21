@@ -11,7 +11,10 @@ A package's ``conftest.py`` opts in with ``pytest_plugins = ["apex.testing"]`` (
 - ``small_deck``, a deck with a history, and ``write_pet_case``, a PET case, for the
   case-converter;
 - :func:`assert_block_states_conform`: a block-state source (a surrogate's) against a
-  deck's run, as a model-error model reads them.
+  deck's run, as a model-error model reads them;
+- :class:`MeanAffineFields`, a field surrogate without torch, and
+  :func:`build_field_surrogate`, a build with it, for tests of the field snapshots end to
+  end on a simulator (check 3).
 
 It needs pytest (a development dependency), so only tests import it.
 """
@@ -19,6 +22,7 @@ It needs pytest (a development dependency), so only tests import it.
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 import numpy as np
 import pytest
@@ -33,6 +37,7 @@ from apex.core.simulation import (
     Simulator,
 )
 from apex.domain.observations import DataKey
+from apex.domain.surrogate import SnapshotSet
 from apex.simulation.model_error import WellSchedule
 
 
@@ -496,3 +501,179 @@ def assert_block_states_conform(
         np.testing.assert_allclose(
             got, want, rtol=rtol, atol=atol, err_msg=f"well {well.name}'s model inputs"
         )
+
+
+class MeanAffineFields:
+    """A field surrogate for tests: every output affine in each input variable's mean.
+
+    Not a method: a stand-in that trains in NumPy alone (least squares, no ``torch``), so
+    that a build with ``[case] fields`` runs end to end where the field surrogates' training
+    extra is not installed (check 3: the field snapshots on a simulator's
+    case-state reader). Its coordinates are the variables' means ``(n_variables,
+    n_members)`` and its fit is exact least squares on ``[means; 1]``, so a dozen runs
+    determine it; the fit is deterministic and does not use its generator. It reads its
+    fields as flat arrays and works on any cell layout; it does not declare
+    ``unstructured_fields``, so a build asks for a structured grid on its behalf (the case's
+    reader must give one), as for the grid-based field surrogates.
+    Register it under a test name (``surrogate_models.register(name)(MeanAffineFields)``).
+    """
+
+    version = "1"
+
+    def __init__(self) -> None:
+        self.keys: tuple[DataKey, ...] = ()
+        self.names: tuple[str, ...] = ()
+        self.field_times: tuple[str, ...] = ()
+        self.weights = np.zeros((0, 0))
+        self.field_weights: dict[str, NDArray[np.float64]] = {}
+
+    def _means(self, inputs: Mapping[str, NDArray[np.float64]]) -> NDArray[np.float64]:
+        """``(n_variables, n_members)``: each variable's mean over its entries."""
+        return np.vstack([np.asarray(inputs[n], np.float64).mean(axis=0) for n in self.names])
+
+    def _design(self, inputs: Mapping[str, NDArray[np.float64]]) -> NDArray[np.float64]:
+        means = self._means(inputs)
+        return np.vstack([means, np.ones((1, means.shape[1]))])
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        """Fit every output and field value by least squares on the means; ``rng`` is unused."""
+        self.names = tuple(snapshots.layout.names)
+        self.keys = snapshots.keys
+        self.field_times = snapshots.field_times
+        design = self._design(snapshots.inputs).T  # (n_runs, n_variables + 1)
+        solved = np.linalg.lstsq(design, snapshots.outputs.T, rcond=None)[0]
+        self.weights = np.ascontiguousarray(solved.T)
+        self.field_weights = {}
+        for name, values in snapshots.fields.items():
+            flat = values.reshape(-1, snapshots.n_runs)  # (cells * times, n_runs)
+            solved = np.linalg.lstsq(design, flat.T, rcond=None)[0]
+            self.field_weights[name] = np.ascontiguousarray(solved.T)
+
+    def coordinates(
+        self, inputs: Mapping[str, NDArray[np.float64]]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return the means and a zero residual (the model sees nothing else)."""
+        means = self._means(inputs)
+        return means, np.zeros(means.shape[1])
+
+    def predict(
+        self, inputs: Mapping[str, NDArray[np.float64]], keys: Sequence[DataKey]
+    ) -> NDArray[np.float64]:
+        """Return ``(len(keys), n_members)``."""
+        rows = [self.keys.index(k) for k in keys]
+        return np.ascontiguousarray((self.weights @ self._design(inputs))[rows])
+
+    def predict_fields(
+        self, inputs: Mapping[str, NDArray[np.float64]], names: Sequence[str], times: Sequence[str]
+    ) -> dict[str, NDArray[np.float64]]:
+        """Return ``{name: (n_cells, len(times), n_members)}``."""
+        design = self._design(inputs)
+        found = {}
+        for name in names:
+            cube = (self.field_weights[name] @ design).reshape(
+                -1, len(self.field_times), design.shape[1]
+            )
+            found[name] = np.ascontiguousarray(cube[:, [self.field_times.index(t) for t in times]])
+        return found
+
+    def to_arrays(
+        self,
+    ) -> tuple[Mapping[str, object], Mapping[str, NDArray[np.generic]]]:
+        """Return its manifest and arrays."""
+        own = {
+            "names": list(self.names),
+            "keys": [[k.time, k.datatype, k.index] for k in self.keys],
+            "field_times": list(self.field_times),
+            "fields": sorted(self.field_weights),
+        }
+        arrays = {"weights": self.weights}
+        arrays.update({f"field_{n}": w for n, w in self.field_weights.items()})
+        return own, arrays
+
+    @classmethod
+    def from_arrays(
+        cls, manifest: Mapping[str, object], arrays: Mapping[str, NDArray[np.generic]]
+    ) -> Self:
+        """Return the model :meth:`to_arrays` described."""
+        model = cls()
+        model.names = tuple(str(n) for n in manifest["names"])  # type: ignore[attr-defined]
+        model.keys = tuple(DataKey(t, d, i) for t, d, i in manifest["keys"])  # type: ignore[attr-defined]
+        model.field_times = tuple(str(t) for t in manifest["field_times"])  # type: ignore[attr-defined]
+        model.weights = np.asarray(arrays["weights"], np.float64)
+        model.field_weights = {
+            str(n): np.asarray(arrays[f"field_{n}"], np.float64)
+            for n in manifest["fields"]  # type: ignore[attr-defined]
+        }
+        return model
+
+
+#: The name :func:`build_field_surrogate` registers :class:`MeanAffineFields` under.
+MEAN_AFFINE_FIELDS = "test_mean_affine_fields"
+
+
+@dataclass(frozen=True)
+class FieldBuild:
+    """What :func:`build_field_surrogate` gives: the build's folder, completion and gate."""
+
+    path: Path
+    complete: bool
+    gate: Mapping[str, object]
+    seconds: float
+
+
+def build_field_surrogate(
+    folder: Path,
+    case_config: Path,
+    fields: Sequence[str],
+    field_times: Sequence[str],
+    *,
+    training: int = 12,
+    held_out: int = 3,
+    workers: int = 3,
+    seed: int = 7,
+) -> FieldBuild:
+    """Build :class:`MeanAffineFields` on a case's runs with ``[case] fields`` and gate it.
+
+    Writes ``folder/build.toml`` (design ``prior``, ``training`` + ``held_out`` runs, the
+    process executor with ``workers``) and runs it in this process
+    (``services.surrogates.build``, as ``apex surrogate build``). Registers the plugin under
+    :data:`MEAN_AFFINE_FIELDS` for the build only. ``gate`` is the build's ``gate.json``.
+    """
+    import json
+    import time
+
+    from apex.core.plugins import surrogate_models
+    from apex.services import surrogates
+
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "build.toml"
+    quoted = ", ".join(f'"{name}"' for name in fields)
+    times = ", ".join(f'"{t}"' for t in field_times)
+    path.write_text(f"""[surrogate]
+name = "fields"
+model = "{MEAN_AFFINE_FIELDS}"
+seed = {seed}
+
+[case]
+config_file = "{case_config.resolve()}"
+fields = [{quoted}]
+field_times = [{times}]
+
+[design]
+plan = "prior"
+training = {training}
+held_out = {held_out}
+
+[execution]
+name = "process"
+options = {{ workers = {workers} }}
+""")
+    surrogate_models.register(MEAN_AFFINE_FIELDS)(MeanAffineFields)
+    try:
+        began = time.perf_counter()
+        result = surrogates.build(path)
+        seconds = time.perf_counter() - began
+    finally:
+        surrogate_models.remove(MEAN_AFFINE_FIELDS)
+    gate = json.loads((result.path / "gate.json").read_text())
+    return FieldBuild(result.path, result.complete, gate, seconds)

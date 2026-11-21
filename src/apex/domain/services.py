@@ -64,6 +64,17 @@ class PluginInfo(_Document):
         description="Why it cannot be used here, e.g. a dependency of an extra that is not "
         "installed; None when it can.",
     )
+    capabilities: dict[str, Any] | None = Field(
+        default=None,
+        description="A surrogate model's capabilities: its inputs and outputs (sorted lists) "
+        "and whether it extrapolates in time, gives an uncertainty, supplies gradients; "
+        "None for other plugins.",
+    )
+    serves: list[str] | None = Field(
+        default=None,
+        description="The workflows a surrogate model serves, from its capabilities and each "
+        "workflow's requirement; None for other plugins.",
+    )
 
 
 class RunPlan(_Document):

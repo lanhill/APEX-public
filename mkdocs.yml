@@ -132,6 +132,7 @@ nav:
       - reference/plugins/variogram_estimators.md
       - reference/cli/surrogate.md
       - reference/plugins/surrogate_designs.md
+      - reference/plugins/case_state_readers.md
   - PET migration: migration/pet_parity.md
   - GMAC and the MATLAB scripts: migration/gmac.md
   - pymoo ports (GA, PSO, NSGA): migration/pymoo.md

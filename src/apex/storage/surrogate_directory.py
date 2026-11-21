@@ -12,6 +12,9 @@
       members/member_<id>.npz   one finished full run: values (n_keys,), seconds
       snapshots.jsonl      one line per finished member: ok, or failed with its message
       snapshots.npz        the assembled SnapshotSet (the surrogate's inputs, the outputs)
+      fields_connectivity.npz   the first run's mesh and cell graph, for a plugin with
+                           ``uses_connectivity`` when its simulator's reader gives them
+                           (``apex.domain.cell_graph.cell_graph_arrays``)
       simulations/member_<id>/   the simulator's work directories ([output] keep_simulations)
       coarse/              the coarse stack's runs ([coarse]; the coarse-only members too),
                            laid out as members/, snapshots.jsonl, simulations/
@@ -43,6 +46,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.core.errors import ConfigError
+from apex.domain.case_state import CaseMesh
+from apex.domain.cell_graph import CellGraph, cell_graph_from_arrays
 from apex.domain.observations import DataKey
 from apex.domain.state import StateLayout, StateVariable
 from apex.domain.surrogate import SnapshotProvenance, SnapshotSet, key_document
@@ -54,6 +59,7 @@ DESIGN = "design.npz"
 GATE = "gate.json"
 SUMMARY = "summary.json"
 CHECK = "check.json"
+FIELDS_CONNECTIVITY = "fields_connectivity.npz"
 FAILED_MARKER = "APEX_FAILED"
 
 #: What ``state.json`` names a build or a check by.
@@ -258,6 +264,23 @@ class SurrogateDirectory:
             if design.calibration_outputs is not None:
                 arrays["calibration_outputs"] = design.calibration_outputs
         _save_npz(self.path / DESIGN, arrays)
+
+    def load_connectivity(self) -> tuple[CaseMesh, CellGraph] | None:
+        """Return the runs' mesh and cell graph (``fields_connectivity.npz``), or ``None``.
+
+        Raises
+        ------
+        ConfigError
+            If the file is there but not a cell graph's.
+        """
+        path = self.path / FIELDS_CONNECTIVITY
+        if not path.is_file():
+            return None
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                return cell_graph_from_arrays({name: data[name] for name in data.files})
+        except (OSError, ValueError) as error:
+            raise ConfigError(f"cannot read {path}: {error}") from error
 
     def load_design(self) -> StoredDesign | None:
         """Return the saved design, or ``None`` if it has not been drawn."""

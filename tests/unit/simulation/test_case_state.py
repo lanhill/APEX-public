@@ -17,6 +17,7 @@ from resdata.resfile import FortIO, ResdataFile, ResdataKW, openFortIO
 
 from apex.core.case_state import (
     CaseStateReader,
+    ConnectivityReader,
     CornerGeometryReader,
     MissingState,
     check_region,
@@ -24,6 +25,7 @@ from apex.core.case_state import (
 from apex.core.errors import ConfigError, SimulationError
 from apex.core.plugins import case_state_readers
 from apex.domain.case_state import SI_UNITS, StateTime, to_si
+from apex.domain.cell_graph import grid_faces
 from apex.services import composition
 from apex.simulation.eclipse_files import UNIT_SYSTEMS, EclipseFiles
 from apex.simulation.geophysics import CaseState
@@ -467,3 +469,35 @@ def test_case_files_pass_a_transient_error_on_unchanged(
     with pytest.raises(TransientSimulationError) as caught:
         CaseFiles(case)
     assert caught.value is error
+
+
+@pytest.mark.parametrize("units", [1, 2])
+def test_the_eclipse_reader_gives_the_grids_faces(
+    write_case: Callable[..., Path], tmp_path: Path, units: int
+) -> None:
+    """The active cells' logical neighbours (the grid's definition, as
+    ``grid_faces`` gives it), each face's area from the corners (i+ ``dy dz``, j+ ``dx dz``,
+    k+ ``dx dy``, in m² whatever the deck's length) and the centres' distance."""
+    case = write_case(tmp_path / "C", SHAPE, {JAN: {"PRESSURE": 200.0}}, actnum=ACTNUM,
+                      cell=(100.0, 50.0, 5.0), units=units)  # fmt: skip
+    reader = EclipseFiles(case)
+    assert "connectivity" in EclipseFiles.capabilities
+    assert isinstance(reader, ConnectivityReader)
+    graph = reader.connectivity()
+    mesh = reader.mesh()
+    assert mesh.active is not None
+    pairs, axis = grid_faces(SHAPE, mesh.active)
+    np.testing.assert_array_equal(graph.pairs, pairs)
+    assert graph.cells == mesh.cells == 11
+    metres = 1.0 if units == 1 else 0.3048
+    # The EGRID's float32 depths (about 2000 ft) round dz to about 1e-4 of itself.
+    assert graph.areas is not None
+    assert graph.distances is not None
+    np.testing.assert_allclose(
+        graph.areas, np.choose(axis, [250.0, 500.0, 5000.0]) * metres**2, rtol=1e-4
+    )
+    np.testing.assert_allclose(
+        graph.distances, np.choose(axis, [100.0, 50.0, 5.0]) * metres, rtol=1e-4
+    )
+    with pytest.raises(ConfigError, match="has one region"):
+        reader.connectivity("gas")

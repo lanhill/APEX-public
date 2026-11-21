@@ -426,3 +426,21 @@ def test_only_a_cut_interleaves_the_candidates_shown(tmp_path: Path) -> None:
     assert cut["note"] == (
         "4 candidates; 2 are shown, interleaved by vector type (each type's own order kept)"
     )
+
+
+def test_a_bad_option_leaves_the_output_untouched(tmp_path: Path, small_deck: Path) -> None:
+    """The review: refused before anything is written."""
+    output = tmp_path / "case"
+    result = CliRunner().invoke(app, ["agent", "convert", "import", str(small_deck), "--out",
+                                      str(output), "--no-llm", "--option", "colour=red",
+                                      "--root", str(tmp_path / "svc")])  # fmt: skip
+    assert result.exit_code != 0
+    assert "takes no option colour" in result.output
+    assert not output.exists()
+    output.mkdir()
+    bad = CliRunner().invoke(app, ["agent", "convert", "import", str(small_deck), "--out",
+                                   str(output), "--no-llm", "--option", "colour",
+                                   "--root", str(tmp_path / "svc")])  # fmt: skip
+    assert bad.exit_code != 0
+    assert "give NAME=VALUE" in bad.output
+    assert list(output.iterdir()) == []

@@ -44,6 +44,7 @@ from apex.core.audience import audience
 from apex.core.errors import PluginError
 from apex.core.options import INPUT, TEXT, Role, role_of
 from apex.core.registry import Registry
+from apex.core.surrogates import capabilities_of, serves
 from apex.domain.config import HistoryMatchConfig, PluginSection
 from apex.domain.optimization import OptimizationConfig
 from apex.domain.services import PluginInfo
@@ -443,7 +444,19 @@ def plugin_info(registry: str, name: str) -> PluginInfo:
         ),
         visibility="private" if is_private(registry, name) else "public",
         unavailable=_unavailable(factory),
+        **_surrogate_capabilities(registry, factory),
     )
+
+
+def _surrogate_capabilities(registry: str, factory: object) -> dict[str, Any]:
+    """Return a surrogate model's ``capabilities`` and ``serves``.
+
+    From the plugin's class (what it can do with some options); nothing for other registries.
+    """
+    if registry != "surrogate_models":
+        return {}
+    capabilities = capabilities_of(factory)
+    return {"capabilities": capabilities.as_dict(), "serves": serves(capabilities)}
 
 
 def missing_extra(factory: object) -> tuple[str, str] | None:

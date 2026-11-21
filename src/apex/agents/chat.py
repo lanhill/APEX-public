@@ -477,6 +477,13 @@ class ConvertCaseArguments(BaseModel):
                                 "(time,datatype,value) or a summary file; default the deck's "
                                 "own history (WCONHIST).")  # fmt: skip
     name: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    options: dict[str, bool | int | float | str] | None = Field(
+        default=None,
+        description="The converter skill's options by name (true/false, numbers, or one of "
+        "a text option's choices), as the Agents page and `apex agent convert --option` "
+        "take them; only when the user asks for one. An option the skill does not take is "
+        "refused, naming those it takes.",
+    )
 
 
 class CreateCaseArguments(BaseModel):
@@ -1484,13 +1491,21 @@ class ChatAssistant:
             skill = converter.skill_for(source)
             if access is not None and skill.name not in visible_skills(public_only=True):
                 raise KeyError(f"no file {args.source!r}")
+            if args.options:
+                # As the REST route: the skill is allowed first, its options refused before
+                # a draft's folder is made.
+                try:
+                    skill.configure(args.options)
+                except ApexError as error:
+                    raise ValueError(str(error)) from None
             shown, folder = self.drafts(chat_id)
             name = args.name or case_name(source)
             target = folder / name
             if target.exists():
                 raise ValueError(f"{shown}/{name} exists: give another name")
             try:
-                outcome = converter.convert(source, target, history=history, name=name)
+                outcome = converter.convert(source, target, history=history, name=name,
+                                            skill=skill.name, options=args.options)  # fmt: skip
             except (ApexError, ValueError) as error:
                 raise ValueError(_no_server_paths(str(error), space)) from None
             draft = f"{shown}/{name}/config.toml"
@@ -1729,7 +1744,8 @@ class ChatAssistant:
                       DraftRunArguments, draft_run),
             LocalTool("convert_case", "Import a deck (OPM Flow, Eclipse) with its history as "
                       "an APEX history-matching case: a run draft of this chat, validated and "
-                      "costed, with notes on every assumed value; then propose_action.",
+                      "costed, with notes on every assumed value; then propose_action. "
+                      "options sets the converter skill's options when the user asks.",
                       ConvertCaseArguments, convert_case),
             LocalTool("create_case", "Create a synthetic case from a description (grid, "
                       "wells, schedule, property statistics; {} gives a five-spot): its deck, "
@@ -2369,6 +2385,7 @@ class ChatAssistant:
                 refusal_turns=self.settings.refusal_turns,
                 tool_timeout_s=self.settings.tool_timeout_s or None,
                 max_tokens=4096,
+                timeout_retries=self.settings.timeout_retries,
             ),
             on_event=on_event,
             stream_answers=self.settings.stream,

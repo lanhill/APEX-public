@@ -11,7 +11,14 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, Field
 
-from apex.agents.loop import TRIMMED, AgentLoop, Fallback, LoopSettings, result_excerpt
+from apex.agents.loop import (
+    STOPPED,
+    TRIMMED,
+    AgentLoop,
+    Fallback,
+    LoopSettings,
+    result_excerpt,
+)
 from apex.agents.providers.stub import StubProvider, StubRequest
 from apex.agents.trace import CallRecorder, request_hash
 from apex.core.llm import Completion, LLMInvalidOutput, LLMTimeout, Message, ToolCall
@@ -714,3 +721,153 @@ def test_a_repeated_call_with_an_unchanged_result_says_so(
     assert "repeated" not in results[0]
     assert [r["repeated"].split(" times")[0][-1] for r in results[1:]] == ["2", "3", "4"]
     assert all(r["result"] == results[0]["result"] for r in results)
+
+
+#: issue #284: the reply Claude (``claude -p``, prompted JSON) gave to "write up a report
+#: on my latest run", shown raw in the chat: one tool call, written twice.
+_LIST_RUNS = '{"tool": "list_runs", "arguments": {"limit": 1}}'
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        f"{_LIST_RUNS}\n{_LIST_RUNS}",  # the exact reply
+        f"\n  {_LIST_RUNS}\n\n{_LIST_RUNS}  \n",
+        f"```json\n{_LIST_RUNS}\n{_LIST_RUNS}\n```",  # parsed as prose before #284
+        f"```json\n{_LIST_RUNS}\n```\n\n```json\n{_LIST_RUNS}\n```",
+        json.dumps({"answer": f"{_LIST_RUNS}\n{_LIST_RUNS}"}),  # the call as the answer's text
+        json.dumps({"answer": _LIST_RUNS}),
+    ],
+)
+def test_a_tool_call_written_as_the_whole_reply_runs_once(tmp_path: Path, reply: str) -> None:
+    """issue #284: the chat showed '{"tool": "list_runs", ...}' twice and never ran it.
+
+    A reply that is nothing but a call to an offered tool with valid arguments (bare,
+    fenced, repeated, or as the answer's only text) runs as that call, once, and is never
+    the answer.
+    """
+    loop, stub = _prompted(tmp_path, [reply, '{"answer": "Your latest run is ..."}'])
+
+    outcome = loop.run("Report on my latest run", Reply, Fallback("x", lambda: Reply(answer="f")))
+
+    assert not outcome.fell_back
+    assert outcome.decision.answer == "Your latest run is ..."
+    assert outcome.tool_calls == [{"tool": "list_runs", "arguments": {"limit": 1}, "ok": True}]
+    assert stub.requests[1].messages[-1].content.startswith("Result of list_runs: ")
+    # Its own history holds the call once, not the reply's text.
+    assistant = [m.content for m in stub.requests[1].messages if m.role == "assistant"]
+    assert [json.loads(m) for m in assistant] == [json.loads(_LIST_RUNS)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"I will look it up: {_LIST_RUNS}",  # prose around it
+        '{"tool": "no_such_tool", "arguments": {}}\n{"tool": "no_such_tool", "arguments": {}}',
+        '```json\n{"tool": "list_runs", "arguments": {"limit": "many"}}\n```',  # invalid
+        f'```\n{_LIST_RUNS}\n{{"tool": "list_plugins", "arguments": {{}}}}\n```',  # two calls
+        '{"tool": "list_runs", "arguments": {}, "note": "x"}',  # other keys
+    ],
+)
+def test_other_text_with_a_tool_call_in_it_is_not_taken_for_one(tmp_path: Path, text: str) -> None:
+    """#284's limits: only a whole text of one well-formed, offered, valid call is a call;
+    anything else goes the way it went before (an unknown tool's or bad arguments' error back,
+    prose as the answer)."""
+    loop, _ = _prompted(tmp_path, [])
+
+    assert loop._written_call(text) is text
+    answer = {"answer": text}
+    assert loop._written_call(answer) is answer
+
+
+def test_different_calls_in_one_fence_are_still_prose(tmp_path: Path) -> None:
+    reply = f'```\n{_LIST_RUNS}\n{{"tool": "list_plugins", "arguments": {{}}}}\n```'
+    loop, _ = _prompted(tmp_path, [reply])
+
+    outcome = loop.run("Report on my latest run", Reply, Fallback("x", lambda: Reply(answer="f")))
+
+    assert (outcome.tool_calls, outcome.decision.answer) == ([], reply)
+
+
+def test_a_timed_out_call_is_asked_again_with_the_conversation_trimmed(tmp_path: Path) -> None:
+    """issue #284: a follow-up's call timed out and the answer was lost; with
+    ``timeout_retries`` the model is asked once more, older turns dropped, and the retry is
+    traced."""
+    history = [Message("user" if i % 2 == 0 else "assistant", f"turn {i} " + "x" * 9000)
+               for i in range(6)]  # fmt: skip
+    stub = StubProvider([LLMTimeout("no answer in 120 s"), ANSWER], tool_calls=False)
+    loop, _ = _loop(tmp_path, stub, timeout_retries=1)
+
+    outcome = loop.run("Add a comparison with my previous run", Choice, FALLBACK, history=history)
+
+    assert not outcome.fell_back
+    assert outcome.decision.localization == "adaptive"
+    first, again = stub.requests
+    assert len(first.messages) == 8
+    assert first.messages[0].role == "system"
+    assert again.messages[0] == first.messages[0]
+    # The last exchange is kept (to its first characters), the task whole.
+    assert [m.content[:6] for m in again.messages[1:]] == ["turn 4", "turn 5", "Add a "]
+    assert all(len(m.content) < 4_100 for m in again.messages[1:3])
+    actions = _files(tmp_path, "action")
+    assert [a["action"] for a in actions] == ["model_timeout_retry"]
+    assert (actions[0]["messages_before"], actions[0]["messages_after"]) == (8, 4)
+
+
+def test_a_timeout_is_asked_again_once_only_and_never_after_a_stop(tmp_path: Path) -> None:
+    timeouts: list[LLMTimeout | str] = [LLMTimeout("no answer"), LLMTimeout("no answer"), ANSWER]
+    stub = StubProvider(timeouts, tool_calls=False)
+    loop, _ = _loop(tmp_path, stub, timeout_retries=1)
+
+    outcome = loop.run("Which?", Choice, FALLBACK)
+
+    assert (outcome.fell_back, outcome.timed_out, outcome.unavailable) == (True, True, True)
+    assert len(stub.requests) == 2
+
+    stopped: list[bool] = []
+
+    def stop_on_timeout(request: StubRequest) -> str:
+        stopped.append(True)
+        raise LLMTimeout("no answer")
+
+    stub = StubProvider([stop_on_timeout, ANSWER], tool_calls=False)
+    loop, _ = _loop(tmp_path, stub, timeout_retries=1)
+    loop.should_stop = lambda: bool(stopped)
+
+    outcome = loop.run("Which?", Choice, FALLBACK)
+
+    assert (outcome.fell_back, outcome.reason) == (True, STOPPED)
+    assert len(stub.requests) == 1
+
+
+def test_a_call_written_as_text_on_the_last_turn_falls_back_never_shown(tmp_path: Path) -> None:
+    """Issue #284's review: the last turn offers no tools, so a call written as the reply is
+    refused there as any prompted call is, and the task falls back; before #284 such text
+    was the answer, a raw tool call shown to the user."""
+    reply = f"```json\n{_LIST_RUNS}\n{_LIST_RUNS}\n```"
+    stub = StubProvider([_LIST_RUNS, reply], tool_calls=False)
+    loop, _ = _loop(tmp_path, stub, max_turns=2)
+
+    outcome = loop.run("Report on my latest run", Reply, Fallback("x", lambda: Reply(answer="f")))
+
+    assert outcome.fell_back
+    assert outcome.decision.answer == "f"
+    assert outcome.tool_calls == [{"tool": "list_runs", "arguments": {"limit": 1}, "ok": True}]
+
+
+def test_a_timeout_after_tool_calls_keeps_their_results_and_runs_none_again(
+    tmp_path: Path,
+) -> None:
+    stub = StubProvider(
+        [_LIST_RUNS, LLMTimeout("no answer in 120 s"), '{"answer": "Your latest run ..."}'],
+        tool_calls=False,
+    )
+    loop, _ = _loop(tmp_path, stub, timeout_retries=1)
+
+    outcome = loop.run("Report on my latest run", Reply, Fallback("x", lambda: Reply(answer="f")))
+
+    assert outcome.decision.answer == "Your latest run ..."
+    assert outcome.tool_calls == [{"tool": "list_runs", "arguments": {"limit": 1}, "ok": True}]
+    timed_out, again = stub.requests[1:]
+    assert again.messages == timed_out.messages  # no history to drop, short results kept
+    assert again.messages[-1].content.startswith("Result of list_runs: ")

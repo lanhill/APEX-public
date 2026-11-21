@@ -244,7 +244,9 @@ uv run apex agent convert from ert CASE.ert apex_case
 uv run apex agent convert to ert apex_case/config.toml ert_case
 ```
 
-Each simulator, and PET and ERT, has a converter skill; `apex agent convert skills` lists them with what each can do. A package that adds a simulator adds its skill (entry point `apex.converter_skills`).
+Each simulator, and PET and ERT, has a converter skill; `apex agent convert skills` lists them with what each can do, and the options each takes. A package that adds a simulator adds its skill (entry point `apex.converter_skills`).
+
+A skill's options are given with `--option NAME=VALUE` (repeatable) to `apex agent convert import`, `to` and `from`, and as `options` to `POST /v1/agents/convert`. A skill declares each option's kind (true or false, a whole number, a number, an ISO date `YYYY-MM-DD`, or one of fixed choices); a name it does not declare is refused with those it does, before anything is written.
 
 ### Giving a case a prior: the geomodeler
 

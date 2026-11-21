@@ -61,6 +61,7 @@ uv run apex agent convert from SKILL SOURCE OUTPUT
 
 | option | default | description |
 |---|---|---|
+| `--option` | | A converter skill's option, NAME=VALUE (repeatable; `apex agent convert skills` lists each skill's). |
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 
 ## `apex agent convert from-pet`
@@ -90,6 +91,7 @@ uv run apex agent convert import CASE
 | `--request` | | What to match and how, in words (for the model). |
 | `--name` | | The run's name (default: the case's). |
 | `--skill` | | The converter skill (default: the one that reads it). |
+| `--option` | | A converter skill's option, NAME=VALUE (repeatable; `apex agent convert skills` lists each skill's). |
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 | `--no-llm` | false | Rules only: no model is asked. |
 | `--provider` | | Provider (default: [agents.llm] provider). |
@@ -131,6 +133,7 @@ uv run apex agent convert to SKILL SOURCE OUTPUT
 
 | option | default | description |
 |---|---|---|
+| `--option` | | A converter skill's option, NAME=VALUE (repeatable; `apex agent convert skills` lists each skill's). |
 | `--root` | | Services root (default: $APEX_HOME, else ~/.apex/service). |
 
 ## `apex agent convert to-pet`
