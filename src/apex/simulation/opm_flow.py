@@ -76,6 +76,8 @@ class OPMFlowSimulator:
         Extra case-insensitive regular expressions: a failed run whose log matches one is
         transient, and the executor retries it (on top of the built-in licence and file-system
         patterns, ``apex.simulation.deck.TRANSIENT_PATTERNS``).
+    upscale
+        Refused: OPM Flow has no ``COARSEN`` (the Eclipse simulator's option).
     levels
         Fidelity levels of a multilevel ensemble, filled in from ``[method] levels``
         (``multilevel_esmda``) rather than set here: one table per level, coarsest first,
@@ -105,6 +107,7 @@ class OPMFlowSimulator:
         template_values: Annotated[Mapping[str, object] | None, TEXT] = None,
         transient_patterns: TextList = (),
         levels: Annotated[Sequence[Mapping[str, object]] | None, LEVELS] = None,
+        upscale: Annotated[Mapping[str, object] | None, TEXT] = None,
         case_dir: InputFolder | None = None,
     ) -> None:
         self.template_path = Path(deck_template_file).resolve()
@@ -115,6 +118,11 @@ class OPMFlowSimulator:
             raise ValueError(f"case_dir is not a folder: {self.case_dir}")
         # Multilevel ensembles: OPM Flow has no COARSEN, so levels give their
         # own coarse decks (deck_template_file) instead of upscale.
+        if upscale is not None:
+            raise ValueError(
+                "OPM Flow does not support COARSEN: give the coarse model its own "
+                "deck_template_file instead of upscale (or use the Eclipse simulator)"
+            )
         self.levels = FidelityLevels(levels, self.template_path)
         if self.levels.upscales:
             raise ValueError(

@@ -8,7 +8,9 @@ affine model is exact here: the prediction by the surrogate must be the simulato
 round-off, also when the scenario names its control otherwise and maps it onto the deck's,
 and with the model copied out of its build directory; and the refusals of §3: no scenario,
 a model built without controls, other inputs, and a control outside the design's range as
-the model sees it (after the scenario's parameterizations).
+the model sees it (after the scenario's parameterizations). With a scenario the model must
+take the controls by its capabilities (item 5; the user, 2026-11-21):
+refused at validation and before any forecast; a prediction without one is unchanged.
 """
 
 import importlib.util
@@ -23,6 +25,7 @@ import pytest
 
 from apex.core.errors import ConfigError
 from apex.core.plugins import surrogate_models
+from apex.core.surrogates import SurrogateCapabilities
 from apex.services import composition, prediction, surrogates
 
 
@@ -269,6 +272,40 @@ def test_what_a_scenario_with_a_surrogate_refuses(run: Path) -> None:
         prediction.predict(
             _prediction(run, "deck", controls=_scenario(SCENARIO), surrogate=_surrogate(deck))
         )
+
+
+def test_a_scenario_refuses_a_model_that_does_not_take_controls(
+    run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model declaring the state alone: a prediction with a scenario refuses it at
+    validation and before any forecast (by its capabilities, before the controls' checks);
+    without a scenario it is taken as before."""
+    _forecast_case(run)
+    model = _build(run)
+    built = surrogates.build(cases.write_build(run, AFFINE))  # without controls
+    monkeypatch.setattr(
+        cases.Affine, "capabilities", SurrogateCapabilities(inputs=frozenset({"state"})),
+        raising=False,
+    )  # fmt: skip
+    surrogates.fitted_model.cache_clear()
+    wanted = (
+        rf"plugin '{AFFINE}' cannot serve a prediction with control scenarios: inputs: "
+        r"controls \(not taken: .*use a surrogate that takes controls.*drop \[controls\]"
+    )
+    for name, surrogate in (("over", model), ("without", built.path / "model/surrogate.json")):
+        path = _prediction(run, name, controls=_scenario(SCENARIO), surrogate=_surrogate(surrogate))
+        with pytest.raises(ConfigError, match=wanted):
+            prediction.check_prediction(prediction.load_prediction_config(path))
+        with pytest.raises(ConfigError, match=wanted):
+            prediction.predict(path)
+        assert not (run / "runs/hm/predictions" / name / "members").exists()  # none forecast
+    # No scenario: unchanged. Validation takes it, and its start passes the capabilities to
+    # the checks after them (this model was built on the run's deck, not the forecast's).
+    plain = _prediction(run, "plain", surrogate=_surrogate(built.path / "model/surrogate.json"))
+    prediction.check_prediction(prediction.load_prediction_config(plain))
+    with pytest.raises(ConfigError, match="another simulator stack") as error:
+        prediction.predict(plain)
+    assert "cannot serve" not in str(error.value)
 
 
 def _older(model: Path, folder: Path, drop: tuple[str, ...]) -> Path:

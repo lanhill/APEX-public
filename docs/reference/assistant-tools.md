@@ -19,7 +19,7 @@ Compare a study's methods and variants at each run's posterior.
 
 ## `convert_case`
 
-Import a deck (OPM Flow, Eclipse) with its history as an APEX history-matching case: a run draft of this chat, validated and costed, with notes on every assumed value; then propose_action.
+Import a deck (OPM Flow, Eclipse) with its history as an APEX history-matching case: a run draft of this chat, validated and costed, with notes on every assumed value; then propose_action. options sets the converter skill's options when the user asks.
 
 
 ## `create_case`
@@ -89,7 +89,7 @@ List runs, newest first (the first is the latest), optionally by annotation or n
 
 ## `monitor_run`
 
-Check a run's health with the run monitor's rules, and a diagnosis (advisory; it never stops anything). Call the run healthy only when 'healthy' is true (null: not confirmed, say so). It does not read the job's events: for logs, errors or warnings, call job_events too.
+Check a run's health with the run monitor's rules, and a diagnosis (advisory; it never stops anything). Call the run healthy only when 'healthy' is true (null: not confirmed, say so). It does not read the job's events; only if the user's own message asks about a run's logs, errors or warnings: call job_events too (otherwise don't mention them).
 
 
 ## `plan_study`

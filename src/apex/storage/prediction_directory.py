@@ -6,9 +6,10 @@
       config.json          resolved PredictionConfig
       provenance.json      APEX version and commit, library versions, host, input hashes
       state.json           fingerprint of the configuration, resolved axis (vectors, times)
-      members/<ensemble>_<member>.npz   one finished member (values (n_vectors, n_times))
+      members/<ensemble>_<member>.npz   one finished member (values (n_vectors, n_times),
+                           [residuals]: a model-error model's r, included in values)
       forecast_<ensemble>.npz  assembled: values (n_vectors, n_times, n), times, vectors,
-                           member_ids, failed_member_ids, [mean_model]
+                           member_ids, failed_member_ids, [mean_model], [residuals]
       truth.npz            the true model's forecast (synthetic cases)
       statistics.csv       per ensemble, vector and time: n, mean, std, percentiles
       scores.json, scores.csv   forecast scores against the truth
@@ -179,9 +180,30 @@ class PredictionDirectory:
         """File of one finished member."""
         return self.members / f"{ensemble_slug(ensemble)}_{member_tag(member_id)}.npz"
 
-    def save_member(self, ensemble: str, member_id: int, values: NDArray[np.float64]) -> None:
-        """Save one member's forecast ``(n_vectors, n_times)`` atomically."""
-        _save_npz(self.member_file(ensemble, member_id), {"values": values})
+    def save_member(
+        self,
+        ensemble: str,
+        member_id: int,
+        values: NDArray[np.float64],
+        residuals: NDArray[np.float64] | None = None,
+    ) -> None:
+        """Save one member's forecast ``(n_vectors, n_times)`` atomically.
+
+        ``residuals`` are the model-error residuals included in ``values``, of the
+        same shape, saved beside them when given.
+        """
+        arrays = {"values": values}
+        if residuals is not None:
+            arrays["residuals"] = np.ascontiguousarray(residuals, dtype=np.float64)
+        _save_npz(self.member_file(ensemble, member_id), arrays)
+
+    def load_member_residuals(self, ensemble: str, member_id: int) -> NDArray[np.float64] | None:
+        """Load one member's model-error residuals, or ``None`` if none were saved."""
+        path = self.member_file(ensemble, member_id)
+        if not path.exists():
+            return None
+        with np.load(path) as data:
+            return data["residuals"] if "residuals" in data.files else None
 
     def load_member(self, ensemble: str, member_id: int) -> NDArray[np.float64] | None:
         """Load one member's forecast, or ``None`` if it has not finished."""
@@ -203,6 +225,8 @@ class PredictionDirectory:
         }
         if forecast.mean_model is not None:
             arrays["mean_model"] = forecast.mean_model
+        if forecast.residuals is not None:
+            arrays["residuals"] = forecast.residuals
         _save_npz(self.path / f"forecast_{ensemble_slug(forecast.name)}.npz", arrays)
 
     def load_forecast(self, name: str) -> EnsembleForecast:
@@ -222,6 +246,7 @@ class PredictionDirectory:
                 member_ids=data["member_ids"],
                 failed_member_ids=data["failed_member_ids"],
                 mean_model=data["mean_model"] if "mean_model" in data.files else None,
+                residuals=data["residuals"] if "residuals" in data.files else None,
             )
 
     def save_truth(

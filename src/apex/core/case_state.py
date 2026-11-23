@@ -14,7 +14,11 @@ grid's geometry, a deck's unit system and phases: what geophysics and model erro
 ``structured_mesh`` says that :meth:`CaseStateReader.mesh` always gives a structured grid
 (``CaseMesh.dims``), what the grid-based field surrogates need, known before any run;
 ``connectivity`` is a protocol of its own, :class:`ConnectivityReader` (the faces between the
-state's cells, what a graph network on the mesh needs). A consumer
+state's cells, what a graph network on the mesh needs); ``wells`` is
+:class:`WellsReader` (the wells' blocks, bottom-hole pressures and report dates, what
+model error needs); ``well_controls`` is :class:`WellControlsReader` (the
+wells' summary vectors and control modes, revision 3's W3: what a forecasting model-error
+model needs). A consumer
 checks the capability it needs and refuses a reader without it, with the reason.
 
 Names: the canonical names consumers share (``PRESSURE``, ``SWAT``, ``SGAS``, ``SOIL``,
@@ -40,6 +44,7 @@ from apex.domain.case_state import (
     UnitSystem,
 )
 from apex.domain.cell_graph import CellGraph
+from apex.domain.wells import WellSchedule
 
 __all__ = [
     "CaseStateReader",
@@ -48,6 +53,10 @@ __all__ = [
     "CornerGeometryReader",
     "MissingState",
     "StateWriter",
+    "WellControlsReader",
+    "WellLayout",
+    "WellLimits",
+    "WellsReader",
     "check_region",
 ]
 
@@ -183,6 +192,116 @@ class ConnectivityReader(CaseStateReader, Protocol):
             naming why.
         SimulationError
             If the mesh's files cannot be read (this member).
+        """
+
+
+@runtime_checkable
+class WellsReader(CaseStateReader, Protocol):
+    """A reader that gives what model error reads of the wells.
+
+    The capability ``wells``. A well block is an Eclipse-format grid's 1-based ``(i, j, k)``
+    or a mesh's 0-based cell index in :meth:`state`'s order; the wells' layout (their blocks
+    and open steps) is known before any run, from the deck's text or the simulator's input
+    (:class:`WellLayout`), not read here.
+    """
+
+    def block_cell(self, block: tuple[int, int, int] | int) -> int:
+        """Return the index into :meth:`state`'s arrays of a well block, ``-1`` if inactive."""
+
+    def bottom_hole_pressure(self, well: str, time: StateTime) -> float:
+        """Return a well's bottom-hole pressure at a state, in :meth:`unit` ``WBHP``.
+
+        ``time`` is one of the reader's states (:meth:`CaseStateReader.at_step` or
+        :meth:`CaseStateReader.times`). Also for a shut well, as the run reports it.
+
+        Raises
+        ------
+        SimulationError
+            If the run reported no bottom-hole pressure for the well at that state.
+        """
+
+    def report_dates(self, steps: Sequence[int]) -> list[str]:
+        """Return the ISO dates of 1-based report steps, if the run numbers them.
+
+        A simulator whose states are not numbered by report step (GEOS's cycles) refuses:
+        its consumer gives the steps' dates itself (model error's ``report_dates``).
+
+        Raises
+        ------
+        SimulationError
+            If the run did not report one of the steps, or numbers no report steps.
+        """
+
+
+@runtime_checkable
+class WellControlsReader(CaseStateReader, Protocol):
+    """A reader that gives its wells' summary vectors and control modes.
+
+    The capability ``well_controls``: what a model-error model that forecasts under changed
+    controls reads beyond the block states (the lab's ``mec_forecast_lstm``): each well's
+    control mode with Eclipse's ``WMCTL`` codes (0 shut, 1 oil rate, 2 water rate, 3 gas
+    rate, 4 liquid rate, 5 reservoir volume rate, 6 THP, 7 BHP; negative: a group's target)
+    and its rates and pressures (``WOPR``, ``WWPR``, ``WGPR``, ``WWIR``, ``WGIR``, ``WBHP``,
+    ...) at a state, in the unit :meth:`~CaseStateReader.unit` states for the vector's name
+    (an Eclipse-format run's deck units; SI on the others, as their bottom-hole pressures).
+    Consumers convert (``apex.simulation.model_error.ReaderDatedStates.well_vector``).
+    """
+
+    def has_well_vector(self, well: str, name: str) -> bool:
+        """Return whether the run reports the vector ``name`` (``WMCTL`` included) of ``well``."""
+
+    def well_vector(self, well: str, name: str, time: StateTime) -> float:
+        """Return a well's vector at one of the reader's states (``WMCTL``: its code).
+
+        Raises
+        ------
+        SimulationError
+            If the run does not report the vector, or not at that state.
+        """
+
+
+@runtime_checkable
+class WellLimits(Protocol):
+    """A simulator that states its wells' rate and BHP targets before any run (W3c).
+
+    What a model-error model that scales each control mode's target
+    reads where a deck's schedule would give it (the lab's ``mec_forecast_lstm``): per well
+    its largest rate target and BHP target or limit, in METRIC deck units (sm3/day, bar; 0:
+    none), from the simulator's input.
+    """
+
+    def well_limits(
+        self, wells: Sequence[tuple[str, str, Sequence[str]]]
+    ) -> dict[str, tuple[float, float]]:
+        """Return ``{well: (rate, bhp)}`` for ``(name, kind, outputs)`` wells.
+
+        Raises
+        ------
+        ConfigError
+            If a well's targets cannot be read, or depend on the input's values.
+        """
+
+
+@runtime_checkable
+class WellLayout(Protocol):
+    """A simulator that states its wells' blocks before any run.
+
+    For model error on a simulator whose input is not a deck's schedule: the blocks are
+    0-based cells of its reader's :meth:`~CaseStateReader.state` order.
+    """
+
+    def well_layout(
+        self, wells: Sequence[tuple[str, str, Sequence[str]]], dates: Sequence[str]
+    ) -> list["WellSchedule"]:
+        """Return each well's blocks and status at the ISO report ``dates``.
+
+        ``wells`` are ``(name, kind, outputs)``.
+
+        Raises
+        ------
+        ConfigError
+            If a well is not in the input, its blocks cannot be placed on the mesh, or its
+            position depends on a template's values (it would differ by member).
         """
 
 

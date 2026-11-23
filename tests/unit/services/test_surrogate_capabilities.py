@@ -4,7 +4,8 @@ listing shows them.
 Refusals through each workflow's service, with test-only models: an optimization refuses
 an early-start model (also ``tests/unit/algorithms/test_surrogate_early_start.py``) and a
 model of the state alone (the user's rule of 2026-11-21), a prediction a coarse-corrected
-one, and a history match a model of the controls alone (the same day's rule).
+one, and with control scenarios a model of the state alone, and a history match a model of
+the controls alone (the same day's rules).
 """
 
 from collections.abc import Sequence
@@ -93,6 +94,61 @@ def test_a_prediction_refuses_a_coarse_corrected_model(monkeypatch: pytest.Monke
     assert "predictions with it are not supported" in message
 
 
+def test_a_prediction_with_a_scenario_refuses_a_model_of_the_state_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user's rule of 2026-11-21 (item 5): with control scenarios a
+    prediction needs a model of the controls, at its start and at validation; without them
+    the model passes the capability check as before."""
+    loaded = SimpleNamespace(model=_StateOnly(), manifest=SimpleNamespace(plugin="state_like"))
+    monkeypatch.setattr(surrogates, "active_model", lambda path: loaded)
+    monkeypatch.setattr(surrogates, "load_surrogate", lambda path: loaded)
+    section = SimpleNamespace(model_file="model.json")
+    with pytest.raises(ConfigError) as error:
+        surrogates.prediction_surrogate(
+            cast(Any, section), *(cast(Any, None),) * 5, "serial", controls={"u": np.zeros(2)}
+        )
+    message = str(error.value)
+    assert "plugin 'state_like' cannot serve a prediction with control scenarios" in message
+    assert "inputs: controls (not taken" in message
+    assert "use a surrogate that takes controls" in message
+    assert surrogates.prediction_refusal(cast(Any, section), scenarios=True) == message
+    assert surrogates.prediction_refusal(cast(Any, section), scenarios=False) is None
+    both = SimpleNamespace(model=_Plain(), manifest=SimpleNamespace(plugin="both_like"))
+    monkeypatch.setattr(surrogates, "load_surrogate", lambda path: both)
+    assert surrogates.prediction_refusal(cast(Any, section), scenarios=True) is None
+
+
+def test_validating_a_scenario_turns_a_models_loading_error_into_a_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``check_prediction`` reads the model only with a scenario, and reports a plugin's
+    loading error as a ``ConfigError`` (the review)."""
+    from apex.services import composition, prediction
+
+    def broken(path: object) -> None:
+        raise ValueError("bad arrays")
+
+    monkeypatch.setattr(surrogates, "load_surrogate", broken)
+    monkeypatch.setattr(prediction, "_with_forecast_options", lambda config, run: run)
+    monkeypatch.setattr(composition, "snapshot_config", lambda directory: None)
+    monkeypatch.setattr(composition, "build_layout", lambda run: None)
+    monkeypatch.setattr(prediction, "simulator_section", lambda config, run: None)
+    monkeypatch.setattr(prediction, "_forecasting_model_error", lambda *args: None)
+    monkeypatch.setattr(prediction, "_refuse_for_model", lambda *args: None)
+    run_dir = Path(__file__).parent  # any folder holding config.json is a run here
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    config = SimpleNamespace(
+        prediction=SimpleNamespace(run_dir=run_dir),
+        surrogate=SimpleNamespace(model_file="model.json"),
+        controls=None,
+    )
+    prediction.check_prediction(cast(Any, config))  # no scenario: the model is not read
+    config.controls = SimpleNamespace()
+    with pytest.raises(ConfigError, match="invalid prediction \\[surrogate\\]: bad arrays"):
+        prediction.check_prediction(cast(Any, config))
+
+
 def test_an_optimization_refuses_an_early_start_model(monkeypatch: pytest.MonkeyPatch) -> None:
     loaded = SimpleNamespace(model=_Early(), manifest=SimpleNamespace(plugin="early_like"))
     monkeypatch.setattr(surrogates, "load_surrogate", lambda path: loaded)
@@ -143,7 +199,7 @@ def test_the_listing_shows_each_surrogates_capabilities_and_workflows() -> None:
         surrogate_models.remove("test_capabilities_early")
     assert info.capabilities == capabilities_of(_Early).as_dict()
     assert info.capabilities["inputs"] == ["controls", "early_responses", "state"]
-    assert info.serves == ["history_matching", "prediction"]
+    assert info.serves == ["history_matching", "prediction", "prediction_scenarios"]
     for name in surrogate_models.names():
         listed = plugin_info("surrogate_models", name)
         assert listed.serves == serves(capabilities_of(surrogate_models.factory(name)))
@@ -167,4 +223,4 @@ def test_the_cli_listing_prints_them(monkeypatch: pytest.MonkeyPatch) -> None:
     at = next(i for i, line in enumerate(lines) if "test_capabilities_early" in line)
     following = "\n".join(lines[at + 1 : at + 4])
     assert "capabilities: inputs controls+early_responses+state; outputs responses" in following
-    assert "serves: history_matching, prediction" in following
+    assert "serves: history_matching, prediction, prediction_scenarios" in following

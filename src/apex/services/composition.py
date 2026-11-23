@@ -74,7 +74,7 @@ from apex.algorithms.geophysics import (
     petro_elastic_models,
     reflectivity,
 )
-from apex.core.case_state import CaseStateReaderFactory
+from apex.core.case_state import CaseStateReaderFactory, StateWriter, WellLayout, WellLimits
 from apex.core.diagnostics import DiagnosticsPlan
 from apex.core.errors import (
     ConfigError,
@@ -1722,7 +1722,25 @@ def build_model_error(
     # error on other simulators needs readers with wells, a later phase).
     use_reader = getattr(model, "use_case_state_reader", None)
     if callable(use_reader) and config.simulator.name in case_state_readers.names():
-        use_reader(case_state_reader(config.simulator.name, "[model_error]", "corner_geometry"))
+        factory = case_state_reader(config.simulator.name, "[model_error]")
+        if "corner_geometry" in getattr(factory, "capabilities", ()):
+            use_reader(factory)
+            if getattr(model, "needs_well_layout", False):
+                raise ConfigError(
+                    f"[model_error] {section.name}: the {config.simulator.name!r} simulator "
+                    "runs a deck, whose wells the model reads from its schedule: give "
+                    "schedule_file"
+                )
+        else:
+            # A reader with wells, the wells' layout from the
+            # simulator's input (a deck's schedule is not its input).
+            use_reader(case_state_reader(config.simulator.name, "[model_error]", "wells"))
+            _use_simulator_wells(config, model)
+    elif getattr(model, "needs_well_layout", False):
+        raise ConfigError(
+            f"[model_error] {section.name}: no schedule_file, and the {config.simulator.name!r} "
+            "simulator gives no wells' layout of its own: give the deck's schedule_file"
+        )
     sizes = {v.name: v.size for v in layout.variables}
     name = model.state_variable
     if name not in sizes:
@@ -1757,6 +1775,66 @@ def build_model_error(
     return model
 
 
+def _use_simulator_wells(config: HistoryMatchConfig, model: object) -> None:
+    """Give a model-error model its wells from the simulator's input.
+
+    The simulator is built (nothing runs) and asked for its :class:`WellLayout` at the
+    model's report dates; it refuses wells it cannot place, or whose positions depend on
+    the template's values (they would differ by member, the user's rule of 2026-11-21).
+    It must also write the states the model reads at those dates (checked before any run,
+    the user's rule: a missing one is refused, not added).
+
+    Raises
+    ------
+    ConfigError
+        If the model reads a deck's schedule here, the simulator states no layout or does
+        not write the states, or the layout is refused.
+    """
+    name = config.model_error.name if config.model_error else ""
+    if not getattr(model, "needs_well_layout", False):
+        raise ConfigError(
+            f"[model_error] {name}: schedule_file is a deck's schedule, and the "
+            f"{config.simulator.name!r} simulator's wells come from its own input: leave "
+            "schedule_file out and give report_dates"
+        )
+    try:
+        simulator = simulators.create(config.simulator.name, **config.simulator.options)
+    except (TypeError, ValueError, PluginError) as error:
+        raise ConfigError(f"[model_error] {name}: {error}") from error
+    if not isinstance(simulator, WellLayout):
+        raise ConfigError(
+            f"[model_error] {name}: the {config.simulator.name!r} simulator states no wells' "
+            "layout (its reader has wells, but the model needs their blocks before any run)"
+        )
+    dates = [str(d) for d in getattr(model, "report_dates", ())]
+    if isinstance(simulator, StateWriter):
+        names = ("PRESSURE", "SWAT", "SGAS", "WAT_DEN", "GAS_DEN", "OIL_DEN")
+        wanted = [n for n in names if _model_reads(model, n)]
+        simulator.state_output(wanted, [dt.date.fromisoformat(d) for d in dates])
+    try:
+        model.use_well_layout(simulator.well_layout(model.well_specs, dates))  # type: ignore[attr-defined]
+    except ValueError as error:
+        raise ConfigError(f"[model_error] {name}: {error}") from error
+    # W3c: a model that scales its targets takes the simulator's limits, as a schedule's.
+    use_limits = getattr(model, "use_well_limits", None)
+    if callable(use_limits) and isinstance(simulator, WellLimits):
+        use_limits(simulator.well_limits(model.well_specs))  # type: ignore[attr-defined]
+
+
+def _model_reads(model: object, name: str) -> bool:
+    """Whether a model's features read the dynamic array ``name`` (its phases')."""
+    phases = [p.lower() for p in getattr(model, "phases", ("oil", "water"))]
+    reads = {
+        "PRESSURE": True,
+        "SWAT": "water" in phases,
+        "WAT_DEN": "water" in phases,
+        "SGAS": "gas" in phases,
+        "GAS_DEN": "gas" in phases,
+        "OIL_DEN": "oil" in phases,
+    }
+    return reads.get(name, False)
+
+
 def check_model_error_summary(config: HistoryMatchConfig, model: ModelErrorModel) -> None:
     """Refuse, before any member runs, a deck without INIT or whose SUMMARY lacks a vector.
 
@@ -1775,6 +1853,11 @@ def check_model_error_summary(config: HistoryMatchConfig, model: ModelErrorModel
     template = config.simulator.options.get("deck_template_file")
     if not isinstance(template, str):
         return
+    simulator_name = getattr(config.simulator, "name", None)
+    if simulator_name in case_state_readers.names() and "corner_geometry" not in getattr(
+        case_state_readers.factory(str(simulator_name)), "capabilities", ()
+    ):
+        return  # not a deck (GEOS's XML): its layout and states were checked when built
     name = config.model_error.name if config.model_error else ""
     contents = deck_contents(Path(template), case_folder(config.simulator.options))
     # Every model error model reads each well block's static features from the INIT file,

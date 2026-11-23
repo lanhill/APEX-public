@@ -31,16 +31,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.algorithms.model_error.lstm import WellNetwork, well_residuals
-from apex.core.case_state import CaseStateReaderFactory, CornerGeometryReader
+from apex.core.case_state import CaseStateReaderFactory, CornerGeometryReader, WellsReader
 from apex.core.errors import ConfigError, SimulationError
 from apex.core.options import InputFile, Text, TextList
 from apex.core.plugins import model_error_models
-from apex.core.simulation import BlockStates
+from apex.core.simulation import BlockStates, StepStates
 from apex.domain.observations import DataKey, ObservationSet
+from apex.domain.wells import WellSchedule
 from apex.simulation.model_error import (
     INPUT_PREFIX,
     RESIDUAL_PREFIX,
     CaseFiles,
+    ReaderDatedStates,
     feature_names,
     well_features,
     well_schedules,
@@ -58,7 +60,9 @@ class PGLSTMModel:
     Parameters
     ----------
     schedule_file
-        The history schedule: one COMPDAT, WCONHIST and WCONINJH block per report step.
+        The history schedule: one COMPDAT, WCONHIST and WCONINJH block per report step. Left
+        out on a simulator whose wells come from its own input (``WellLayout``: GEOS, ADR
+        0078 revision 3), which then needs ``report_dates``.
     report_steps
         1-based report steps of the network's report times (the observation times).
     producers, injectors
@@ -103,8 +107,8 @@ class PGLSTMModel:
 
     def __init__(
         self,
-        schedule_file: InputFile,
-        report_steps: Sequence[int],
+        schedule_file: InputFile | None = None,
+        report_steps: Sequence[int] = (),
         producers: TextList = (),
         injectors: TextList = (),
         producer_data: TextList = ("WOPR", "WBHP", "WWCT"),
@@ -133,21 +137,27 @@ class PGLSTMModel:
         self.shut_wells: ShutWells = shut_wells
         self.phases = tuple(str(p).lower() for p in phases)
         feature_names(self.phases)  # validates the phases
-        wells = [(w, "producer", tuple(producer_data)) for w in producers] + [
+        self.well_specs = [(w, "producer", tuple(producer_data)) for w in producers] + [
             (w, "injector", tuple(injector_data)) for w in injectors
         ]
-        files = [Path(schedule_file)]
-        if initial_schedule_file is not None:
-            files.insert(0, Path(initial_schedule_file))
-        self.wells = well_schedules(files, steps, wells)
-        self.networks = [
-            WellNetwork(w.n_features(self.phases), int(hidden_size), len(w.outputs), len(steps))
-            for w in self.wells
-        ]
-        offsets = np.cumsum([0] + [n.n_params for n in self.networks])
-        self._slices = [slice(int(a), int(b)) for a, b in itertools.pairwise(offsets)]
+        self.hidden_size = int(hidden_size)
         self.scales: dict[str, float] | None = None
         self.report_dates = _report_dates(report_dates, len(steps))
+        self.wells: list[WellSchedule] = []
+        self.networks: list[WellNetwork] = []
+        self._slices: list[slice] = []
+        if schedule_file is not None:
+            files = [Path(schedule_file)]
+            if initial_schedule_file is not None:
+                files.insert(0, Path(initial_schedule_file))
+            self.use_well_layout(well_schedules(files, steps, self.well_specs))
+        elif initial_schedule_file is not None:
+            raise ValueError("pg_lstm: initial_schedule_file needs schedule_file")
+        elif not self.report_dates:
+            raise ValueError(
+                "pg_lstm without schedule_file takes its wells from the simulator's input "
+                "(GEOS) and needs report_dates, the ISO date of each report step"
+            )
         self.causal_mask = bool(causal_mask)
         self.save_inputs = bool(save_inputs)
         for name, wanted in (("causal_mask", self.causal_mask), ("save_inputs", self.save_inputs)):
@@ -156,6 +166,38 @@ class PGLSTMModel:
                     f"pg_lstm: {name} needs report_dates, the ISO date of each of the "
                     f"{len(steps)} report steps"
                 )
+
+    @property
+    def needs_well_layout(self) -> bool:
+        """Whether the wells' blocks are still to come from the simulator (no schedule)."""
+        return not self.wells
+
+    def use_well_layout(self, wells: Sequence[WellSchedule]) -> None:
+        """Set the wells' blocks and status by report step, and size the networks.
+
+        From the deck's schedule (``schedule_file``), or from the simulator's input
+        (``WellLayout``), called by the services before the model's
+        parameters are sized.
+
+        Raises
+        ------
+        ValueError
+            If the wells are not those the options name, in their order.
+        """
+        names = [name for name, _, _ in self.well_specs]
+        if [w.name for w in wells] != names:
+            raise ValueError(
+                f"pg_lstm: the layout's wells {[w.name for w in wells]} are not {names}"
+            )
+        self.wells = list(wells)
+        self.networks = [
+            WellNetwork(
+                w.n_features(self.phases), self.hidden_size, len(w.outputs), len(self.report_steps)
+            )
+            for w in self.wells
+        ]
+        offsets = np.cumsum([0] + [n.n_params for n in self.networks])
+        self._slices = [slice(int(a), int(b)) for a, b in itertools.pairwise(offsets)]
 
     @property
     def masks_parameters(self) -> bool:
@@ -329,12 +371,17 @@ class PGLSTMModel:
         if self.case_state_reader is None:
             return CaseFiles(case)
         reader = self.case_state_reader(case)
-        if not isinstance(reader, CornerGeometryReader):
-            raise ConfigError(
-                f"pg_lstm reads a deck run's INIT, restarts and summary; the "
-                f"{type(reader).__name__} reader of {case.name} is not of that kind"
-            )
-        return CaseFiles(case, reader)
+        if isinstance(reader, CornerGeometryReader):
+            return CaseFiles(case, reader)
+        if isinstance(reader, WellsReader) and self.report_dates:
+            # Another simulator's states, found by the report dates
+            # and converted to the metric deck units the networks are fitted in.
+            step_dates = dict(zip(self.report_steps, self.report_dates, strict=True))
+            return StepStates(ReaderDatedStates(reader, metric=True), step_dates, case.name)
+        raise ConfigError(
+            f"pg_lstm reads a deck run's INIT, restarts and summary, or a reader with wells "
+            f"and report_dates; the {type(reader).__name__} reader of {case.name} is neither"
+        )
 
     def state_residuals(
         self, states: BlockStates, theta: NDArray[np.float64], keys: Sequence[DataKey]

@@ -66,6 +66,7 @@ An optimization directory (from `apex optimize`, or a job's folder under `optimi
 - **objective** (label `all`) is the optimizer's objective. Every optimizer minimises, so a maximised quantity such as NPV appears negated, and a note says so.
 - With several objectives, `objective` also has one label per objective, and `hypervolume` and `front_size` describe the front.
 - A finished robust optimization adds the objective's statistics over the realizations at its last step (label `realizations`).
+- An optimization with a coarse-corrected surrogate adds `coarse_objective` at each accepted step, its coarse deck's objective (with several objectives, one label per objective), and a note counting the coarse runs, the failed ones and those the simulator evaluated instead.
 - The result is the last step of a finished run. A run that has not finished has no result yet.
 
 ## Reading a surrogate build's summary

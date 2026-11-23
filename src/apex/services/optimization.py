@@ -208,6 +208,11 @@ def _surrogate_simulator_runs(
     when the simulator may stand in for the surrogate (``outside`` or ``on_check_failure`` =
     ``simulator``), every evaluation the optimizer may make besides; ``None`` when the
     optimizer cannot bound its evaluations and the simulator may stand in.
+
+    A coarse-corrected surrogate's coarse stack adds one coarse run
+    per evaluation (capped, with the surrogate's, by ``max_evaluations``) and per check at
+    every realization, and the simulator standing in for columns whose coarse run fails
+    (the same capped evaluations), unless ``outside = "simulator"`` counts them already.
     """
     section = config.surrogate
     assert section is not None
@@ -220,6 +225,16 @@ def _surrogate_simulator_runs(
     checks = steps // section.check_every if section.check_every else 0
     final = int(getattr(optimizer, "pop_size", 1)) if optimizer.multi_objective else 1
     runs = n_r * (checks + final)
+    objective = problem.objective
+    if isinstance(objective, SurrogateObjective) and objective.coarse is not None:
+        capped = min(
+            section.max_evaluations if evaluations is None else evaluations,
+            section.max_evaluations,
+        )
+        runs += capped + n_r * checks
+        if section.outside != "simulator":
+            # A failed coarse run of a check's controls may stand in for a later column.
+            runs += capped + n_r * checks
     if "simulator" in (section.outside, section.on_check_failure):
         if evaluations is None:
             return None

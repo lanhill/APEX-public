@@ -367,8 +367,10 @@ def plan_study(
         errors += [f"{label}: {e}" for e in _prediction_violations(service, spec, cell, base_dir)]
         if not validation.errors:
             valid_cells.append(cell)
-    errors += _unrecorded_metrics(spec, valid_cells)
-    errors += _unknown_metric_labels(spec, valid_cells)
+    unrecorded = _unrecorded_metrics(spec, valid_cells)
+    errors += list(unrecorded.values())
+    # One refusal per metric: a metric no cell records is not also refused for its label.
+    errors += _unknown_metric_labels(spec, valid_cells, skip=set(unrecorded))
     plan = StudyPlan(spec, cells, Validation(valid=not errors, errors=errors, plans=plans), skipped)
     limit = spec.study.budget.max_simulator_runs
     total = plan.max_simulator_runs
@@ -378,8 +380,8 @@ def plan_study(
     return plan
 
 
-def _unrecorded_metrics(spec: StudySpec, cells: Sequence[PlannedCell]) -> list[str]:
-    """Return why a study metric names a performance metric none of its cells records.
+def _unrecorded_metrics(spec: StudySpec, cells: Sequence[PlannedCell]) -> dict[str, str]:
+    """Return why each study metric no cell records is refused, by metric name.
 
     A reported issue (#192): a study compared ``facies_brier`` on a case that records no facies
     score, and would have finished with no values to compare. A metric some cells record
@@ -392,7 +394,7 @@ def _unrecorded_metrics(spec: StudySpec, cells: Sequence[PlannedCell]) -> list[s
     wanted = {m.split(":", 1)[0] for m in spec.study.metrics}
     asked = sorted(k for k in wanted if k in metrics.names())
     if not asked or not cells:
-        return []
+        return {}
     recorded: set[str] = set()
     truthless = False
     for cell in cells:
@@ -401,13 +403,13 @@ def _unrecorded_metrics(spec: StudySpec, cells: Sequence[PlannedCell]) -> list[s
         recorded |= set(composition.build_metrics(cell.config))
         kind = cell.config.case
         truthless |= kind.kind == "real" or kind.truth_file is None
-    return [
-        f"study metric {key!r} would have no values: the cells record "
+    return {
+        key: f"study metric {key!r} would have no values: the cells record "
         f"{', '.join(sorted(recorded))}"
         + (" (a case without a true model has no model-error metrics)" if truthless else "")
         for key in asked
         if key not in recorded
-    ]
+    }
 
 
 #: Metrics the workflow records itself, labelled ``all`` and by data type.
@@ -417,9 +419,19 @@ _DATA_METRICS = frozenset({
 })  # fmt: skip
 #: Metrics whose labels are their own, not the state's variables.
 _OWN_LABELS = {"constraint_cost": frozenset({"cost", "violations"})}
+#: Metrics with no ``all`` label, recorded per variable only, and their default variable:
+#: the facies scores per facies variable (``facies``, ``facies:all_<k>``,
+#: ``facies:proportions``), ``ssim`` per variable of its grid. #304: a study's
+#: ``facies_log_score:all`` would have validated and compared nothing.
+_NO_ALL: dict[str, str | None] = {
+    "facies_mismatch": "facies", "facies_brier": "facies", "facies_log_score": "facies",
+    "ssim": None,
+}  # fmt: skip
 
 
-def _unknown_metric_labels(spec: StudySpec, cells: Sequence[PlannedCell]) -> list[str]:
+def _unknown_metric_labels(
+    spec: StudySpec, cells: Sequence[PlannedCell], skip: set[str] | None = None
+) -> list[str]:
     """Return why a study metric's name or label cannot be recorded by any of its cells.
 
     A reported issue (2026-10-24): ``rmse:xx``, a typo for the state variable ``x``,
@@ -449,9 +461,17 @@ def _unknown_metric_labels(spec: StudySpec, cells: Sequence[PlannedCell]) -> lis
     errors = []
     for metric in spec.study.metrics:
         key, _, label = metric.partition(":")
+        if key in (skip or set()):
+            continue  # refused already: no cell records it
         if key not in known:
             errors.append(f"study metric {metric!r}: no metric {key!r}; the metrics are "
                           f"{', '.join(sorted(known))}")  # fmt: skip
+            continue
+        if key in _NO_ALL and label in ("", "all"):
+            default = _NO_ALL[key]
+            errors.append(f"study metric {metric!r}: {key} has no 'all'; it is recorded per "
+                          f"variable: give {key}:<variable>"
+                          + (f" (by default {key}:{default})" if default else ""))  # fmt: skip
             continue
         if key in _OWN_LABELS:
             labels, kind, label = set(_OWN_LABELS[key]), "labels", label or "all"

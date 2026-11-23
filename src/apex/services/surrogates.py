@@ -535,7 +535,7 @@ class SurrogateCase:
     executor: Executor
     provenance: SnapshotProvenance
     coarse_simulator: Simulator | None = None
-    coarse_config: HistoryMatchConfig | None = None
+    coarse_config: HistoryMatchConfig | OptimizationConfig | None = None
     fields: tuple[str, ...] = ()
     field_times: tuple[str, ...] = ()
     field_cells: int = 0
@@ -772,12 +772,14 @@ def surrogate_case(
         the keys cannot be bounded in time.
     """
     if isinstance(case, OptimizationConfig):
-        if coarse is not None or fields:
+        if fields:
             raise ConfigError(
-                "a surrogate of an optimization takes no [coarse] stack and no [case] fields "
-                "yet (its keys are the objective's responses)"
+                "a surrogate of an optimization takes no [case] fields yet ("
+                "its keys are the objective's responses)"
             )
-        return _optimization_case(case, keys, execution=execution)
+        # a coarse stack, a separate coarse deck, for a coarse-corrected
+        # surrogate of the optimization.
+        return _optimization_case(case, keys, execution=execution, coarse=coarse)
     # a case's model error is left out of a build, which simulates the
     # deck alone (g); a run may add the model error back on the surrogate.
     left_out = case.model_error is not None
@@ -847,19 +849,25 @@ _OPTIMIZATION_RUN_SECTIONS = ("controls", "model", "parameterizations", "simulat
 
 
 def _optimization_case(
-    case: OptimizationConfig, keys: Sequence[DataKey], *, execution: PluginSection | None
+    case: OptimizationConfig,
+    keys: Sequence[DataKey],
+    *,
+    execution: PluginSection | None,
+    coarse: CoarseSection | None = None,
 ) -> SurrogateCase:
     """Compose the stack an optimization's surrogate is built (or checked) on.
 
     The design is over the controls (with ``[model]`` arrays, each member is given one
     realization); the surrogate's inputs are what the simulations are given, through the
     optimization's ``[[parameterizations]]``. The objective ranks the held-out runs when the
-    keys are its response keys.
+    keys are its response keys. With ``coarse``, every design member also runs on the
+    optimization's coarse stack (:func:`optimization_coarse_stack`).
 
     Raises
     ------
     ConfigError
-        If the optimization has no simulator, a plugin is unknown or refuses its options.
+        If the optimization has no simulator, a plugin is unknown or refuses its options, or
+        the coarse stack is refused.
     """
     if case.simulator is None:
         raise ConfigError(
@@ -886,6 +894,12 @@ def _optimization_case(
         raise ConfigError(f"invalid case for a surrogate: {error}") from error
     objective = optimization_services.response_objective(case)
     responses = tuple(objective.response_keys())
+    provenance_ = stack_provenance(case, raw)
+    coarse_simulator, coarse_config = None, None
+    if coarse is not None:
+        built = optimization_coarse_stack(case, coarse, model, executor)
+        coarse_simulator, coarse_config = built.simulator, built.config
+        provenance_ = provenance_.model_copy(update={"coarse": built.provenance})
     return SurrogateCase(
         config=case.model_copy(update={"execution": section}),
         layout=layout,
@@ -895,7 +909,9 @@ def _optimization_case(
         variances=None,
         simulator=simulator,
         executor=executor,
-        provenance=stack_provenance(case, raw),
+        provenance=provenance_,
+        coarse_simulator=coarse_simulator,
+        coarse_config=coarse_config,
         # Ranked only when the keys are exactly what the objective reads.
         objective=objective if tuple(keys) == responses else None,
         realizations={k: np.ascontiguousarray(v) for k, v in model.items()},
@@ -1236,13 +1252,14 @@ class CoarseStack:
         Takes a member's state: the case's parameterizations, the coarse ones, then the
         coarse simulator.
     config
-        The case with the coarse simulator, options and parameterizations.
+        The case with the coarse simulator, options and parameterizations (a history
+        match's or an optimization's).
     provenance
         What names it (:func:`stack_provenance`).
     """
 
     simulator: Simulator
-    config: HistoryMatchConfig
+    config: HistoryMatchConfig | OptimizationConfig
     provenance: SnapshotProvenance
 
 
@@ -1257,7 +1274,9 @@ def coarse_stack(
     Raises
     ------
     ConfigError
-        If the executor runs members remotely, the case has ``[geophysics]``, the coarse
+        If the executor runs members remotely, the case has ``[geophysics]``, the options
+        name fidelity ``levels`` (an id outside every level would run the fine deck), the
+        plain stack already has ``upscale`` or ``haar`` follows no state variable, the coarse
         deck would inherit the case's ``case_dir``, or the stack is refused or invalid.
     """
     if getattr(executor, "remote", False):
@@ -1270,6 +1289,7 @@ def coarse_stack(
             "a coarse stack with [geophysics]: its grid and masks are the fine deck's; a "
             "coarse stack forecasts the wells' data only"
         )
+    _refuse_coarse_levels({**case.simulator.options, **coarse.options}, case.simulator.options)
     if "case_dir" in case.simulator.options and "case_dir" not in coarse.options:
         raise ConfigError(
             "the coarse stack: the case's simulator has a case_dir (its decks' includes); "
@@ -1287,12 +1307,138 @@ def coarse_stack(
     try:
         stack = composition.forecast_stack(config, layout)
         properties = PropertyMap(composition.build_parameterizations(config), layout)
+        _check_upscale_state(
+            config.simulator.options, frozenset(properties.names), "a property the deck gets"
+        )
         simulator = parameterized(stack.simulator, properties)
         if executor is not None:
             composition.check_executor(executor, simulator)
     except (TypeError, ValueError, PluginError) as error:
         raise ConfigError(f"invalid coarse stack: {error}") from error
     return CoarseStack(simulator, config, stack_provenance(config, stack.simulator))
+
+
+def optimization_coarse_stack(
+    case: OptimizationConfig,
+    coarse: CoarseSection,
+    model: Mapping[str, NDArray[np.float64]],
+    executor: object,
+) -> CoarseStack:
+    """Compose an optimization's coarse stack.
+
+    A separate coarse deck, or the fine deck coarsened for every member by the Eclipse
+    simulator's ``upscale``: the optimization's simulator (or ``coarse.simulator``) with the
+    coarse options merged over its options, and its parameterizations followed by the coarse
+    ones, over the controls and the ``[model]`` arrays; the member's state is the
+    optimization's (its controls and one realization).
+
+    Raises
+    ------
+    ConfigError
+        If the executor runs members remotely, the options name fidelity ``levels``
+        (COARSEN by member id, which an optimization's journal ids do not fit; an
+        ``upscale`` coarsens every member instead), the plain stack already has
+        ``upscale``, ``haar`` follows no ``[model]`` array, the coarse deck would inherit
+        the optimization's ``case_dir``, the simulator is refused, or a plugin is unknown or
+        refuses its options.
+    """
+    assert case.simulator is not None  # an optimization without one is refused before
+    if getattr(executor, "remote", False):
+        raise ConfigError(
+            "a coarse stack is a second stack: remote members carry one; use the "
+            "executor's files mode or local workers"
+        )
+    options = {**case.simulator.options, **coarse.options}
+    _refuse_coarse_levels(options, case.simulator.options)
+    if "case_dir" in case.simulator.options and "case_dir" not in coarse.options:
+        raise ConfigError(
+            "the coarse stack: the optimization's simulator has a case_dir (its decks' "
+            "includes); give the coarse deck's own in the coarse options, or its includes are "
+            "the fine case's"
+        )
+    name = coarse.simulator or case.simulator.name
+    if name in REFUSED_SIMULATORS:
+        raise ConfigError(f"the coarse stack cannot run {name!r}: {REFUSED_SIMULATORS[name]}")
+    config = case.model_copy(update={
+        "simulator": case.simulator.model_copy(update={"name": name, "options": options}),
+        "parameterizations": [*case.parameterizations, *coarse.parameterizations],
+    })  # fmt: skip
+    properties = optimization_services.control_properties(config, model)
+    # A coarse grid may follow a [model] array (one per realization), never a control: the
+    # names the deck gets less the controls and whatever a parameterization made from one.
+    from_controls = {v.name for v in config.controls.variables}
+    for parameterization in properties.parameterizations:
+        if from_controls & set(parameterization.variables):
+            from_controls |= set(parameterization.outputs)
+    _check_upscale_state(
+        options,
+        frozenset(properties.names) - from_controls,
+        "a property the deck gets from the [model] arrays (never from a control)",
+    )
+    try:
+        raw = simulators.create(name, **options)
+        simulator = raw if properties.identity else parameterized(raw, properties)
+        if executor is not None:
+            composition.check_executor(executor, simulator)
+    except (TypeError, ValueError, PluginError) as error:
+        raise ConfigError(f"invalid coarse stack: {error}") from error
+    return CoarseStack(simulator, config, stack_provenance(config, raw))
+
+
+def _refuse_coarse_levels(options: Mapping[str, object], plain: Mapping[str, object]) -> None:
+    """Refuse fidelity ``levels`` in a coarse stack, and an ``upscale`` the plain stack has.
+
+    ``options`` are the coarse stack's merged simulator options, ``plain`` the plain stack's.
+
+    Raises
+    ------
+    ConfigError
+        If ``levels`` are given (COARSEN by member id: an id outside every level runs the
+        fine deck, silently), or the plain stack already coarsens every member.
+    """
+    if "levels" in options:
+        raise ConfigError(
+            "a coarse stack cannot take fidelity levels: they choose a member's deck by its id "
+            ", and an id outside every level would run the fine deck as the coarse "
+            "one. Give the coarse deck its own deck_template_file in [coarse] options, or, on "
+            "Eclipse, coarsen the fine deck for every member with [coarse] options.upscale "
+            ""
+        )
+    if "upscale" in options and "upscale" in plain:
+        raise ConfigError(
+            "the simulator's own options have upscale, so the plain stack is coarsened too: "
+            "put upscale in [coarse] options only"
+        )
+
+
+def _check_upscale_state(options: Mapping[str, object], allowed: frozenset[str], what: str) -> None:
+    """Refuse an ``upscale`` whose ``state`` the coarse deck does not get.
+
+    ``allowed`` are the member's properties (after the parameterizations) it may follow, and
+    ``what`` names them in the message.
+
+    Raises
+    ------
+    ConfigError
+        If ``upscale.state`` is not among ``allowed`` (it would fail every member's run).
+    """
+    upscale = options.get("upscale")
+    if not isinstance(upscale, Mapping) or upscale.get("state") is None:
+        return
+    state = str(upscale["state"])
+    if state not in allowed:
+        raise ConfigError(
+            f"[coarse] options.upscale follows {state!r}, which is not {what}; known: "
+            f"{sorted(allowed)}"
+        )
+
+
+def _coarse_label(config: OptimizationConfig) -> str:
+    """Name an optimization's coarse stack in messages: its deck, else its simulator."""
+    assert config.simulator is not None
+    deck = config.simulator.options.get("deck_template_file")
+    name = config.simulator.name
+    return f"the coarse stack ({name}, deck {deck})" if deck else f"the coarse stack ({name})"
 
 
 def coarse_relative_to(coarse: CoarseSection, folder: Path) -> CoarseSection:
@@ -4503,6 +4649,39 @@ def planned_simulator_runs(
 # ===================================================================== prediction (§6)
 
 
+def _prediction_problem(
+    path: Path, model: object, manifest: object, *, scenarios: bool
+) -> str | None:
+    """Return why a prediction refuses the model by its capabilities, or ``None``.
+
+    With control scenarios the row is ``prediction_scenarios`` (the model must take the
+    controls; the user, 2026-11-21), else ``prediction``.
+    """
+    workflow = "prediction_scenarios" if scenarios else "prediction"
+    problem = workflow_refusal(workflow, model, _plugin_of(model, manifest))
+    if problem is None:
+        return None
+    return f"the surrogate {path}: {problem}: predictions with it are not supported"
+
+
+def prediction_refusal(section: PredictionSurrogateSection, *, scenarios: bool) -> str | None:
+    """Return why a prediction refuses its surrogate by its capabilities, or ``None``.
+
+    For validation (:func:`apex.services.prediction.check_prediction`): the model's files
+    are read, nothing is run; ``scenarios`` whether the prediction has ``[controls]``.
+
+    Raises
+    ------
+    ConfigError
+        If the model's files cannot be read or are refused (:func:`load_surrogate`).
+    PluginError
+        If its plugin is not registered or cannot load it.
+    """
+    path = Path(section.model_file)
+    loaded = load_surrogate(path)
+    return _prediction_problem(path, loaded.model, loaded.manifest, scenarios=scenarios)
+
+
 def prediction_surrogate(
     section: PredictionSurrogateSection,
     case: HistoryMatchConfig,
@@ -4544,9 +4723,10 @@ def prediction_surrogate(
     loaded = active_model(path)
     manifest = loaded.manifest
     model = loaded.model
-    problem = workflow_refusal("prediction", model, _plugin_of(model, manifest))
+    controls = dict(controls or {})
+    problem = _prediction_problem(path, model, manifest, scenarios=bool(controls))
     if problem is not None:
-        raise ConfigError(f"the surrogate {path}: {problem}: predictions with it are not supported")
+        raise ConfigError(problem)
     if manifest.gate is None or not manifest.gate.passed:
         failures = [] if manifest.gate is None else manifest.gate.failures()
         raise ConfigError(
@@ -4558,7 +4738,6 @@ def prediction_surrogate(
         raise ConfigError(
             f"the surrogate {path} failed its last check ({check.id}): rebuild or refit it"
         )
-    controls = dict(controls or {})
     built_over = manifest.control_box is not None
     if not built_over and manifest.provenance.case_digest == _OPTIMIZATION_CASE_DIGEST:
         raise ConfigError(
@@ -4819,13 +4998,28 @@ def optimization_surrogate(
             f"{'; '.join(check.notes) or 'not passed'}): rebuild it"
         )
     raw = simulators.create(config.simulator.name, **config.simulator.options)
-    mismatches = manifest.provenance.stack_mismatches(stack_provenance(config, raw))
+    model = dict(simulation.model)
+    provenance_ = stack_provenance(config, raw)
+    corrects = isinstance(loaded.model, CoarseCorrectedSurrogate)
+    coarse_built = None
+    if corrects:
+        # The coarse stack the model was built with, run on the
+        # optimization's own executor.
+        if manifest.coarse is None or manifest.provenance.coarse is None:
+            raise ConfigError(
+                f"the surrogate {path} corrects a coarse simulation but records no coarse "
+                "stack: rebuild it (models record theirs since the step 2)"
+            )
+        coarse_built = optimization_coarse_stack(
+            config, coarse_resolved_in(manifest.coarse, path.parent), model, simulation.executor
+        )
+        provenance_ = provenance_.model_copy(update={"coarse": coarse_built.provenance})
+    mismatches = manifest.provenance.stack_mismatches(provenance_, require_coarse=corrects)
     if mismatches:
         raise ConfigError(
             f"the surrogate {path} was built for another simulator stack "
             f"({', '.join(mismatches)} differ)"
         )
-    model = dict(simulation.model)
     properties = optimization_services.control_properties(config, model)
     inputs = _input_layout(optimization_services.control_layout(config, model), properties)
     trained = _model_snapshots(path, manifest)
@@ -4848,13 +5042,14 @@ def optimization_surrogate(
         else manifest.gate.tolerances
     )
     kinds = {d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None}
-    surrogate_simulator: Simulator = SurrogateSimulator(
+    plain_surrogate = SurrogateSimulator(
         loaded.model,
         loaded.domain,
         identity=loaded.identity,
         loader=functools.partial(fitted_model, str(path.resolve()), loaded.identity),
         guard=refuse_outside,
     )
+    surrogate_simulator: Simulator = plain_surrogate
     if not properties.identity:
         surrogate_simulator = parameterized(surrogate_simulator, properties)
     workers = section.workers
@@ -4879,13 +5074,56 @@ def optimization_surrogate(
     )
     simulation.source = "simulator"
     blocks = simulation.blocks
+    coarse = None
+    coarse_rows: list[int] = []
+    if coarse_built is not None:
+        # The coarse forecast is handed over at the model's keys, read from the coarse rows'
+        # responses at the objective's keys.
+        index = {key: row for row, key in enumerate(simulation.keys)}
+        missing = [k for k in loaded.model.keys if k not in index]
+        if missing:
+            raise ConfigError(
+                f"the surrogate {path} corrects a coarse forecast at {len(missing)} keys the "
+                f"objective does not read (e.g. {missing[0]}): build it with outputs = "
+                '"responses"'
+            )
+        coarse_rows = [index[k] for k in loaded.model.keys]
+        coarse_config = coarse_built.config
+        assert isinstance(coarse_config, OptimizationConfig)
+        coarse = SimulatedObjective(
+            simulation.objective,
+            coarse_built.simulator,
+            simulation.executor,
+            simulation.run_dir,
+            simulation.blocks,
+            model,
+            keep_simulations=simulation.keep_simulations,
+            progress=simulation.progress,
+            # Not the model's identity: a rebuilt model reuses the coarse stack's rows.
+            context=_digest({
+                "plain": simulation.context,
+                "coarse": optimization_services.evaluation_context(coarse_config),
+            }),
+            journal=simulation.journal,
+            source="coarse",
+            tolerate_failures=True,
+            broken_stack=_coarse_label(coarse_config),
+        )  # fmt: skip
 
-    def inside(controls: NDArray[np.float64], reals: NDArray[np.int64]) -> NDArray[np.bool_]:
+    def with_coarse(forecasts: Mapping[int, NDArray[np.float64]]) -> Simulator:
+        corrected: Simulator = plain_surrogate.with_coarse(forecasts)
+        return corrected if properties.identity else parameterized(corrected, properties)
+
+    def inside(
+        controls: NDArray[np.float64],
+        reals: NDArray[np.int64],
+        forecasts: NDArray[np.float64] | None = None,
+    ) -> NDArray[np.bool_]:
         state = {name: np.ascontiguousarray(controls[part]) for name, part in blocks}
         state.update({n: np.ascontiguousarray(a[:, reals]) for n, a in model.items()})
         mapped = properties.ensemble(state)
         ids = list(range(controls.shape[1]))
-        found = check_members(loaded.domain, loaded.model, mapped, ids)
+        found = check_members(loaded.domain, loaded.model, mapped, ids, coarse=forecasts)
         flagged = set(found.members)
         return np.array([j not in flagged for j in ids], dtype=bool)
 
@@ -4902,4 +5140,7 @@ def optimization_surrogate(
         tolerances=tolerances,
         kinds=kinds,
         max_evaluations=section.max_evaluations,
+        coarse=coarse,
+        coarse_rows=coarse_rows,
+        with_coarse=None if coarse is None else with_coarse,
     )

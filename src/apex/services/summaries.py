@@ -210,6 +210,31 @@ def _surrogate_timing(timing: Mapping[str, Any] | None) -> str | None:
     return text
 
 
+def _model_error_note(path: Path) -> str:
+    """Say that a prediction's forecasts are ``g + r``, from provenance.
+
+    Empty for a prediction without a model-error model, or without a readable provenance.
+    """
+    try:
+        recorded = json.loads((path / "provenance.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    section = recorded.get("model_error") if isinstance(recorded, dict) else None
+    if not isinstance(section, dict):
+        return ""
+    state = section.get("forecast_state")
+    how = (
+        f"its parameters past the history extrapolated per member ({state.get('file')})"
+        if isinstance(state, dict)
+        else "its parameters as the run left them (not extrapolated)"
+    )
+    return (
+        f"forecasts are the simulator's plus the model-error model {section.get('name')}'s "
+        f"residuals (g + r); {how}"
+        + ("; the truth by the simulator" if section.get("truth_is_simulator") else "")
+    )
+
+
 @summaries.register("prediction")
 class PredictionSummarizer:
     """Summarise a prediction: one step per ensemble forecast.
@@ -269,6 +294,9 @@ class PredictionSummarizer:
             # records it after its parameterizations.
             given = "; ".join(f"{v.name} = {v.array().tolist()}" for v in config.controls.variables)
             notes.append(f"control scenario (as given, before its parameterizations): {given}")
+        note = _model_error_note(path)
+        if note:
+            notes.append(note)
         sources = PredictionDirectory(path).read_state().get("member_sources", {})
         if config.surrogate is not None:
             # Which members the surrogate forecast, the rest the simulator's.
@@ -304,7 +332,9 @@ class OptimizationSummarizer:
     members are the objective evaluations it took, its control the step size where the
     optimizer has one. The finished run's objective over the realizations (robust
     optimization) is a statistic at the last step (label ``realizations``). The result
-    is the last step of a finished run.
+    is the last step of a finished run. A coarse-corrected surrogate's coarse objective of
+    each step (``coarse_objective``) and its coarse stack's counts (a note) are added when
+    present.
     """
 
     def applies(self, path: Path) -> bool:
@@ -351,6 +381,12 @@ class OptimizationSummarizer:
                     rows.append(_single("objective", key.split(":", 1)[1], index, float(value)))
                 elif key in ("hypervolume", "front_size"):
                     rows.append(_single(key, "all", index, float(value)))
+                elif key == "coarse_objective":
+                    # A coarse-corrected surrogate's coarse stack.
+                    rows.append(_single("coarse_objective", "all", index, float(value)))
+                elif key.startswith("coarse_objective:"):  # several objectives
+                    label = key.split(":", 1)[1]
+                    rows.append(_single("coarse_objective", label, index, float(value)))
         last = len(steps) - 1
         notes = []
         if summary.result is not None:
@@ -363,6 +399,13 @@ class OptimizationSummarizer:
                 ))  # fmt: skip
             if summary.result.get("message"):
                 notes.append(f"stopped: {summary.result['message']}")
+            surrogate = summary.result.get("surrogate")
+            if isinstance(surrogate, Mapping) and "coarse_evaluations" in surrogate:
+                notes.append(
+                    f"coarse stack: {surrogate['coarse_evaluations']} evaluation(s), "
+                    f"{surrogate.get('coarse_failed', 0)} failed, "
+                    f"{surrogate.get('coarse_stand_ins', 0)} evaluated by the simulator instead"
+                )
             after = optimization.objective_evaluations(summary) - evaluated
             if after > 0:  # the last iteration's, which found no step to accept
                 notes.append(f"{after} more objective evaluations after the last accepted step")

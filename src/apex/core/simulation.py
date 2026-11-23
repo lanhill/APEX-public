@@ -238,11 +238,15 @@ class MemberSeries:
         Resolved vector names, ``(n_vectors,)``, sorted.
     values
         ``(n_vectors, n_times)``.
+    residuals
+        The model-error residuals ``r`` included in ``values`` (``g + r``),
+        ``(n_vectors, n_times)``; ``None`` without a model-error model.
     """
 
     times: tuple[str, ...]
     vectors: tuple[str, ...]
     values: NDArray[np.float64]
+    residuals: NDArray[np.float64] | None = None
 
 
 class SeriesSimulator(Protocol):

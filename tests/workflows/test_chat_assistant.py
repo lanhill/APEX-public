@@ -1287,6 +1287,32 @@ def test_erts_localization_is_planned_only_on_a_case_that_can_carry_it(
     assert proposal.replicates == 1000 // 400
 
 
+def test_the_metrics_and_replicates_asked_for_survive_a_rules_design(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue (#304): plan_study with a goal only (the rules design the arms)
+    dropped the metrics the assistant gave for the rules' defaults (rmse,
+    normalized_data_mismatch), and said ok."""
+    _, _, store, assistant = _planning(tmp_path, linear_case, None)
+    plan = {t.name: t for t in assistant.planning_tools(store.create("p").id, None)}["plan_study"]
+
+    result = plan.handler(plan.arguments(
+        case="alpha/config.toml", goal="compare", budget=1000,
+        metrics=["normalized_data_mismatch:all"], replicates=2))  # fmt: skip
+
+    text = (tmp_path / result["draft"]).read_text()
+    draft = tomllib.loads(text)
+    assert draft["study"]["metrics"] == ["normalized_data_mismatch:all"]
+    assert draft["study"]["replicates"] == 2
+    assert result["metrics"] == ["normalized_data_mismatch:all"]
+    # The rules' text names its own values: what replaced them is said in the draft.
+    assert "(as asked, metrics normalized_data_mismatch:all; replicates 2)" in text
+    # The budget still holds: replicates beyond it are refused, never planned.
+    with pytest.raises(ValueError, match="the study may take"):
+        plan.handler(plan.arguments(case="alpha/config.toml", goal="compare", budget=1000,
+                                    replicates=500))  # fmt: skip
+
+
 def test_the_assistant_reads_its_draft_and_one_schema_section(
     tmp_path: Path, linear_case: CaseFactory
 ) -> None:
@@ -2400,6 +2426,49 @@ def test_a_request_about_logs_has_the_job_events_read() -> None:
     assert _task("Is my latest run healthy?", {}) == "Is my latest run healthy?"
     assert _task("Use a log-normal prior.", {}) == "Use a log-normal prior."
     assert "call job_events for the run's job before saying it is healthy" in SYSTEM
+
+
+def test_monitor_runs_description_names_logs_only_on_the_users_request(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """Issue #303: monitor_run's description primed the model to talk of logs."""
+    _, _, _, assistant = _planning(tmp_path, linear_case, None)
+    description = {t.name: t for t in assistant.local_tools()}["monitor_run"].description
+    assert "only if the user's own message asks about a run's logs" in description
+    assert "otherwise don't mention them" in description
+
+
+def test_logs_are_named_only_when_the_user_asks_about_them() -> None:
+    """Issue #303 (2026-11-21): asked for "the error against the true model", the answer
+    added "You also mentioned logs and warnings": the message got the logs note, and the
+    prompt and monitor_run's description named logs unconditionally."""
+    from apex.agents.chat import LOGS_NOTE, _task
+
+    metrics = ("Please list the metrics you'll use to compare the two schemes, including the "
+               "error against the true model if the case has one.")  # fmt: skip
+    assert _task(metrics, {}) == metrics
+    for quantity in (
+        "What is the model error?",
+        "Report the mean squared error.",
+        "Show the errors relative to the truth.",
+        "Use observation errors of 5%.",
+    ):
+        assert _task(quantity, {}) == quantity, quantity
+    for failure in (
+        "Did the run log any errors?",
+        "Any warnings?",
+        "Show me the logs.",
+        "Why did it fail with an error?",
+        "Were there errors in the model run?",
+        "Any errors on the prior run?",
+        "Numerical errors during the run?",
+        "Model errors in the forecast job?",
+    ):
+        assert _task(failure, {}).endswith(LOGS_NOTE), failure
+    assert LOGS_NOTE.lstrip().startswith("(If this message asks")
+    assert "only if the user's own message asks about a run's logs" in SYSTEM
+    assert "otherwise don't mention them" in SYSTEM
+    assert "never say the user mentioned or asked something" in SYSTEM
 
 
 def test_a_card_proposes_the_chats_latest_draft_of_its_kind(

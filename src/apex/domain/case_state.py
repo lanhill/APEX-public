@@ -339,6 +339,12 @@ SI_UNITS: Mapping[str, tuple[float, float]] = MappingProxyType(
         # Permeability (m²).
         "m2": (1.0, 0.0),
         "mD": (9.869233e-16, 0.0),
+        # Surface volume rates (m³/s at standard conditions; a well's rates W3).
+        "sm3/s": (1.0, 0.0),
+        "sm3/day": (1.0 / 86400.0, 0.0),
+        # Reservoir volume rates (m³/s at reservoir conditions; WVPR, WVIR).
+        "rm3/s": (1.0, 0.0),
+        "rm3/day": (1.0 / 86400.0, 0.0),
     }
 )
 

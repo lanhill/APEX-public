@@ -419,7 +419,9 @@ class SurrogateRequirement:
     Attributes
     ----------
     workflow
-        The workflow's name (``history_matching``, ``prediction``, ``optimization``, ...).
+        The use's name: a workflow's (``history_matching``, ``prediction``,
+        ``optimization``, ...), or a workflow's under a condition that needs more of a model
+        (``prediction_scenarios``: a prediction with control scenarios).
     outputs
         The outputs it needs, each.
     refused_inputs
@@ -429,6 +431,8 @@ class SurrogateRequirement:
         instead.
     extrapolates, uncertainty, gradients
         The capabilities it needs (none by default).
+    label
+        How a refusal names it (default: ``workflow`` with spaces for underscores).
     """
 
     workflow: str
@@ -438,6 +442,11 @@ class SurrogateRequirement:
     extrapolates: bool = False
     uncertainty: bool = False
     gradients: bool = False
+    label: str = ""
+
+    def name(self) -> str:
+        """Return how a refusal names it: its ``label``, else its workflow's name."""
+        return self.label or self.workflow.replace("_", " ")
 
 
 #: Each workflow's requirement. They reproduce what each workflow
@@ -447,7 +456,10 @@ class SurrogateRequirement:
 #: coarse stack would have to run to the horizon; times beyond a model's keys are refused
 #: by the keys themselves, so it does not need ``extrapolates``); an optimization needs a
 #: model of the wells' ``controls`` (the variables it changes) and refuses an early-start
-#: one. A workflow added later (e.g. risk assessment) adds its row.
+#: one. A prediction with control scenarios (``[controls]``) has a row of its own,
+#: ``prediction_scenarios``, which also needs a model of the ``controls`` (the user,
+#: 2026-11-21): a model that does not take them would forecast as if the controls were its
+#: build's. A workflow added later (e.g. risk assessment) adds its row.
 SURROGATE_REQUIREMENTS: Mapping[str, SurrogateRequirement] = MappingProxyType(
     {
         "history_matching": SurrogateRequirement(
@@ -463,6 +475,26 @@ SURROGATE_REQUIREMENTS: Mapping[str, SurrogateRequirement] = MappingProxyType(
         ),
         "prediction": SurrogateRequirement(
             "prediction",
+            refused_inputs=(
+                (
+                    "coarse_responses",
+                    "a prediction would have to run its coarse stack to the horizon",
+                ),
+            ),
+        ),
+        "prediction_scenarios": SurrogateRequirement(
+            "prediction_scenarios",
+            label="a prediction with control scenarios",
+            required_inputs=(
+                (
+                    "controls",
+                    "a prediction with control scenarios gives every member the scenario's "
+                    "controls, and a model that does not take them would forecast as if the "
+                    "controls were its build's; use a surrogate that takes controls, built "
+                    "over the scenario's controls, or drop [controls], or forecast with the "
+                    "simulator (no [surrogate])",
+                ),
+            ),
             refused_inputs=(
                 (
                     "coarse_responses",
@@ -525,22 +557,29 @@ def missing_capabilities(
 def refusal(plugin: str, capabilities: SurrogateCapabilities, workflow: str) -> str | None:
     """Return why ``workflow`` refuses the plugin ``plugin``, or ``None`` if it serves.
 
+    ``workflow`` is a key of :data:`SURROGATE_REQUIREMENTS`: a workflow, or a workflow under
+    a condition (``prediction_scenarios``).
+
     Raises
     ------
     KeyError
         If ``workflow`` has no requirement (:data:`SURROGATE_REQUIREMENTS`).
     """
-    missing = missing_capabilities(capabilities, SURROGATE_REQUIREMENTS[workflow])
+    requirement = SURROGATE_REQUIREMENTS[workflow]
+    missing = missing_capabilities(capabilities, requirement)
     if not missing:
         return None
-    return (
-        f"the surrogate plugin {plugin!r} cannot serve {workflow.replace('_', ' ')}: "
-        + "; ".join(missing)
+    return f"the surrogate plugin {plugin!r} cannot serve {requirement.name()}: " + "; ".join(
+        missing
     )
 
 
 def serves(capabilities: SurrogateCapabilities) -> list[str]:
-    """Return the workflows whose requirement ``capabilities`` meet, in the table's order."""
+    """Return the uses whose requirement ``capabilities`` meet, in the table's order.
+
+    The uses are the table's keys: workflows, and a workflow under a condition that needs
+    more (``prediction_scenarios``).
+    """
     return [
         name
         for name, requirement in SURROGATE_REQUIREMENTS.items()

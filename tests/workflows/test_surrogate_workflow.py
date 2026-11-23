@@ -1190,6 +1190,11 @@ def test_what_a_coarse_stack_refuses(tmp_path: Path) -> None:
     assert "coarse" not in surrogates.fingerprint_parts(config, surrogates._build_case(config))
     with pytest.raises(ConfigError, match="does not correct a coarse simulation"):
         surrogates.build(_build_with(tmp_path, "test_affine_build", extra, name="plain"))
+    # Fidelity levels choose a deck by member id: an id outside every level would run the
+    # fine deck as the coarse one, silently (amended).
+    levels = extra.replace("}", ", levels = [{ first = 0, size = 4 }] }")
+    with pytest.raises(ConfigError, match="cannot take fidelity levels"):
+        surrogates.build(_build_with(tmp_path, "test_coarse_affine", levels, name="levels"))
 
 
 @pytest.mark.usefixtures("_coarse_plugin")
@@ -1899,3 +1904,19 @@ def test_a_check_gates_an_early_start_model_on_its_runs_own_early_data(tmp_path:
     assert gate.held_out, "every checked run fell outside the domain"
     assert len(gate.held_out) + len(check.summary.outside) == 4
     assert gate.passed, gate.failures()
+
+
+def test_erts_export_refuses_an_upscaled_simulator(tmp_path: Path) -> None:
+    """ERT's forward model renders the deck without COARSEN records: an ``upscale`` would
+    silently run the fine deck, so the export refuses it (the review, 2026-11-21)."""
+    from apex.integrations.ert.export import _check_exportable
+
+    config = composition.load_config(write_case(tmp_path))
+    deck = tmp_path / "deck.mako"
+    deck.write_text("RUNSPEC\n")
+    upscaled = config.model_copy(update={"simulator": config.simulator.model_copy(update={
+        "name": "eclipse",
+        "options": {"deck_template_file": str(deck), "upscale": {"dim": [4, 4], "max_trunc": 1}},
+    })})  # fmt: skip
+    with pytest.raises(ConfigError, match="upscale, COARSEN"):
+        _check_exportable(upscaled)

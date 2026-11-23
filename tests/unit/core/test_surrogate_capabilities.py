@@ -5,7 +5,8 @@ declared: the reference is the structural checks the workflows made then (an ear
 model refused by optimizations, a coarse-corrected one by predictions, any model taken by a
 history match), restated here class by class; and two stricter rows switched on by the
 user on 2026-11-21: a history match needs a model of the state, an optimization one of the
-controls.
+controls; and a third the same day, a prediction with control scenarios needs one of the
+controls (the row ``prediction_scenarios``).
 """
 
 from collections.abc import Sequence
@@ -109,8 +110,11 @@ def test_the_vocabularies_are_checked() -> None:
 def test_the_requirement_table_reproduces_what_each_workflow_accepted() -> None:
     """History matching takes any model of the state; predictions refuse a coarse-corrected
     one; optimizations need one of the controls and refuse an early-start one; none needs
-    extrapolation, uncertainty or gradients."""
-    assert list(SURROGATE_REQUIREMENTS) == ["history_matching", "prediction", "optimization"]
+    extrapolation, uncertainty or gradients. A prediction with control scenarios refuses what
+    a prediction refuses and needs a model of the controls."""
+    assert list(SURROGATE_REQUIREMENTS) == [
+        "history_matching", "prediction", "prediction_scenarios", "optimization"
+    ]  # fmt: skip
     for name, requirement in SURROGATE_REQUIREMENTS.items():
         assert requirement.workflow == name
         assert requirement.outputs == {"responses"}
@@ -127,14 +131,18 @@ def test_the_requirement_table_reproduces_what_each_workflow_accepted() -> None:
     assert [i for i, _ in SURROGATE_REQUIREMENTS["optimization"].refused_inputs] == [
         "early_responses"
     ]
+    scenarios = SURROGATE_REQUIREMENTS["prediction_scenarios"]
+    assert [i for i, _ in scenarios.required_inputs] == ["controls"]
+    assert scenarios.refused_inputs == SURROGATE_REQUIREMENTS["prediction"].refused_inputs
+    every = ["history_matching", "prediction", "prediction_scenarios", "optimization"]
     accepted = {
-        _Plain: ["history_matching", "prediction", "optimization"],
-        _Fields: ["history_matching", "prediction", "optimization"],
-        _Uncertain: ["history_matching", "prediction", "optimization"],
-        _Early: ["history_matching", "prediction"],
+        _Plain: every,
+        _Fields: every,
+        _Uncertain: every,
+        _Early: ["history_matching", "prediction", "prediction_scenarios"],
         _Coarse: ["history_matching", "optimization"],
         _StateOnly: ["history_matching", "prediction"],
-        _ControlsOnly: ["prediction", "optimization"],
+        _ControlsOnly: ["prediction", "prediction_scenarios", "optimization"],
     }
     for kind, workflows in accepted.items():
         assert serves(capabilities_of(kind)) == workflows
@@ -215,6 +223,18 @@ def test_refusals_name_the_plugin_the_workflow_and_the_capability() -> None:
         "(not taken: "
     )
     assert "use a surrogate that takes the state" in message
+    message = refusal("state_like", capabilities_of(_StateOnly()), "prediction_scenarios")
+    assert message is not None
+    assert message.startswith(
+        "the surrogate plugin 'state_like' cannot serve a prediction with control scenarios: "
+        "inputs: controls (not taken: "
+    )
+    assert "use a surrogate that takes controls" in message
+    assert "drop [controls]" in message
+    assert refusal("state_like", capabilities_of(_StateOnly()), "prediction") is None
+    assert refusal("controls_like", capabilities_of(_ControlsOnly()), "prediction_scenarios") is (
+        None
+    )
     with pytest.raises(KeyError):
         refusal("p", capabilities_of(_Plain()), "no_such_workflow")
 

@@ -51,6 +51,7 @@ from apex.domain.observations import DataKey
 from apex.domain.prediction import PERCENTILE_LABELS, EnsembleForecast, PredictionResult
 from apex.domain.state import StateLayout
 from apex.domain.surrogate import GateTolerances, QuantityKind, TrainingDomain
+from apex.simulation.model_error import residual_keys
 from apex.simulation.surrogate import SurrogateSimulator
 from apex.storage.prediction_directory import MEAN_MODEL_ID, TRUTH_ID, PredictionDirectory
 
@@ -209,10 +210,10 @@ class _SeriesRun(_Forwarding):
     resolves_axis = False
 
     def run(self, member: MemberInput, keys: Sequence[DataKey]) -> NDArray[np.float64]:
-        """Forecast one member's series and save it."""
-        values = series_values(self.simulator, member, self.request)
-        self.directory.save_member(self.ensemble, member.member_id, values)
-        return values.ravel()
+        """Forecast one member's series and save it (with its residuals, if any)."""
+        series = member_series(self.simulator, member, self.request)
+        self.directory.save_member(self.ensemble, member.member_id, series.values, series.residuals)
+        return series.values.ravel()
 
     def save_series(self, member_id: int, series: MemberSeries) -> None:
         """Save a member's series run elsewhere, checked against the axis.
@@ -227,7 +228,14 @@ class _SeriesRun(_Forwarding):
         values = np.asarray(series.values, dtype=np.float64)
         if not np.all(np.isfinite(values)):
             raise SimulationError(f"member {member_id} returned non-finite values")
-        self.directory.save_member(self.ensemble, member_id, values)
+        residuals = series.residuals
+        if residuals is not None and (
+            np.shape(residuals) != values.shape or not np.all(np.isfinite(residuals))
+        ):
+            raise SimulationError(
+                f"member {member_id} returned residuals off the axis or not finite"
+            )
+        self.directory.save_member(self.ensemble, member_id, values, residuals)
 
 
 @dataclass
@@ -279,10 +287,39 @@ def series_values(
     SimulationError
         If the run fails or returns another axis.
     """
+    return member_series(simulator, member, request).values
+
+
+def member_series(
+    simulator: Simulator, member: MemberInput, request: SeriesRequest
+) -> MemberSeries:
+    """Run one member at a resolved request and return its checked series.
+
+    Its ``values`` are ``(n_vectors, n_times)``; ``residuals``, a model-error model's,
+    of the same shape, or ``None``.
+
+    Raises
+    ------
+    SimulationError
+        If the run fails or returns another axis.
+    """
     assert request.times is not None
     run_series = getattr(simulator, "run_series", None)
+    residuals: NDArray[np.float64] | None = None
     if run_series is None:
-        values = simulator.run(member, axis_keys(request))
+        keys = axis_keys(request)
+        if getattr(simulator, "gives_residuals", False):
+            # A model-error simulator gives r at the MEC: keys from the same run's reading:
+            # g + r at the keys, then r (saved since 2026-11-21).
+            both = np.asarray(
+                simulator.run(member, [*keys, *residual_keys(keys)]), dtype=np.float64
+            )
+            values, residuals = (
+                both[: len(keys)],
+                both[len(keys) :].reshape(len(request.vectors), -1),
+            )
+        else:
+            values = simulator.run(member, keys)
         result = np.asarray(values, dtype=np.float64).reshape(len(request.vectors), -1)
     else:
         series: MemberSeries = run_series(member, request)
@@ -293,9 +330,10 @@ def series_values(
                 f"expected {len(request.vectors)} x {len(request.times)}"
             )
         result = np.asarray(series.values, dtype=np.float64)
+        residuals = series.residuals
     if not np.all(np.isfinite(result)):
         raise SimulationError(f"member {member.member_id} returned non-finite values")
-    return result
+    return MemberSeries(request.times, request.vectors, result, residuals)
 
 
 def time_label(label: str) -> str:
@@ -602,7 +640,7 @@ class PredictionWorkflow:
                 continue
             self.progress.member_finished(member_id=member.member_id, ok=True)
             self.progress.forecast_finished(n_ok=1, n_failed=0, seconds=time.monotonic() - began)
-            self.directory.save_member(name, member.member_id, series.values)
+            self.directory.save_member(name, member.member_id, series.values, series.residuals)
             return SeriesRequest(series.vectors, series.times)
         raise WorkflowError(
             "no pilot member resolved the prediction's vectors and times: " + "; ".join(errors)
@@ -953,12 +991,16 @@ class PredictionWorkflow:
         """Stack the saved members; apply the failure policy."""
         assert request.times is not None
         values, ok_ids, failed = [], [], []
+        residuals: list[NDArray[np.float64] | None] = []
         for member_id in ensemble.member_ids:
             saved = self.directory.load_member(ensemble.name, int(member_id))
             if saved is None:
                 failed.append(int(member_id))
             else:
                 values.append(saved)
+                residuals.append(
+                    self.directory.load_member_residuals(ensemble.name, int(member_id))
+                )
                 ok_ids.append(int(member_id))
         n_total = len(ensemble.member_ids)
         if len(ok_ids) < max(2, self.min_success_fraction * n_total):
@@ -980,6 +1022,10 @@ class PredictionWorkflow:
             member_ids=np.array(ok_ids, dtype=np.int64),
             failed_member_ids=np.array(failed, dtype=np.int64),
             mean_model=mean_model,
+            # A model-error model's residuals, when every member has
+            # them (members saved by an older start, or a remote worker of older code, may
+            # not: then none, rather than a partial array).
+            residuals=_stacked_residuals(ensemble.name, ok_ids, residuals),
         )
 
     # ------------------------------------------------------------------ checks and results
@@ -1204,3 +1250,25 @@ class PredictionWorkflow:
                     values["coverage_p10_p90_nominal"] = nominal_coverage(forecast.values.shape[-1])
                 result[name][vector] = values
         return result
+
+
+def _stacked_residuals(
+    ensemble: str, member_ids: Sequence[int], residuals: Sequence[NDArray[np.float64] | None]
+) -> NDArray[np.float64] | None:
+    """Stack the members' model-error residuals ``(n_vectors, n_times, n)``, if all have them.
+
+    Members saved by an older start, or by a remote worker of older code, have none: then
+    none are stacked (rather than a partial array), and the members without are logged.
+    """
+    if not residuals or all(r is None for r in residuals):
+        return None
+    lacking = [m for m, r in zip(member_ids, residuals, strict=True) if r is None]
+    if lacking:
+        logger.warning(
+            "%s: members %s have no saved residuals (saved by older code), so the ensemble's "
+            "are not assembled",
+            ensemble,
+            lacking[:10],
+        )
+        return None
+    return np.ascontiguousarray(np.stack(residuals, axis=-1))  # type: ignore[arg-type]

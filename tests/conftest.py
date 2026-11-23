@@ -102,10 +102,16 @@ def _write_case(
     cell: tuple[float, float, float] = (100.0, 100.0, 5.0),
     top: float = 2000.0,
     summary_end: dt.date | None = None,
+    init_arrays: Mapping[str, ArrayLike] | None = None,
+    wbhp: Mapping[str, Sequence[float]] | None = None,
+    well_vectors: Mapping[str, Sequence[float]] | None = None,
 ) -> Path:
     """Write ``case``'s EGRID, INIT and restarts (arrays over the active cells).
 
     With ``summary_end``, also a summary from the first restart's date to it (FOPT only).
+    ``init_arrays`` adds INIT arrays (``DX``, ``PERMX``, ...). ``wbhp`` writes a summary
+    whose report steps are the restarts' dates after the first, with each well's
+    ``WBHP`` at them (one value per later restart).
 
     ``restarts`` maps each date to its arrays (``PRESSURE``, ``SWAT``, ``OIL_DEN``, ...),
     written in order as ``.X0000``, ``.X0001``, ... or one ``.UNRST``. Depths are in the
@@ -122,10 +128,15 @@ def _write_case(
     k = np.arange(int(np.prod(shape))) // (shape[0] * shape[1])
     depth = (top + (k + 0.5) * cell[2])[act]
     poro = np.broadcast_to(np.asarray(porosity, dtype=float), (n_active,))
+    extra = [
+        _kw(name, np.broadcast_to(np.asarray(v, dtype=float), (n_active,)), "float")
+        for name, v in (init_arrays or {}).items()
+    ]
     _write(
         case.with_suffix(".INIT"),
-        [_header(units, phases), _kw("PORO", poro, "float"), _kw("DEPTH", depth, "float")],
-    )
+        [_header(units, phases), _kw("PORO", poro, "float"), _kw("DEPTH", depth, "float"),
+         *extra],
+    )  # fmt: skip
     blocks = []
     for step, (date, arrays) in enumerate(restarts.items()):
         block = [_header(units, phases, date)]
@@ -148,6 +159,24 @@ def _write_case(
                                 nx, ny, nz)  # fmt: skip
         writer.add_variable("FOPT")
         writer.add_t_step(1, float((summary_end - start).days))["FOPT"] = 0.0
+        writer.fwrite()
+    if wbhp is not None:
+        from resdata.summary import Summary
+
+        dates = list(restarts)
+        start = dates[0]
+        nx, ny, nz = shape
+        writer = Summary.writer(str(case), dt.datetime(start.year, start.month, start.day),
+                                nx, ny, nz)  # fmt: skip
+        vectors = {f"WBHP:{well}": values for well, values in wbhp.items()}
+        vectors.update(well_vectors or {})
+        for key in vectors:
+            keyword, _, well = key.partition(":")
+            writer.add_variable(keyword, wgname=well)
+        for step, date in enumerate(dates[1:], start=1):
+            t_step = writer.add_t_step(step, float((date - start).days))
+            for key, values in vectors.items():
+                t_step[key] = float(values[step - 1])
         writer.fwrite()
     return case
 

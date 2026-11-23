@@ -93,3 +93,57 @@ def test_opm_flow_refuses_coarsening_but_takes_coarse_decks(tmp_path: Path) -> N
         fine, licenses=3, levels=[{"first": 0, "size": 2, "upscale": upscale}]
     )
     assert eclipse.levels.upscales
+
+
+def test_upscale_coarsens_every_member_whatever_its_id(tmp_path: Path) -> None:
+    """Amended: one coarsening for every member (an optimization's ids
+    count its journal's rows, so no finite level covers them)."""
+    fine, _ = _templates(tmp_path)
+    upscale = {"method": "uniform", "dim": [8, 8], "max_trunc": 0.5, "wells": [[2, 2]],
+               "radius": [1]}  # fmt: skip
+    levels = FidelityLevels(None, fine, upscale)
+    records = coarsen(np.ones(64), (8, 8), max_trunc=0.5, wells=[[2, 2]], radius=[1])
+    assert records
+    for member_id in (0, 7, 10**6, -1):
+        template, values = levels.for_member(MemberInput(member_id, {"permx": np.ones(64)}))
+        assert (template, values) == (fine, {"level": 0, "coarse": records})
+    assert levels.upscales
+    assert levels.templates() == [fine]
+    # haar follows the member's own field, so two members may get different grids.
+    haar = FidelityLevels(
+        None, fine, {"method": "haar", "dim": [8, 8], "max_trunc": 0.1, "state": "permx"}
+    )
+    field = np.ones(64)
+    field[:8] = 50.0
+    _, own = haar.for_member(MemberInput(3, {"permx": field}))
+    assert own["coarse"] == coarsen(field, (8, 8), method="haar", max_trunc=0.1)
+
+
+def test_upscale_is_validated_and_excludes_levels(tmp_path: Path) -> None:
+    fine, _ = _templates(tmp_path)
+    with pytest.raises(ValueError, match="one or the other"):
+        FidelityLevels([{"first": 0, "size": 2}], fine, {"dim": [4, 4], "max_trunc": 1.0})
+    with pytest.raises(ValueError, match="upscale needs dim and max_trunc"):
+        FidelityLevels(None, fine, {"dim": [4, 4]})
+    with pytest.raises(ValueError, match="state it follows"):
+        FidelityLevels(None, fine, {"method": "haar", "dim": [4, 4], "max_trunc": 1.0})
+    with pytest.raises(ValueError, match="one radius per well"):
+        FidelityLevels(None, fine, {"dim": [4, 4], "max_trunc": 1.0, "wells": [[1, 1]]})
+    with pytest.raises(ValueError, match="must be a table"):
+        FidelityLevels(None, fine, [4, 4])  # type: ignore[arg-type]
+
+
+def test_the_simulators_upscale_option(tmp_path: Path) -> None:
+    fine, _ = _templates(tmp_path)
+    upscale = {"dim": [4, 4], "max_trunc": 1.0}
+    with pytest.raises(ValueError, match="does not support COARSEN"):
+        OPMFlowSimulator(fine, upscale=upscale)
+    eclipse = EclipseSimulator(fine, licenses=3, upscale=upscale)
+    template, values = eclipse.levels.for_member(MemberInput(12345, {"permx": np.ones(16)}))
+    deck = render_deck(template, MemberInput(12345, {"permx": np.ones(16)}), values)
+    assert "COARSEN" in deck
+    assert "-- level 0" in deck
+    # Without it, the deck is the fine one: no records.
+    plain = EclipseSimulator(fine, licenses=3)
+    _, none = plain.levels.for_member(MemberInput(12345, {"permx": np.ones(16)}))
+    assert none == {"level": -1, "coarse": []}

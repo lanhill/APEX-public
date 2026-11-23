@@ -274,6 +274,19 @@ def test_provenance_names_the_stack_differences() -> None:
     assert a.stack_mismatches(b) == ["deck_digest"]
 
 
+def test_a_coarse_stack_can_be_required() -> None:
+    """A model's coarse stack the other side lacks is a difference only
+    when asked for (an optimization composing a coarse-corrected model)."""
+    coarse = SnapshotProvenance(simulator="opm_flow", deck_digest="coarse")
+    model = SnapshotProvenance(simulator="opm_flow", coarse=coarse)
+    fine = SnapshotProvenance(simulator="opm_flow")
+    assert model.stack_mismatches(fine) == []
+    assert model.stack_mismatches(fine, require_coarse=True) == ["coarse"]
+    other = fine.model_copy(update={"coarse": coarse.model_copy(update={"deck_digest": "x"})})
+    assert model.stack_mismatches(other, require_coarse=True) == ["coarse.deck_digest"]
+    assert fine.stack_mismatches(model, require_coarse=True) == []
+
+
 # --------------------------------------------------------- domain and gate with a model
 
 

@@ -255,6 +255,15 @@ def test_a_prediction_with_a_forecasting_model_error_is_g_plus_r(
     result = predict(prediction)
     recorded = json.loads((tmp_path / "runs/run/predictions/future/provenance.json").read_text())
     assert recorded["model_error"] == {"name": "test_offset", "truth_is_simulator": True}
+    # apex summary says the forecasts are g + r, and that nothing was extrapolated.
+    from apex.services.summaries import PredictionSummarizer
+
+    notes = PredictionSummarizer().summarize(tmp_path / "runs/run/predictions/future").notes
+    assert (
+        "forecasts are the simulator's plus the model-error model test_offset's residuals "
+        "(g + r); its parameters as the run left them (not extrapolated); the truth by the "
+        "simulator"
+    ) in notes
     # The truth's parameters are not stored (auxiliary: zero), so its forecast is g.
     assert result.truth is not None
     np.testing.assert_allclose(result.truth[0], G @ TRUTH, rtol=1e-12)
@@ -263,6 +272,26 @@ def test_a_prediction_with_a_forecasting_model_error_is_g_plus_r(
     state = results.iterate(results.posterior_iteration).state
     expected = G @ np.asarray(state["x"]) + np.asarray(state["nn_params"])[0]
     np.testing.assert_allclose(result.forecasts["posterior"].values[0], expected, rtol=1e-12)
+    # Each member's residuals are saved beside its g + r (2026-11-21): here theta[0] at
+    # every vector and time, so the forecast less them is the simulator's g.
+    residuals = result.forecasts["posterior"].residuals
+    assert residuals is not None
+    assert residuals.shape == result.forecasts["posterior"].values.shape
+    theta = np.asarray(state["nn_params"])[0]
+    np.testing.assert_allclose(residuals[0], np.broadcast_to(theta, residuals[0].shape), rtol=0)
+    np.testing.assert_allclose(
+        result.forecasts["posterior"].values[0] - residuals[0],
+        G @ np.asarray(state["x"]),
+        rtol=1e-12,
+    )
+    from apex.storage.prediction_directory import PredictionDirectory
+
+    folder = PredictionDirectory(tmp_path / "runs/run/predictions/future")
+    assert folder.load_forecast("posterior").residuals is not None
+    first = int(result.forecasts["posterior"].member_ids[0])
+    saved = folder.load_member_residuals("posterior", first)
+    assert saved is not None
+    np.testing.assert_array_equal(saved, residuals[..., 0])
     with_surrogate = tmp_path / "fast.toml"
     with_surrogate.write_text(
         prediction.read_text().replace('name = "future"', 'name = "fast"')
@@ -793,6 +822,13 @@ def test_a_prediction_extrapolates_each_members_parameters_from_its_own_key(
     assert recorded["seed"] == {"entropy": "42", "spawn_key": [], "given": True}
     state_file = folder / recorded["forecast_state"]["file"]
     assert state_file.name.startswith("forecast_state-")
+    from apex.services.summaries import PredictionSummarizer
+
+    notes = PredictionSummarizer().summarize(folder).notes
+    assert any(
+        f"its parameters past the history extrapolated per member ({state_file.name})" in n
+        for n in notes
+    )
     with np.load(state_file) as data:
         level = float(data["level"])
     config = composition.load_config(tmp_path / "config.toml")
@@ -1300,3 +1336,100 @@ def test_a_run_checks_report_dates_against_its_deck_before_the_mask(
     finally:
         simulators._factories.pop("test_deck_linear")
         model_error_models._factories.pop("test_dated_halves")
+
+
+_DECK = """RUNSPEC
+START
+ 1 JAN 2000 /
+{solution}
+SCHEDULE
+{rptrst}
+DATES
+ 1 FEB 2000 /
+ 1 MAR 2000 /
+/
+END
+"""
+
+
+@pytest.mark.parametrize(
+    ("solution", "rptrst", "match"),
+    [
+        ("", "RPTRST\n BASIC=2 DEN /", None),
+        ("", "", "writes no restart at 2 report step"),
+        ("SOLUTION\nRESTART\n 'BASE' 3 /", "RPTRST\n BASIC=2 DEN /", "restarts from another run"),
+        # RPTRST in SOLUTION alone carries into the schedule (OPM's RSTConfig::first).
+        ("SOLUTION\nRPTRST\n BASIC=2 DEN /", "", None),
+        # A RESTART among Mako lines may not be rendered: a warning, not a refusal.
+        ("SOLUTION\n% if restart:\nRESTART\n 'BASE' 3 /\n% endif", "RPTRST\n BASIC=2 DEN /", None),
+    ],
+)
+def test_a_forecasting_prediction_refuses_a_deck_the_model_cannot_read(
+    tmp_path: Path, solution: str, rptrst: str, match: str | None
+) -> None:
+    """The limitations, checked from the deck's text before any run
+    (2026-11-21): a restart deck, and report steps without a restart, are refused."""
+    from apex.domain.config import PluginSection
+    from apex.services.prediction import _check_model_error_restarts
+
+    deck = tmp_path / "deck.mako"
+    deck.write_text(_DECK.format(solution=solution, rptrst=rptrst))
+    section = PluginSection(name="opm_flow", options={"deck_template_file": str(deck)})
+    if match is None:
+        _check_model_error_restarts(section, "test_offset")
+        return
+    with pytest.raises(ConfigError, match=match):
+        _check_model_error_restarts(section, "test_offset")
+    # Not a deck simulator: nothing is read.
+    _check_model_error_restarts(PluginSection(name="linear", options={}), "test_offset")
+
+
+def test_an_eclipse_deck_without_restarts_is_warned_not_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The restart schedule follows OPM Flow's rules, which Eclipse's may not match."""
+    from apex.domain.config import PluginSection
+    from apex.services.prediction import _check_model_error_restarts
+
+    deck = tmp_path / "deck.mako"
+    deck.write_text(_DECK.format(solution="", rptrst=""))
+    with caplog.at_level("WARNING"):
+        _check_model_error_restarts(
+            PluginSection(name="eclipse", options={"deck_template_file": str(deck)}), "m"
+        )
+    assert "by OPM Flow's rules (Eclipse's may differ)" in caplog.text
+
+
+class _KeyedResiduals:
+    """A model-error simulator's ``run`` on explicit keys: ``g`` and ``r`` depend on the key."""
+
+    gives_residuals = True
+
+    def run(self, member: object, keys: Sequence[DataKey]) -> NDArray[np.float64]:
+        def g(k: DataKey) -> float:
+            return 100.0 * float(k.time[-1]) + len(k.datatype)
+
+        def r(datatype: str, time: str) -> float:
+            return 0.5 * float(time[-1]) + (1.0 if datatype.endswith("P1") else 2.0)
+
+        out = []
+        for k in keys:
+            if k.datatype.startswith("MEC:"):
+                out.append(r(k.datatype.removeprefix("MEC:"), k.time))
+            else:
+                out.append(g(k) + r(k.datatype, k.time))
+        return np.array(out)
+
+
+def test_member_series_splits_the_residuals_on_explicit_keys() -> None:
+    """The explicit-keys path asks the same run for r at the MEC: keys, vector-major."""
+    from apex.core.simulation import MemberInput, SeriesRequest
+    from apex.workflows.prediction import member_series
+
+    request = SeriesRequest(("WOPR:P1", "WOPR:P2"), ("2001-01-01", "2002-01-02"))
+    series = member_series(_KeyedResiduals(), MemberInput(0, {}), request)
+    assert series.residuals is not None
+    expected_r = np.array([[0.5 + 1.0, 1.0 + 1.0], [0.5 + 2.0, 1.0 + 2.0]])
+    np.testing.assert_array_equal(series.residuals, expected_r)
+    g = np.array([[100.0 + 7, 200.0 + 7], [100.0 + 7, 200.0 + 7]])
+    np.testing.assert_array_equal(series.values, g + expected_r)

@@ -45,7 +45,7 @@ DECK_SIMULATORS = frozenset({"opm_flow", "eclipse"})
 #: study switches.
 PORTABLE_OPTIONS = frozenset(
     {"deck_template_file", "template_values", "keep_files", "timeout_s", "levels",
-     "transient_patterns", "case_dir"}
+     "transient_patterns", "case_dir", "upscale"}
 )  # fmt: skip
 
 
@@ -346,9 +346,22 @@ class FidelityLevels:
         If the levels overlap, or an upscaling is incomplete.
     """
 
-    def __init__(self, levels: Sequence[Mapping[str, object]] | None, default: Path) -> None:
+    def __init__(
+        self,
+        levels: Sequence[Mapping[str, object]] | None,
+        default: Path,
+        upscale: Mapping[str, object] | None = None,
+    ) -> None:
         self.default = default
         self.levels = [dict(level) for level in (levels or [])]
+        if upscale is not None and self.levels:
+            raise ValueError(
+                "upscale coarsens every member and levels choose members by id: give one or "
+                "the other (a level's own upscale table coarsens that level)"
+            )
+        # One coarsening for every member, whatever its id (amended):
+        # an optimization's member ids count its journal's rows, so no finite level fits.
+        self.upscale = None if upscale is None else _upscale_options(upscale, "upscale")
         expected = 0
         for index, level in enumerate(self.levels):
             first, size = int(str(level.get("first", -1))), int(str(level.get("size", 0)))
@@ -361,21 +374,16 @@ class FidelityLevels:
                 if not path.is_file():
                     raise ValueError(f"level {index}: deck template not found: {path}")
                 level["deck_template_file"] = path
-            upscale = level.get("upscale")
-            if upscale is not None:
-                options = dict(upscale)  # type: ignore[call-overload]
-                if "dim" not in options or "max_trunc" not in options:
-                    raise ValueError(f"level {index}: upscale needs dim and max_trunc")
-                if options.get("method", "uniform") == "haar" and "state" not in options:
-                    raise ValueError(f"level {index}: haar upscaling needs the state it follows")
-                if len(options.get("wells", ())) != len(options.get("radius", ())):
-                    raise ValueError(f"level {index}: upscale needs one radius per well")
-                level["upscale"] = options
+            upscale_table = level.get("upscale")
+            if upscale_table is not None:
+                level["upscale"] = _upscale_options(upscale_table, f"level {index}: upscale")
 
     @property
     def upscales(self) -> bool:
         """Whether any level coarsens the grid (Eclipse ``COARSEN``)."""
-        return any(level.get("upscale") is not None for level in self.levels)
+        return self.upscale is not None or any(
+            level.get("upscale") is not None for level in self.levels
+        )
 
     def level_of(self, member_id: int) -> int:
         """Return the member's level, ``-1`` without levels (or for a mean-model run)."""
@@ -391,41 +399,72 @@ class FidelityLevels:
         return [self.default, *own]
 
     def for_member(self, member: MemberInput) -> tuple[Path, dict[str, object]]:
-        """Return the member's deck template and its extra template values."""
-        from apex.simulation.upscaling import coarsen
+        """Return the member's deck template and its extra template values.
 
+        With ``upscale`` every member gets ``level`` 0 and its ``COARSEN`` records, whatever
+        its id; with levels, a member outside every level gets the default deck, ``level``
+        ``-1`` and no records.
+        """
+        if self.upscale is not None:
+            return self.default, {"level": 0, "coarse": _coarse_records(self.upscale, member)}
         index = self.level_of(member.member_id)
         if index < 0:
             return self.default, {"level": -1, "coarse": []}
         level = self.levels[index]
         template = level.get("deck_template_file") or self.default
-        coarse: list[tuple[int, ...]] = []
         upscale = level.get("upscale")
-        if isinstance(upscale, dict):
-            dim = [int(n) for n in upscale["dim"]]
-            layers = int(upscale.get("layers", 1))
-            state = upscale.get("state")
-            if state is not None:
-                # The whole field (every layer); coarsen checks its size.
-                field = np.asarray(member.state[str(state)], dtype=np.float64)
-                if "layers" not in upscale:
-                    layers = max(1, field.size // (dim[0] * dim[1]))
-            else:
-                field = np.zeros(dim[0] * dim[1] * layers)
-            coarse = list(
-                coarsen(
-                    field,
-                    dim,
-                    method=upscale.get("method", "uniform"),
-                    max_trunc=float(upscale["max_trunc"]),
-                    max_diff=float(upscale.get("max_diff", 0.0)),
-                    wells=upscale.get("wells", ()),
-                    radius=upscale.get("radius", ()),
-                    layers=layers,
-                )
-            )
+        coarse = _coarse_records(upscale, member) if isinstance(upscale, dict) else []
         assert isinstance(template, Path)
         return template, {"level": index, "coarse": coarse}
+
+
+def _upscale_options(table: object, where: str) -> dict[str, object]:
+    """Return an ``upscale`` table checked: ``dim``, ``max_trunc``, haar's state, wells' radii.
+
+    Raises
+    ------
+    ValueError
+        If the table is not a table, or is incomplete.
+    """
+    if not isinstance(table, Mapping):
+        raise ValueError(f"{where} must be a table, got {type(table).__name__}")
+    options = dict(table)
+    if "dim" not in options or "max_trunc" not in options:
+        raise ValueError(f"{where} needs dim and max_trunc")
+    if options.get("method", "uniform") == "haar" and "state" not in options:
+        raise ValueError(f"{where}: haar upscaling needs the state it follows")
+    wells, radius = options.get("wells", ()), options.get("radius", ())
+    if len(wells) != len(radius):
+        raise ValueError(f"{where} needs one radius per well")
+    return options
+
+
+def _coarse_records(upscale: Mapping[str, object], member: MemberInput) -> list[tuple[int, ...]]:
+    """Return the member's ``COARSEN`` records for a checked ``upscale`` table."""
+    from apex.simulation.upscaling import coarsen
+
+    dim = [int(n) for n in upscale["dim"]]  # type: ignore[attr-defined]
+    layers = int(upscale.get("layers", 1))  # type: ignore[call-overload]
+    state = upscale.get("state")
+    if state is not None:
+        # The whole field (every layer); coarsen checks its size.
+        field = np.asarray(member.state[str(state)], dtype=np.float64)
+        if "layers" not in upscale:
+            layers = max(1, field.size // (dim[0] * dim[1]))
+    else:
+        field = np.zeros(dim[0] * dim[1] * layers)
+    return list(
+        coarsen(
+            field,
+            dim,
+            method=upscale.get("method", "uniform"),  # type: ignore[arg-type]
+            max_trunc=float(upscale["max_trunc"]),  # type: ignore[arg-type]
+            max_diff=float(upscale.get("max_diff", 0.0)),  # type: ignore[arg-type]
+            wells=upscale.get("wells", ()),  # type: ignore[arg-type]
+            radius=upscale.get("radius", ()),  # type: ignore[arg-type]
+            layers=layers,
+        )
+    )
 
 
 # ---------------------------------------------------------------------- reading a deck
@@ -870,11 +909,16 @@ class RestartSchedule:
     unresolved
         Why the schedule may differ from what the deck runs (template expressions, Mako
         lines, unread includes, settings not followed); empty when the text tells it all.
+    restarts_from
+        Whether the deck has a ``RESTART`` keyword (a restart run, which starts from
+        another run's restart, not from its own first report step): ``True``, ``False``,
+        or ``None`` when one is among Mako lines (the rendered deck may have it or not).
     """
 
     report_times: tuple[dt.datetime, ...]
     restart_steps: tuple[int, ...]
     unresolved: tuple[str, ...]
+    restarts_from: bool | None = False
 
     @property
     def restart_times(self) -> tuple[dt.datetime, ...]:
@@ -1123,9 +1167,12 @@ def restart_schedule(template_path: Path, case_dir: Path | None = None) -> Resta
         times.append(time)
         decide(len(times) - 1)
 
+    restarts_from: bool | None = False
     for keyword, records, mako in events:
         if keyword in _UNFOLLOWED:
             note(f"{keyword} is not followed")
+            if keyword == "RESTART" and restarts_from is not True:
+                restarts_from = None if mako else True
             continue
         if keyword not in ("START", "DATES", "TSTEP", "SAVE") and keyword not in _REPORT_KEYWORDS:
             continue
@@ -1193,7 +1240,9 @@ def restart_schedule(template_path: Path, case_dir: Path | None = None) -> Resta
         decide(0)
     if len(times) < 2 and not unresolved:
         note("no report times (DATES or TSTEP) found")
-    return RestartSchedule(tuple(times), tuple(sorted({*steps, *saved})), tuple(unresolved))
+    return RestartSchedule(
+        tuple(times), tuple(sorted({*steps, *saved})), tuple(unresolved), restarts_from
+    )
 
 
 def missing_summary_wells(

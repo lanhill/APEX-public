@@ -72,8 +72,9 @@ class PluginInfo(_Document):
     )
     serves: list[str] | None = Field(
         default=None,
-        description="The workflows a surrogate model serves, from its capabilities and each "
-        "workflow's requirement; None for other plugins.",
+        description="The uses a surrogate model serves (workflows, and conditions of them "
+        "such as prediction_scenarios: a prediction with control scenarios), from its "
+        "capabilities and each use's requirement; None for other plugins.",
     )
 
 

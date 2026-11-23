@@ -186,11 +186,14 @@ class SnapshotProvenance(_Frozen):
             document.pop("field_region", None)  # absent
         return document
 
-    def stack_mismatches(self, other: "SnapshotProvenance") -> list[str]:
+    def stack_mismatches(
+        self, other: "SnapshotProvenance", *, require_coarse: bool = False
+    ) -> list[str]:
         """Return the fields naming the stack and case on which ``other`` differs.
 
         Only what both state is compared: an unknown digest is not a difference. The coarse
-        stack's fields are prefixed ``coarse.``.
+        stack's fields are prefixed ``coarse.``. With ``require_coarse``, a coarse stack this
+        one records and ``other`` lacks is a difference, ``coarse``.
         """
         names = ("simulator", "options_digest", "deck_digest", "case_digest")
         found = [
@@ -202,6 +205,8 @@ class SnapshotProvenance(_Frozen):
         ]
         if self.coarse is not None and other.coarse is not None:
             found += [f"coarse.{n}" for n in self.coarse.stack_mismatches(other.coarse)]
+        elif require_coarse and self.coarse is not None:
+            found.append("coarse")
         return found
 
 

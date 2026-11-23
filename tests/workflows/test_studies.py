@@ -166,11 +166,52 @@ def test_a_study_metric_with_an_unknown_label_or_name_is_refused(
         "study metric 'normalized_data_mismatch:z': no 'z' in the cases; give 'all' or one "
         "of their data types: y",
         refused[2],
-        "study metric 'constraint_cost:all': no 'all' in the cases; give one of their labels: "
-        "cost, violations",
     ]  # rmse:x:skill: a facies score's parts follow the variable
+    # constraint_cost: no cell records it, refused once for that (#304), not for its label.
+    [cost] = [e for e in validation.errors if e.startswith("study metric 'constraint_cost")]
+    assert "would have no values" in cost
     assert refused[2].startswith("study metric 'rmsee:all': no metric 'rmsee'; ")
     assert "rmse" in refused[2].split("the metrics are ")[1].split(", ")
+
+
+def test_a_metric_without_an_all_label_is_refused_once_with_the_label_to_give(
+    tmp_path: Path, linear_case: CaseFactory
+) -> None:
+    """A reported issue (#304): the facies scores (and ssim) are recorded per variable, never under
+    ``all``; ``facies_log_score:all`` validated and compared nothing. A metric no cell records
+    is refused once (#192), not also for its label."""
+    from types import SimpleNamespace
+
+    from apex.services.study import _unknown_metric_labels
+
+    case = linear_case(ensemble_size=20)
+    path = _study(case)
+    path.write_text(path.read_text().replace(
+        '"rmse:all"', '"facies_log_score:all", "facies_brier", "ssim:all", "rmse:all"'
+    ))  # fmt: skip
+    service = ApexService(tmp_path / "service")
+
+    # The linear case records none of them: one refusal each, "would have no values".
+    errors = service.validate_study(path).errors
+    assert sorted(e.split("'")[1] for e in errors) == ["facies_brier", "facies_log_score", "ssim"]
+    assert all("would have no values" in e for e in errors)
+
+    # A case whose parameterization gives facies: 'all' is refused.
+    config = composition.load_config(case.config)
+    cell = SimpleNamespace(replicate=0, config=config.model_copy(update={"parameterizations": [
+        SimpleNamespace(name="facies_distance")]}))  # fmt: skip
+    spec = load_study(path)
+    refused = _unknown_metric_labels(spec, [cell])  # type: ignore[list-item]
+    assert refused == [
+        "study metric 'facies_log_score:all': facies_log_score has no 'all'; it is recorded per "
+        "variable: give facies_log_score:<variable> (by default facies_log_score:facies)",
+        "study metric 'facies_brier': facies_brier has no 'all'; it is recorded per variable: "
+        "give facies_brier:<variable> (by default facies_brier:facies)",
+        "study metric 'ssim:all': ssim has no 'all'; it is recorded per variable: give "
+        "ssim:<variable>",
+    ]
+    assert _unknown_metric_labels(spec, [cell], skip={"facies_log_score", "facies_brier",  # type: ignore[list-item]
+                                                      "ssim"}) == []  # fmt: skip
 
 
 def test_a_comparison_names_a_metric_no_cell_recorded(tmp_path: Path) -> None:

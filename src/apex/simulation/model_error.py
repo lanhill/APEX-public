@@ -23,13 +23,19 @@ Differences: the schedule is read with a general record tokenizer (PET-fork spli
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-from apex.core.case_state import CornerGeometryReader, MissingState
+from apex.core.case_state import (
+    CornerGeometryReader,
+    MissingState,
+    WellControlsReader,
+    WellsReader,
+)
 from apex.core.errors import ConfigError, SimulationError, TransientSimulationError
 from apex.core.simulation import (
     SAVED_INPUT_PREFIX,
@@ -46,13 +52,16 @@ from apex.core.simulation import (
     StepStates,
     extrapolates,
 )
+from apex.domain.case_state import SI_UNITS, StateTime, to_si
 from apex.domain.observations import DataKey
+from apex.domain.wells import PHASES, STATIC, WellSchedule, feature_names
 from apex.simulation.deck import report_values
 
 __all__ = [
     "INPUT_PREFIX",
     "PHASES",
     "RESIDUAL_PREFIX",
+    "STATIC",
     "CaseFiles",
     "ModelErrorSimulator",
     "WellSchedule",
@@ -61,40 +70,6 @@ __all__ = [
     "well_features",
     "well_schedules",
 ]
-
-#: Static features (INIT), per perforated block.
-STATIC = ("DX", "DY", "DZ", "PERMX", "PERMY", "PERMZ", "PORO")
-#: The phases a deck may have, with their density and saturation keywords.
-PHASES = {"oil": ("OIL_DEN", "SOIL"), "water": ("WAT_DEN", "SWAT"), "gas": ("GAS_DEN", "SGAS")}
-
-
-def feature_names(phases: Sequence[str]) -> tuple[str, ...]:
-    """Return the features per perforated block for a deck's phases, in PET-fork's order.
-
-    The static ones, then each phase's density and saturation (oil, water, gas), with the
-    oil saturation, which the simulators do not write, after the others, then PRESS_DIFF
-    (the well's WBHP minus the block pressure). Oil-water: ``OIL_DEN WAT_DEN SWAT SOIL
-    PRESS_DIFF``; with gas: ``OIL_DEN WAT_DEN SWAT GAS_DEN SGAS SOIL PRESS_DIFF``. The oil's
-    ``OIL_DEN`` and ``SOIL`` are always in the layout: a deck without oil (a gas-water or
-    CO2 storage deck) has them as 0 (:func:`well_features`; the user, 2026-11-07).
-
-    Raises
-    ------
-    ValueError
-        If ``phases`` is empty, repeats a phase or names an unknown one.
-    """
-    names = [p.lower() for p in phases]
-    unknown = sorted(set(names) - set(PHASES))
-    if not names or unknown or len(set(names)) != len(names):
-        raise ValueError(
-            f"phases must be one or more of {sorted(PHASES)}, each once, got {list(phases)}"
-        )
-    dynamic = ["OIL_DEN"]
-    for phase in ("water", "gas"):
-        if phase in names:
-            dynamic += list(PHASES[phase])
-    return (*STATIC, *dynamic, "SOIL", "PRESS_DIFF")
-
 
 #: The features that are 0 without oil: :func:`feature_names` keeps them in the layout.
 OIL_FEATURES = frozenset(PHASES["oil"])
@@ -170,36 +145,6 @@ def read_schedule(path: Path) -> list[tuple[str, list[list[str | None]]]]:
                 break
         result.append((keyword, records))
     return result
-
-
-@dataclass(frozen=True)
-class WellSchedule:
-    """One well's perforations and status at each report time.
-
-    Attributes
-    ----------
-    name, kind
-        Well name and ``"producer"`` or ``"injector"``.
-    outputs
-        Its data types, e.g. ``("WOPR", "WBHP", "WWCT")``.
-    blocks
-        Every block (1-based ``i, j, k``) it perforates at any report time, first seen first.
-    perforated
-        ``(n_steps, n_blocks)``: whether each block is perforated at each report time.
-    open
-        ``(n_steps,)``: whether the well is open at each report time.
-    """
-
-    name: str
-    kind: str
-    outputs: tuple[str, ...]
-    blocks: tuple[tuple[int, int, int], ...]
-    perforated: NDArray[np.bool_]
-    open: NDArray[np.bool_]
-
-    def n_features(self, phases: Sequence[str] = ("oil", "water")) -> int:
-        """Return the input features per report time: every feature at every block."""
-        return len(feature_names(phases)) * len(self.blocks)
 
 
 #: Item (0-based) holding the well's status in each well-control keyword.
@@ -335,8 +280,12 @@ class CaseFiles:
         """The case's name, for messages (``BlockStates``)."""
         return self.case.name
 
-    def active(self, block: tuple[int, int, int]) -> int:
+    def active(self, block: tuple[int, int, int] | int) -> int:
         """Return the active index of a 1-based block, ``-1`` if inactive."""
+        if not isinstance(block, tuple):
+            raise SimulationError(
+                f"{self.case.name}: a deck's well block is (i, j, k), not {block}"
+            )
         i, j, k = block
         return int(self.grid.get_active_index(ijk=(i - 1, j - 1, k - 1)))
 
@@ -386,6 +335,196 @@ class CaseFiles:
         return [dates[s - first].isoformat()[:10] for s in steps]
 
 
+#: The metric deck units model error's networks were fitted in (the deck's units,
+#: never converted), for a reader of another simulator (the user's
+#: choice of 2026-11-21: GEOS and PFLOTRAN write SI, converted to these).
+METRIC_FEATURE_UNITS = {
+    **dict.fromkeys(("PRESSURE", "WBHP"), "bar"),
+    **dict.fromkeys(("OIL_DEN", "WAT_DEN", "GAS_DEN"), "kg/m3"),
+    **dict.fromkeys(("DX", "DY", "DZ"), "m"),
+    **dict.fromkeys(("PERMX", "PERMY", "PERMZ"), "mD"),
+    **dict.fromkeys(("PORO", "SWAT", "SGAS", "SOIL"), "1"),
+}
+#: The metric deck units of a well's summary vectors (what the
+#: lab's forecasting model reads through ``well_controls``); ``WMCTL``, a code, is never
+#: converted.
+METRIC_WELL_UNITS = {
+    **dict.fromkeys(("WBHP", "WTHP"), "bar"),
+    **dict.fromkeys(("WOPR", "WWPR", "WGPR", "WLPR", "WWIR", "WGIR", "WOIR"), "sm3/day"),
+    **dict.fromkeys(("WVPR", "WVIR"), "rm3/day"),
+}
+
+
+class ReaderBlockStates:
+    """A :class:`BlockStates` over any case-state reader with wells.
+
+    What model error reads of one member's run, by report step, from a :class:`WellsReader`:
+    the static arrays, the restart's dynamic arrays (``SOIL`` filled as ``CaseFiles`` fills
+    it, ``1 - SWAT - SGAS``), the wells' bottom-hole pressures and the report dates. With
+    ``metric`` every array is converted from the unit its reader states to the metric deck
+    units of :data:`METRIC_FEATURE_UNITS` (a simulator that writes SI); without it, the
+    arrays are as written (an Eclipse-format deck's own units, never converted), so that
+    the features are those ``CaseFiles`` gives, byte for byte.
+    """
+
+    def __init__(self, reader: WellsReader, *, metric: bool = False) -> None:
+        self.reader = reader
+        self.metric = metric
+
+    @property
+    def label(self) -> str:
+        """The case's name, for messages."""
+        return self.reader.case.name
+
+    def _converted(self, name: str, values: NDArray[np.float64]) -> NDArray[np.float64]:
+        if not self.metric:
+            return values
+        target = METRIC_FEATURE_UNITS.get(name)
+        if target is None:
+            return values
+        unit = self.reader.unit(name)
+        if unit == target:
+            return values
+        try:
+            si = to_si(np.asarray(values, dtype=np.float64), unit)
+        except ValueError as error:  # an unstated or unknown unit (to_si)
+            raise SimulationError(f"{self.label}: {name}: {error}") from error
+        factor, offset = SI_UNITS[target]
+        return np.ascontiguousarray((si - offset) / factor)
+
+    def active(self, block: tuple[int, int, int] | int) -> int:
+        """Return a well block's index into the arrays, ``-1`` if inactive."""
+        return self.reader.block_cell(block)
+
+    def static(self, name: str) -> NDArray[np.float64]:
+        """Return a static array over the state's cells (converted with ``metric``)."""
+        return self._converted(name, self.reader.static(name))
+
+    def restart(self, step: int) -> dict[str, NDArray[np.float64]]:
+        """Return the dynamic arrays at report step ``step`` (converted with ``metric``)."""
+        try:
+            time = self.reader.at_step(step)
+        except MissingState:
+            raise SimulationError(
+                f"{self.label} has no state at report step {step} (the run must write "
+                "pressure, saturations and densities at every report step)"
+            ) from None
+        return self._dynamic(time, f"report step {step}")
+
+    def _dynamic(self, time: StateTime, where: str) -> dict[str, NDArray[np.float64]]:
+        names = ("PRESSURE", "SOIL", "SWAT", "SGAS", "OIL_DEN", "WAT_DEN", "GAS_DEN")
+        arrays = self.reader.state(time, names, skip_missing=True)
+        if "PRESSURE" not in arrays:
+            raise SimulationError(f"{self.label}: no PRESSURE at {where}")
+        # Converted as read; the filled SOIL is a fraction already (no reader states its unit).
+        arrays = {name: self._converted(name, values) for name, values in arrays.items()}
+        if "SOIL" not in arrays:  # as CaseFiles: the unwritten saturation is 1 - the others
+            others = [arrays[n] for n in ("SWAT", "SGAS") if n in arrays]
+            saturation = np.sum(others, axis=0) if others else np.zeros_like(arrays["PRESSURE"])
+            arrays["SOIL"] = 1.0 - saturation
+        return arrays
+
+    def wbhp(self, well: str, step: int) -> float:
+        """Return the well's bottom-hole pressure at report step ``step``."""
+        try:
+            time = self.reader.at_step(step)
+        except MissingState:
+            raise SimulationError(f"{self.label} has no state at report step {step}") from None
+        value = np.array([self.reader.bottom_hole_pressure(well, time)], dtype=np.float64)
+        return float(self._converted("WBHP", value)[0])
+
+    def report_dates(self, steps: Sequence[int]) -> list[str]:
+        """Return the ISO dates of report steps (1-based)."""
+        return self.reader.report_dates(steps)
+
+
+class ReaderDatedStates(ReaderBlockStates):
+    """A :class:`DatedStates` over a case-state reader with wells.
+
+    For a simulator whose states are not numbered by report step (GEOS's cycles): a state
+    is found by its date among the reader's :meth:`~CaseStateReader.times` (the later of
+    two on one day, as the field snapshots take it), and a model sees it by report step
+    through :class:`~apex.core.simulation.StepStates` with the model's report dates.
+    Arrays are converted as :class:`ReaderBlockStates`' (``metric``).
+    """
+
+    def state_at(self, date: str) -> StateTime:
+        """Return the reader's state on an ISO report date (the later of two on one day).
+
+        Raises
+        ------
+        SimulationError
+            If the run wrote no state on that date.
+        """
+        times = self.reader.times()
+        found = [t for t in times if t.date is not None and t.date.isoformat() == date]
+        if not found:
+            written = ", ".join(sorted({t.date.isoformat() for t in times if t.date})) or "none"
+            raise SimulationError(
+                f"{self.label} has no state on {date} (states on {written}): the run must "
+                "write its states at every report date"
+            )
+        return found[-1]
+
+    def dynamic(self, date: str) -> dict[str, NDArray[np.float64]]:
+        """Return the dynamic arrays at an ISO report date (``SOIL`` filled, converted)."""
+        return self._dynamic(self.state_at(date), date)
+
+    def has_well_vector(self, well: str, name: str) -> bool:
+        """Return whether the reader reports a well's vector (``well_controls``)."""
+        return isinstance(self.reader, WellControlsReader) and self.reader.has_well_vector(
+            well, name
+        )
+
+    def well_vector(self, well: str, name: str, date: str) -> float:
+        """Return a well's vector at an ISO report date (``well_controls``; converted).
+
+        With ``metric``, a rate or pressure is converted from the unit its reader states to
+        :data:`METRIC_WELL_UNITS`', and any other name but ``WMCTL`` (the control code, as
+        given) is refused.
+
+        Raises
+        ------
+        ConfigError
+            If the reader has no ``well_controls``.
+        SimulationError
+            If the vector is not reported, its unit is not stated, or (with ``metric``) it
+            has no metric unit.
+        """
+        if not isinstance(self.reader, WellControlsReader):
+            raise ConfigError(
+                f"{self.label}: its {type(self.reader).__name__} reader gives no well "
+                "vectors (the capability well_controls)"
+            )
+        value = self.reader.well_vector(well, name, self.state_at(date))
+        if not self.metric or name == "WMCTL":
+            return float(value)
+        target = METRIC_WELL_UNITS.get(name)
+        if target is None:
+            # Never passed through in the reader's own unit (an SI rate would be read as a
+            # metric one, 86400 times too small).
+            raise SimulationError(
+                f"{self.label}: no metric unit is known for {name} of {well} (known: WMCTL, "
+                f"{', '.join(METRIC_WELL_UNITS)})"
+            )
+        unit = self.reader.unit(name)
+        if unit == target:
+            return float(value)
+        try:
+            si = to_si(np.array([value], dtype=np.float64), unit)
+        except ValueError as error:
+            raise SimulationError(f"{self.label}: {name} of {well}: {error}") from error
+        factor, offset = SI_UNITS[target]
+        return float((si[0] - offset) / factor)
+
+    def wbhp(self, well: str, date: str) -> float:  # type: ignore[override]
+        """Return a well's bottom-hole pressure at an ISO report date (converted)."""
+        value = np.array(
+            [self.reader.bottom_hole_pressure(well, self.state_at(date))], dtype=np.float64
+        )
+        return float(self._converted("WBHP", value)[0])
+
+
 def _label(states: BlockStates) -> str:
     """Return a states source's name for messages (its ``label``, else its case's)."""
     label = getattr(states, "label", None)
@@ -428,7 +567,9 @@ def well_features(
             )
     sequences = []
     for well in wells:
-        index = [files.active(b) for b in well.blocks]
+        # A deck's schedule gives (i, j, k) blocks; a simulator's layout, mesh cells, which
+        # only a reader with wells (ReaderBlockStates, ReaderDatedStates) takes.
+        index = [files.active(cast(tuple[int, int, int], b)) for b in well.blocks]
         x = np.zeros((len(report_steps), len(names), len(well.blocks)))
         for t, step in enumerate(report_steps):
             bhp = files.wbhp(well.name, step)
@@ -445,6 +586,11 @@ def well_features(
     return sequences
 
 
+def residual_keys(keys: Sequence[DataKey]) -> list[DataKey]:
+    """Return the ``MEC:`` key of each data key: where :meth:`ModelErrorSimulator.run` gives r."""
+    return [DataKey(k.time, f"{RESIDUAL_PREFIX}{k.datatype}", k.index) for k in keys]
+
+
 class ModelErrorSimulator:
     """The effective simulator ``g(m) + r(m, theta)``.
 
@@ -453,6 +599,10 @@ class ModelErrorSimulator:
     then lets ``inner`` prune them. Keys ``MEC:<type>`` (:meth:`auxiliary_keys`) give the
     residuals themselves.
     """
+
+    #: A prediction saves each member's residuals beside its forecast: from ``run_series``'
+    #: ``residuals``, or from :func:`residual_keys` in the same ``run`` (2026-11-21).
+    gives_residuals = True
 
     def __init__(
         self,
@@ -596,17 +746,22 @@ class ModelErrorSimulator:
             assert self._read_series is not None  # run_series is set only with it
             series = self._read_series(case, request)
             keys = [DataKey(t, v) for v in series.vectors for t in series.times]
-            residuals = self._residuals(member, case, theta, keys)
-            values = np.asarray(series.values, dtype=np.float64) + residuals.reshape(
+            residuals = self._residuals(member, case, theta, keys).reshape(
                 len(series.vectors), len(series.times)
             )
+            values = np.asarray(series.values, dtype=np.float64) + residuals
         except BaseException:
             release = getattr(self.inner, "release", None)
             if callable(release):
                 release(case)
             raise
         self._deck().clean(case)
-        return MemberSeries(series.times, series.vectors, np.ascontiguousarray(values))
+        return MemberSeries(
+            series.times,
+            series.vectors,
+            np.ascontiguousarray(values),
+            np.ascontiguousarray(residuals, dtype=np.float64),
+        )
 
     def _residuals(
         self, member: MemberInput, case: Path, theta: NDArray[np.float64], keys: Sequence[DataKey]

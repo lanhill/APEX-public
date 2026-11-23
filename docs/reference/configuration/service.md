@@ -146,6 +146,7 @@ written to a file or a log.
 | `refusal_turns` | integer | 4 | |
 | `retention_days` | number | 92.0 | |
 | `stream` | boolean | true | |
+| `timeout_retries` | integer | 1 | |
 | `tool_timeout_s` | number | 120.0 | |
 
 **`ChatModelSection`**: `[chat.models.<name>]`: a model the web UI's assistant may answer with (rev. 5).

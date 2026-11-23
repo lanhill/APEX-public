@@ -373,6 +373,11 @@ def _check_exportable(config: object) -> None:
             "it forecasts with a surrogate ([surrogate]): ERT's forward model would "
             "run the simulator, without the surrogate, its checks or its records"
         )
+    if "upscale" in config.simulator.options:
+        problems.append(
+            "its simulator coarsens every member (upscale, COARSEN): ERT's forward model "
+            "renders the deck with no COARSEN records, so it would run the fine deck"
+        )
     grids = {tuple(v.grid) for v in config.state.variables if v.grid is not None}
     if len(grids) > 1:
         problems.append("the grid fields have different grids")

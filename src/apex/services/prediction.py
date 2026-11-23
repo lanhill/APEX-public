@@ -40,6 +40,7 @@ from apex.domain.observations import ObservationSet
 from apex.domain.prediction import PredictionConfig, PredictionControlsSection, PredictionResult
 from apex.domain.state import StateLayout, StateVariable
 from apex.services import composition
+from apex.simulation.deck import DECK_SIMULATORS, case_folder, restart_schedule
 from apex.simulation.model_error import RESIDUAL_PREFIX, ModelErrorSimulator
 from apex.storage import provenance
 from apex.storage.forecast_state import write_forecast_state
@@ -761,7 +762,58 @@ def _forecasting_model_error(
             "surrogate would forecast g alone, the run's forecasts were g + r"
         )
     composition.check_model_error_summary(as_run, model)
+    _check_model_error_restarts(simulator, section.name)
     return model
+
+
+def _check_model_error_restarts(simulator: PluginSection, name: str) -> None:
+    """Refuse, from the deck's text, a deck a forecasting model cannot read past the history.
+
+    The model reads each member's restart at every report step from the first (the
+    limitations, checked since 2026-11-21): a restart deck (``RESTART``)
+    starts its recurrence at the restart's step, not the history's, so its residuals are
+    not the run's; and a report step without a restart fails at the pilot member. Only a
+    deck simulator's template is read (nothing rendered); when the text cannot tell
+    (template expressions, unread includes), it is logged and the run's files decide.
+
+    Raises
+    ------
+    ConfigError
+        If the deck restarts from another run, or certainly writes no restart at a report
+        step (``opm_flow``; on ``eclipse``, whose rules may differ from OPM Flow's, a
+        warning).
+    """
+    template = simulator.options.get("deck_template_file")
+    if simulator.name not in DECK_SIMULATORS or not isinstance(template, str | Path):
+        return
+    schedule = restart_schedule(Path(template), case_folder(simulator.options))
+    restart = (
+        f"[model_error] {name}: the prediction's deck {template} restarts from another run "
+        "(RESTART): the model's recurrence would start at the restart's report step, not the "
+        "history's, so its residuals would not be the run's; give the whole deck"
+    )
+    if schedule.restarts_from is True:
+        raise ConfigError(restart)
+    if schedule.restarts_from is None:
+        logger.warning("%s, if its Mako lines render the RESTART", restart)
+    missing = [k for k in range(1, len(schedule.report_times)) if k not in schedule.restart_steps]
+    if not missing:
+        return
+    dates = ", ".join(schedule.report_times[k].date().isoformat() for k in missing[:5])
+    message = (
+        f"[model_error] {name}: the prediction's deck {template} writes no restart at "
+        f"{len(missing)} report step(s) ({dates}{', ...' if len(missing) > 5 else ''}), and "
+        "the model reads every report step's restart; add RPTRST BASIC=2 DEN at the top of "
+        "the SCHEDULE section"
+    )
+    if simulator.name == "eclipse":
+        # The schedule follows OPM Flow's rules, which Eclipse's may not match (BASIC and
+        # FREQ; separate restarts under BASIC=1), so Eclipse's own files decide.
+        logger.warning("%s, by OPM Flow's rules (Eclipse's may differ)", message)
+        return
+    if not schedule.unresolved:
+        raise ConfigError(message)
+    logger.warning("%s, as far as its text tells (%s)", message, "; ".join(schedule.unresolved[:3]))
 
 
 def check_prediction(config: PredictionConfig) -> None:
@@ -771,7 +823,9 @@ def check_prediction(config: PredictionConfig) -> None:
     it; :func:`_predict` applies the same refusals. A run that does not exist yet (a
     study's prediction waits for it) is not checked here. The model-error model, if any,
     is built (its files read, no simulation) to know whether it extrapolates, and with a
-    control scenario the simulator is built (nothing simulated) to know whether it reads it.
+    control scenario a surrogate is loaded (its files read) to check that it takes the
+    controls (the requirement ``prediction_scenarios``) and the simulator is built (nothing
+    simulated) to know whether it reads the scenario.
 
     Raises
     ------
@@ -791,6 +845,18 @@ def check_prediction(config: PredictionConfig) -> None:
     except OSError as error:
         raise ConfigError(f"cannot build the run's model-error model: {error}") from error
     _refuse_for_model(config, run, model)
+    if config.surrogate is not None and config.controls is not None:
+        # With control scenarios the model must take the controls, refused before any
+        # forecast (item 5; the user, 2026-11-21). Without them the
+        # model is read only when the prediction starts, as before.
+        from apex.services import surrogates
+
+        try:
+            problem = surrogates.prediction_refusal(config.surrogate, scenarios=True)
+        except (TypeError, ValueError, KeyError, PluginError) as error:
+            raise ConfigError(f"invalid prediction [surrogate]: {error}") from error
+        if problem is not None:
+            raise ConfigError(problem)
     if config.controls is not None:
         try:
             base = simulators.create(simulator_config.name, **simulator_config.options)

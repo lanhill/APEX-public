@@ -33,6 +33,18 @@ resume makes the same choice, and the journal keeps every simulator evaluation a
 **The optimum is the simulator's.** When the optimization ends, its result's controls (and a
 multi-objective run's whole front) are evaluated by the simulator at every realization: the
 reported objectives are the simulator's, the surrogate's kept beside them.
+
+**A coarse-corrected surrogate** predicts from each column's coarse
+forecast. A third objective, the coarse stack on the optimization's executor, shares the
+journal (``source = "coarse"``, under a context of the plain one and the coarse stack's).
+Per batch its runs come first (made, or replayed from the journal), the domain is checked
+with them, and the surrogate is given each new member's coarse forecast; a column whose
+coarse run failed is evaluated by the simulator (its row records ``stands_in_for``), and the
+failure is remembered, so a resume makes the same choice. The coarse runs are bounded by
+``max_evaluations`` with the surrogate's evaluations; each accepted step's history row holds
+the coarse objective of its controls (a diagnostic, from the journal). A batch whose new
+coarse runs (of two or more distinct controls) all fail stops the run instead (a broken
+coarse deck); those failures are retried on resume.
 """
 
 import json
@@ -51,7 +63,9 @@ from apex.algorithms.optimization.protocols import FloatArray, IntArray
 from apex.algorithms.optimization.statistics import reduce_realizations
 from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SurrogateDomainError, WorkflowError
+from apex.core.simulation import Simulator
 from apex.domain.surrogate import GateResult, GateTolerances, QuantityKind
+from apex.storage.optimization_directory import read_evaluations
 from apex.workflows.optimization import RestartFromStart
 from apex.workflows.simulated_objective import SimulatedObjective
 
@@ -60,9 +74,17 @@ logger = logging.getLogger(__name__)
 #: The run directory's record of the surrogate's checks and of a switch to the simulator.
 STATE_FILE = "surrogate_state.json"
 
-#: ``(controls (n_x, n), realizations (n,)) -> (n,)`` whether each column lies inside the
-#: model's domain; raises nothing.
-InsideCheck = Callable[[FloatArray, IntArray], NDArray[np.bool_]]
+#: ``(controls (n_x, n), realizations (n,)[, coarse (n_model_keys, n)]) -> (n,)`` whether
+#: each column lies inside the model's domain (a coarse-corrected model's with the columns'
+#: coarse forecasts); raises nothing.
+InsideCheck = Callable[..., NDArray[np.bool_]]
+
+#: ``{member_id: coarse forecast (n_model_keys,)} -> Simulator``: the surrogate's simulator
+#: given its members' coarse forecasts.
+WithCoarse = Callable[[Mapping[int, NDArray[np.float64]]], Simulator]
+
+#: The rows the simulator evaluates in place of a column whose coarse run failed record this.
+STANDS_IN = "stands_in_for"
 
 
 class SurrogateCheckFailed(WorkflowError):
@@ -92,7 +114,14 @@ class SurrogateObjective:
     tolerances, kinds
         The checks' gate.
     max_evaluations
-        The run's bound on surrogate evaluations.
+        The run's bound on surrogate evaluations (and on coarse runs).
+    coarse
+        A coarse-corrected model's coarse stack (``source = "coarse"``, failures tolerated),
+        sharing the journal; none for any other model.
+    coarse_rows
+        For each of the model's keys, its row among the coarse stack's response keys.
+    with_coarse
+        Makes the surrogate's simulator given its members' coarse forecasts.
     """
 
     def __init__(
@@ -109,9 +138,22 @@ class SurrogateObjective:
         tolerances: GateTolerances | None = None,
         kinds: Mapping[str, QuantityKind] | None = None,
         max_evaluations: int = 50_000,
+        coarse: SimulatedObjective | None = None,
+        coarse_rows: Sequence[int] = (),
+        with_coarse: WithCoarse | None = None,
     ) -> None:
         if surrogate.journal is not simulator.journal:
             raise ValueError("the surrogate and the simulator must share one journal")
+        if coarse is not None:
+            if coarse.journal is not simulator.journal:
+                raise ValueError("the coarse stack must share the run's journal")
+            if with_coarse is None or not coarse_rows:
+                raise ValueError("a coarse stack needs coarse_rows and with_coarse")
+            if not coarse.tolerate_failures:
+                raise ValueError("the coarse stack must tolerate failures (a stand-in follows)")
+        self.coarse = coarse
+        self.coarse_rows = np.asarray(coarse_rows, dtype=np.int64)
+        self.with_coarse = with_coarse
         if surrogate.n_realizations != simulator.n_realizations:
             raise ValueError("the surrogate and the simulator see different realizations")
         self.surrogate = surrogate
@@ -167,9 +209,21 @@ class SurrogateObjective:
             self._recorded = True
         if self.switched:
             return self.simulator(controls, reals)
-        inside = np.asarray(self.inside(controls, reals), dtype=bool)
-        if not np.all(inside) and self.outside == "stop":
-            out = np.flatnonzero(~inside)
+        lost = np.zeros(n, dtype=bool)
+        coarse = None
+        if self.coarse is not None:
+            self._charge_coarse(controls, reals)
+            coarse, lost = self._coarse_forecasts(controls, reals, run=True)
+        ok = ~lost
+        if coarse is None:
+            inside = np.asarray(self.inside(controls, reals), dtype=bool)
+        else:
+            inside = np.zeros(n, dtype=bool)
+            if np.any(ok):
+                inside[ok] = self._inside(controls[:, ok], reals[ok], coarse, ok)
+        outside = ok & ~inside
+        if np.any(outside) and self.outside == "stop":
+            out = np.flatnonzero(outside)
             raise SurrogateDomainError(
                 f"{out.size} of {n} control vectors lie outside the surrogate's validated "
                 f"domain (columns {out[:10].tolist()}): the optimization stops at its last "
@@ -191,13 +245,128 @@ class SurrogateObjective:
         shape = (len(self.objective_names), n) if self.vector else (n,)
         values = np.empty(shape)
         if np.any(inside):
-            values[..., inside] = self.surrogate(controls[:, inside], reals[inside])
-        if not np.all(inside):
-            logger.info(
-                "surrogate_outside_simulated", extra={"columns": int(np.count_nonzero(~inside))}
+            values[..., inside] = self._surrogate_values(
+                controls[:, inside], reals[inside], None if coarse is None else coarse[:, inside]
             )
-            values[..., ~inside] = self.simulator(controls[:, ~inside], reals[~inside])
+        if np.any(outside):
+            logger.info(
+                "surrogate_outside_simulated", extra={"columns": int(np.count_nonzero(outside))}
+            )
+            values[..., outside] = self.simulator(controls[:, outside], reals[outside])
+        if np.any(lost):
+            # A failed coarse run leaves the
+            # surrogate nothing to correct; the simulator evaluates the column.
+            logger.warning(
+                "surrogate_coarse_failed_simulated",
+                extra={"columns": int(np.count_nonzero(lost))},
+            )
+            values[..., lost] = self.simulator(
+                controls[:, lost], reals[lost], row_extra={STANDS_IN: "coarse"}
+            )
         return np.ascontiguousarray(values)
+
+    # ------------------------------------------------------------- coarse stack
+
+    def _charge_coarse(self, controls: FloatArray, reals: IntArray) -> None:
+        """Refuse a batch whose new coarse runs would exceed ``max_evaluations``.
+
+        Raises
+        ------
+        WorkflowError
+            If the coarse rows made (failed ones included) and the new ones exceed it.
+        """
+        assert self.coarse is not None
+        journal = self.coarse.journal
+        known = journal.values
+        new = sum(
+            1
+            for key in set(self.coarse.keys_of(controls, reals))
+            if key not in known and key not in journal.failed
+        )
+        made = journal.rows_by_source.get("coarse", 0)
+        if made + new > self.max_evaluations:
+            raise WorkflowError(
+                f"the coarse stack's runs would exceed [surrogate] max_evaluations = "
+                f"{self.max_evaluations} ({made} made, {new} more asked for)"
+            )
+
+    def _coarse_forecasts(
+        self, controls: FloatArray, reals: IntArray, *, run: bool
+    ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+        """Return the columns' coarse forecasts ``(n_model_keys, n)`` and which have none.
+
+        With ``run``, the columns not in the journal are run first (failures journaled);
+        without, only the journal is read. A column without a forecast is NaN.
+        """
+        assert self.coarse is not None
+        keys = self.coarse.run(controls, reals) if run else self.coarse.keys_of(controls, reals)
+        responses = self.coarse.journal.responses
+        lost = np.array([key not in responses for key in keys], dtype=bool)
+        forecasts = np.full((self.coarse_rows.size, len(keys)), np.nan)
+        for j, key in enumerate(keys):
+            if not lost[j]:
+                forecasts[:, j] = np.asarray(responses[key], dtype=np.float64)[self.coarse_rows]
+        return np.ascontiguousarray(forecasts), lost
+
+    def _inside(
+        self,
+        controls: FloatArray,
+        reals: IntArray,
+        coarse: NDArray[np.float64] | None,
+        columns: NDArray[np.bool_],
+    ) -> NDArray[np.bool_]:
+        """Return which columns lie inside the domain (``coarse``: every column's, sliced)."""
+        if coarse is None:
+            return np.asarray(self.inside(controls, reals), dtype=bool)
+        sliced = np.ascontiguousarray(coarse[:, columns])
+        return np.asarray(self.inside(controls, reals, sliced), dtype=bool)
+
+    def _surrogate_values(
+        self, controls: FloatArray, reals: IntArray, coarse: NDArray[np.float64] | None
+    ) -> FloatArray:
+        """Evaluate columns by the surrogate (given their coarse forecasts, if any)."""
+        if coarse is None:
+            return self.surrogate(controls, reals)
+        return self.surrogate(controls, reals, simulator_for=self._simulator_for(coarse))
+
+    def _simulator_for(
+        self, coarse: NDArray[np.float64]
+    ) -> Callable[[Mapping[int, int]], Simulator]:
+        """Return the hook giving the surrogate its new members' coarse forecasts."""
+        with_coarse = self.with_coarse
+        assert with_coarse is not None
+
+        def simulator_for(members: Mapping[int, int]) -> Simulator:
+            return with_coarse({
+                member: np.ascontiguousarray(coarse[:, column])
+                for member, column in members.items()
+            })  # fmt: skip
+
+        return simulator_for
+
+    def _coarse_objective(self, x: FloatArray) -> dict[str, Any]:
+        """Return the history row's coarse objective of ``x`` ``(n_x,)``, from the journal.
+
+        One objective: the mean over the realizations (as the result's), ``coarse_objective``;
+        several: each objective's statistic, ``coarse_objective:<name>``. ``None`` when a
+        realization's coarse run failed or was not made (no run is made for a diagnostic).
+        """
+        assert self.coarse is not None
+        reals = np.arange(self.n_realizations, dtype=np.int64)
+        keys = self.coarse.keys_of(self._columns(x, reals), reals)
+        known = self.coarse.journal.values
+        names = (
+            [f"coarse_objective:{n}" for n in self.objective_names]
+            if self.vector
+            else ["coarse_objective"]
+        )
+        if any(key not in known for key in keys):
+            return dict.fromkeys(names)
+        if self.vector:
+            per = np.array([known[key] for key in keys], dtype=np.float64).T  # (n_obj, n_r)
+            ranked = reduce_realizations(per[:, :, None], self.objective_statistics)
+            return {n: float(v) for n, v in zip(names, ranked[:, 0], strict=True)}
+        return {names[0]: float(np.mean([float(known[key]) for key in keys]))}  # type: ignore[arg-type]
 
     # -------------------------------------------------------------------- checks
 
@@ -213,22 +382,38 @@ class SurrogateObjective:
         RestartFromStart
             If it fails and ``on_check_failure`` is ``simulator`` (the switch is recorded).
         """
-        if self.switched or not self.check_every or optimizer.iteration % self.check_every:
+        if self.switched:
             return {}
         x = np.asarray(x, dtype=np.float64)
+        due = bool(self.check_every) and optimizer.iteration % self.check_every == 0
         reals = np.arange(self.n_realizations, dtype=np.int64)
         controls = np.ascontiguousarray(np.repeat(x.reshape(-1, 1), reals.size, axis=1))
-        if not np.all(self.inside(controls, reals)):
+        coarse, lost = None, np.zeros(reals.size, dtype=bool)
+        if self.coarse is not None and due:
+            # The check's coarse runs first, then the diagnostic below: a resume replaying
+            # this step after a kill during the check finds the same rows (the review).
+            coarse, lost = self._coarse_forecasts(controls, reals, run=True)
+        # the coarse objective of every accepted step, a diagnostic.
+        extra = {} if self.coarse is None else self._coarse_objective(x)
+        if not due:
+            return extra
+        reason = None
+        every = np.ones(reals.size, dtype=bool)
+        if np.any(lost):
+            reason = "a coarse run of the accepted controls failed: not checked"
+        if reason is None and not np.all(self._inside(controls, reals, coarse, every)):
             # Evaluated by the simulator (outside = "simulator"): nothing of the surrogate's
             # to check there, and the model refuses to predict it.
+            reason = "the accepted controls lie outside the model's domain"
+        if reason is not None:
             skipped = {
                 "epf_iteration": optimizer.epf_iteration,
                 "iteration": optimizer.iteration,
                 "passed": None,
-                "skipped": "the accepted controls lie outside the model's domain",
+                "skipped": reason,
             }
             self._record(skipped)
-            return {"surrogate_check": skipped}
+            return {**extra, "surrogate_check": skipped}
         result = self.check(x)
         record = {
             "epf_iteration": optimizer.epf_iteration,
@@ -242,7 +427,7 @@ class SurrogateObjective:
             extra={"iteration": optimizer.iteration, "passed": result.passed},
         )
         if result.passed:
-            return {"surrogate_check": record}
+            return {**extra, "surrogate_check": record}
         if self.on_check_failure == "stop":
             raise SurrogateCheckFailed(
                 f"the surrogate's check at step {optimizer.iteration} failed ("
@@ -266,7 +451,13 @@ class SurrogateObjective:
         reals = np.arange(self.n_realizations, dtype=np.int64)
         controls = np.ascontiguousarray(np.repeat(x.reshape(-1, 1), reals.size, axis=1))
         simulated = self.simulator.responses(controls, reals)
-        predicted = self.surrogate.responses(controls, reals)
+        hook = None
+        if self.coarse is not None:
+            coarse, lost = self._coarse_forecasts(controls, reals, run=True)
+            if np.any(lost):
+                raise WorkflowError("a check needs the coarse forecasts of its controls")
+            hook = self._simulator_for(coarse)
+        predicted = self.surrogate.responses(controls, reals, simulator_for=hook)
         return gate(
             predicted,
             simulated,
@@ -332,6 +523,16 @@ class SurrogateObjective:
             "switched_to_simulator": self.switched,
             "objective_source": "simulator",
         }
+        if self.coarse is not None:
+            journal = self.coarse.journal
+            made = journal.by_source.get("coarse", 0)
+            updated["surrogate"] |= {
+                "coarse_evaluations": made,
+                "coarse_failed": journal.rows_by_source.get("coarse", 0) - made,
+                "coarse_stand_ins": sum(
+                    1 for row in read_evaluations(self.run_dir) if row.get(STANDS_IN) is not None
+                ),
+            }
         return updated
 
     def restart_pending(self) -> bool:

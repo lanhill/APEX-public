@@ -24,6 +24,7 @@ over the active cells ``(n_active,)``, in the simulator's active order.
 """
 
 import datetime as dt
+import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -40,7 +41,9 @@ from apex.domain.case_state import CaseMesh, CornerGrid, StateTime, UnitSystem
 from apex.domain.cell_graph import CellGraph, centre_distances, grid_faces
 
 if TYPE_CHECKING:
+    from resdata.grid import Grid as ResdataGrid
     from resdata.resfile import ResdataFile, ResdataFileView
+    from resdata.summary import Summary
 
 __all__ = [
     "UNIT_SYSTEMS",
@@ -73,7 +76,7 @@ _UNITS = {
 
 #: The arrays whose quantity the reader knows; the rest pass through with no unit.
 _QUANTITIES = {
-    **dict.fromkeys(("PRESSURE", "PCOW", "PCOG", "PCGW"), "pressure"),
+    **dict.fromkeys(("PRESSURE", "PCOW", "PCOG", "PCGW", "WBHP"), "pressure"),
     **dict.fromkeys(("OIL_DEN", "WAT_DEN", "GAS_DEN", "DENO", "DENW", "DENG"), "density"),
     **dict.fromkeys(("DEPTH", "DX", "DY", "DZ", "TOPS"), "length"),
     **dict.fromkeys(("RPORV", "PORV"), "volume"),
@@ -270,10 +273,11 @@ class EclipseFiles:
     """
 
     #: What it gives beyond the state: the grid's corner geometry, with the
-    #: deck's unit system and phases, always a structured mesh, and the faces between its
-    #: active cells (revision 2).
+    #: deck's unit system and phases, always a structured mesh, the faces between its
+    #: active cells (revision 2), and the wells' blocks and bottom-hole pressures from the
+    #: grid and the summary (revision 3).
     capabilities: ClassVar[frozenset[str]] = frozenset(
-        {"connectivity", "corner_geometry", "structured_mesh"}
+        {"connectivity", "corner_geometry", "structured_mesh", "wells", "well_controls"}
     )
 
     def __init__(self, case: Path) -> None:
@@ -559,6 +563,99 @@ class EclipseFiles:
         start = self._start_date
         seconds = None if start is None else float((end - start).days) * 86400.0
         return StateTime(-1, seconds, end)
+
+    # -- WellsReader (revision 3) ------------------------------------------------------
+
+    @cached_property
+    def _resdata_grid(self) -> "ResdataGrid":
+        # resdata's own grid, for its active index exactly as CaseFiles finds it.
+        from resdata.grid import Grid as ResdataGrid
+
+        try:
+            return ResdataGrid(f"{self._case}.EGRID")
+        except (OSError, ValueError) as error:
+            raise SimulationError(f"cannot read {self._case.name}.EGRID: {error}") from error
+
+    @cached_property
+    def _summary(self) -> "Summary":
+        from resdata.summary import Summary
+
+        try:
+            return Summary(str(self._case))
+        except (OSError, ValueError) as error:
+            raise SimulationError(
+                f"cannot read the summary of {self._case.name}: {error}"
+            ) from error
+
+    def block_cell(self, block: tuple[int, int, int] | int) -> int:
+        """Return a 1-based ``(i, j, k)``'s active index (``-1`` if inactive), as model error.
+
+        An integer is already an active index (the protocol's mesh cell, here an active
+        cell in Eclipse order, not a global index): itself if in range, else ``-1``.
+        """
+        if not isinstance(block, tuple):
+            index = operator.index(block)
+            return index if 0 <= index < int(self._resdata_grid.get_num_active()) else -1
+        i, j, k = block
+        return int(self._resdata_grid.get_active_index(ijk=(i - 1, j - 1, k - 1)))
+
+    def bottom_hole_pressure(self, well: str, time: StateTime) -> float:
+        """Return ``WBHP:<well>`` at the state's report step's last ministep (deck units).
+
+        A state's index is its report step (:meth:`at_step`, :meth:`times`).
+        """
+        step = time.index
+        # report_values follows report_dates, which start at the summary's first report.
+        return self.well_vector(well, "WBHP", StateTime(step, None, None))
+
+    @cached_property
+    def _vectors(self) -> dict[str, NDArray[np.float64]]:
+        return {}
+
+    def has_well_vector(self, well: str, name: str) -> bool:
+        """Return whether the summary holds ``<name>:<well>`` (W3: well controls)."""
+        return bool(self._summary.has_key(f"{name}:{well}"))
+
+    def well_vector(self, well: str, name: str, time: StateTime) -> float:
+        """Return ``<name>:<well>`` at the state's report step's last ministep (deck units).
+
+        As model error has read the summary (``report_values``): ``WMCTL`` is the control
+        code OPM Flow and Eclipse write.
+
+        Raises
+        ------
+        SimulationError
+            If the summary lacks the vector.
+        """
+        from apex.simulation.deck import report_values
+
+        key = f"{name}:{well}"
+        if not self._summary.has_key(key):
+            raise SimulationError(f"summary {self._case.name} has no {key}")
+        values = self._vectors.get(key)
+        if values is None:
+            values = self._vectors[key] = report_values(self._summary, key)
+        position = time.index - int(self._summary.first_report)
+        if not 0 <= position < len(values):
+            # A state before the summary's first report (an initial restart, step 0) or past
+            # its last: never another step's value (the review of W3).
+            raise SimulationError(
+                f"summary {self._case.name} has no {key} at report step {time.index} (it "
+                f"reports steps {self._summary.first_report} to "
+                f"{int(self._summary.first_report) + len(values) - 1})"
+            )
+        return float(values[position])
+
+    def report_dates(self, steps: Sequence[int]) -> list[str]:
+        """Return the ISO dates of 1-based report steps, from the summary."""
+        dates = list(self._summary.report_dates)
+        first = int(self._summary.first_report)
+        if min(steps) < first or max(steps) - first >= len(dates):
+            raise SimulationError(
+                f"{self._case.name} reports steps {first} to {first + len(dates) - 1}, "
+                f"not {min(steps)} to {max(steps)}"
+            )
+        return [dates[s - first].isoformat()[:10] for s in steps]
 
     # -- CornerGeometryReader ----------------------------------------------------------
 

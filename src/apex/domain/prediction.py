@@ -328,6 +328,9 @@ class EnsembleForecast:
         Members whose forecast failed.
     mean_model
         The forecast of the ensemble-mean model, ``(n_vectors, n_times)``, if requested.
+    residuals
+        The model-error residuals included in ``values``,
+        ``(n_vectors, n_times, n_members)``, when every member's were saved; else ``None``.
     """
 
     name: str
@@ -339,6 +342,7 @@ class EnsembleForecast:
         default_factory=lambda: np.empty(0, dtype=np.int64)
     )
     mean_model: NDArray[np.float64] | None = None
+    residuals: NDArray[np.float64] | None = None
 
 
 @dataclass(frozen=True, slots=True)

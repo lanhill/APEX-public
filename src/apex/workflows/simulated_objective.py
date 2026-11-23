@@ -22,13 +22,17 @@ the surrogate and checks by the simulator: two objectives sharing one
 :class:`EvaluationJournal`, each with its own ``context`` (the surrogate's includes its
 identity, so its values are never reused by a run without it; the simulator's is the plain
 run's, so a later run without a surrogate reuses them) and a ``source`` recorded in each row.
+A coarse-corrected surrogate adds a third, its coarse stack (``source = "coarse"``), whose
+failures are journaled without stopping the run
+(``tolerate_failures``): the simulator stands in for those columns, and the journal remembers
+the failure (:attr:`EvaluationJournal.failed`), so a resume makes the same choice.
 """
 
 import hashlib
 import logging
 import shutil
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -42,6 +46,15 @@ from apex.core.simulation import Executor, MemberFailure, MemberInput, Simulator
 from apex.storage import optimization_directory as layout
 
 logger = logging.getLogger(__name__)
+
+#: Given a batch's new members (``{member_id: column}`` of the controls the objective was
+#: called with), returns the simulator that runs them (e.g. a surrogate given each member's
+#: coarse forecast).
+SimulatorFor = Callable[[Mapping[int, int]], Simulator]
+
+
+class BrokenStackError(WorkflowError):
+    """A stack whose failures are tolerated failed every new simulation of a batch."""
 
 
 def evaluation_key(controls: FloatArray, realization: int, context: str = "") -> str:
@@ -85,6 +98,13 @@ class EvaluationJournal:
         self.responses: dict[str, list[float]] = {}
         #: Successful rows by source (rows without one: ``"simulator"``).
         self.by_source: dict[str, int] = {}
+        #: Every row by source, failed ones too, except those marked ``retry`` (a stopped
+        #: batch's, run again on resume: they do not count against a bound twice).
+        self.rows_by_source: dict[str, int] = {}
+        #: Keys whose every row failed (an objective with ``tolerate_failures`` does not
+        #: run them again; any other runs them again under a new id, as before). Rows marked
+        #: ``retry`` (a stack that failed a whole batch) are left out: run again on resume.
+        self.failed: set[str] = set()
         self.next_member = 0
 
     @property
@@ -94,16 +114,21 @@ class EvaluationJournal:
             rows = layout.read_evaluations(self.run_dir, repair=True)
             values: dict[str, float | tuple[float, ...]] = {}
             for row in rows:
+                source = str(row.get("source", "simulator"))
+                if not row.get("retry"):
+                    self.rows_by_source[source] = self.rows_by_source.get(source, 0) + 1
                 if self.vector and row.get("values") is not None:
                     values[row["key"]] = tuple(float(v) for v in row["values"])
                 elif not self.vector and row.get("value") is not None:
                     values[row["key"]] = float(row["value"])
                 else:
+                    if not row.get("retry"):
+                        self.failed.add(str(row["key"]))
                     continue
                 if row.get("responses") is not None:
                     self.responses[row["key"]] = [float(v) for v in row["responses"]]
-                source = str(row.get("source", "simulator"))
                 self.by_source[source] = self.by_source.get(source, 0) + 1
+            self.failed -= set(values)
             self._values = values
             # Failed evaluations are journaled too (without a value): no id is used twice.
             self.next_member = 1 + max((int(row["member_id"]) for row in rows), default=-1)
@@ -114,9 +139,15 @@ class EvaluationJournal:
         values = self.values
         for row in rows:
             key = str(row["key"])
+            source = str(row.get("source", "simulator"))
+            if not row.get("retry"):
+                self.rows_by_source[source] = self.rows_by_source.get(source, 0) + 1
             value = row.get("values" if self.vector else "value")
             if value is None:
+                if key not in values and not row.get("retry"):
+                    self.failed.add(key)
                 continue
+            self.failed.discard(key)
             values[key] = (
                 tuple(float(v) for v in value)  # type: ignore[attr-defined]
                 if self.vector
@@ -125,7 +156,6 @@ class EvaluationJournal:
             responses = row.get("responses")
             if responses is not None:
                 self.responses[key] = [float(v) for v in responses]  # type: ignore[attr-defined]
-            source = str(row.get("source", "simulator"))
             self.by_source[source] = self.by_source.get(source, 0) + 1
         self.next_member += n_members
         layout.append_evaluations(self.run_dir, list(rows))
@@ -156,8 +186,17 @@ class SimulatedObjective:
     journal
         The run's journal, when another objective shares it; none: its own.
     source
-        Recorded in each row this objective adds (``surrogate``, ``simulator``); none: no
-        source (a plain run's rows are unchanged).
+        Recorded in each row this objective adds (``surrogate``, ``simulator``, ``coarse``);
+        none: no source (a plain run's rows are unchanged).
+    tolerate_failures
+        Journal failed simulations without raising, and never run a key whose rows all
+        failed again (a coarse stack's); call :meth:`run`, not the
+        objective, which needs every value.
+    broken_stack
+        With ``tolerate_failures``: names the stack (e.g. its deck) when a batch's new
+        simulations, of two or more distinct control vectors, all fail; the rows are then
+        marked ``retry`` (run again on resume, not remembered) and
+        :class:`BrokenStackError` is raised.
     """
 
     def __init__(
@@ -174,6 +213,8 @@ class SimulatedObjective:
         context: str = "",
         journal: EvaluationJournal | None = None,
         source: str | None = None,
+        tolerate_failures: bool = False,
+        broken_stack: str | None = None,
     ) -> None:
         self.context = context
         self.objective = objective
@@ -207,10 +248,19 @@ class SimulatedObjective:
             raise ValueError("a shared journal must hold the objective's kind of values")
         self.journal = journal or EvaluationJournal(run_dir, vector=self.vector)
         self.source = source
+        self.tolerate_failures = tolerate_failures
+        self.broken_stack = broken_stack
         #: Simulations run by this process (the journal's replays are not counted).
         self.simulated = 0
 
-    def __call__(self, controls: FloatArray, realizations: IntArray) -> FloatArray:
+    def __call__(
+        self,
+        controls: FloatArray,
+        realizations: IntArray,
+        *,
+        simulator_for: SimulatorFor | None = None,
+        row_extra: Mapping[str, object] | None = None,
+    ) -> FloatArray:
         """Return the objective of each column, simulating only those not in the journal.
 
         One objective: ``(n,)``; several (``StackedResponses``): ``(n_obj, n)``.
@@ -221,12 +271,42 @@ class SimulatedObjective:
             Control vectors ``(n_x, n)`` (physical).
         realizations
             Model realization of each column ``(n,)``.
+        simulator_for
+            Returns the simulator of the batch's new members (none: the objective's own).
+        row_extra
+            Fields added to each successful new row (e.g. ``stands_in_for``).
 
         Raises
         ------
         WorkflowError
             If a simulation fails (after the executor's retries) or gives a non-finite value;
             the evaluations that succeeded are in the journal, so a resume keeps them.
+        """
+        journal = self.journal.values
+        keys = self.run(controls, realizations, simulator_for=simulator_for, row_extra=row_extra)
+        missing = [k for k in keys if k not in journal]
+        if missing:
+            raise WorkflowError(f"{len(missing)} evaluations failed and have no value")
+        values = np.array([journal[key] for key in keys], dtype=np.float64)
+        return np.ascontiguousarray(values.T) if self.vector else values
+
+    def run(
+        self,
+        controls: FloatArray,
+        realizations: IntArray,
+        *,
+        simulator_for: SimulatorFor | None = None,
+        row_extra: Mapping[str, object] | None = None,
+    ) -> list[str]:
+        """Simulate the columns not in the journal; return every column's journal key.
+
+        With ``tolerate_failures``, keys whose rows all failed are not run again, and new
+        failures are journaled without raising. Arguments as :meth:`__call__`.
+
+        Raises
+        ------
+        WorkflowError
+            Without ``tolerate_failures``, as :meth:`__call__`.
         """
         journal = self.journal.values
         controls = np.asarray(controls, dtype=np.float64)
@@ -240,14 +320,14 @@ class SimulatedObjective:
                 f"{self.n_realizations}"
             )
         keys = [evaluation_key(controls[:, j], int(reals[j]), self.context) for j in range(n)]
+        skipped = self.journal.failed if self.tolerate_failures else set()
         pending: dict[str, int] = {}
         for j, key in enumerate(keys):
-            if key not in journal and key not in pending:
+            if key not in journal and key not in pending and key not in skipped:
                 pending[key] = j
         if pending:
-            self._simulate(controls, reals, pending)
-        values = np.array([journal[key] for key in keys], dtype=np.float64)
-        return np.ascontiguousarray(values.T) if self.vector else values
+            self._simulate(controls, reals, pending, simulator_for, row_extra)
+        return keys
 
     def keys_of(self, controls: FloatArray, realizations: IntArray) -> list[str]:
         """Return the journal keys of the columns of ``controls`` ``(n_x, n)``."""
@@ -256,7 +336,13 @@ class SimulatedObjective:
         reals = np.broadcast_to(np.asarray(realizations, dtype=np.int64), (n,))
         return [evaluation_key(controls[:, j], int(reals[j]), self.context) for j in range(n)]
 
-    def responses(self, controls: FloatArray, realizations: IntArray) -> NDArray[np.float64]:
+    def responses(
+        self,
+        controls: FloatArray,
+        realizations: IntArray,
+        *,
+        simulator_for: SimulatorFor | None = None,
+    ) -> NDArray[np.float64]:
         """Return the responses of each column ``(n_keys, n)``, evaluating those not known.
 
         Raises
@@ -264,7 +350,7 @@ class SimulatedObjective:
         WorkflowError
             As :meth:`__call__`, or if a journal row holds no responses.
         """
-        self(controls, realizations)
+        self(controls, realizations, simulator_for=simulator_for)
         keys = self.keys_of(controls, realizations)
         missing = [k for k in keys if k not in self.journal.responses]
         if missing:
@@ -273,7 +359,14 @@ class SimulatedObjective:
             np.array([self.journal.responses[k] for k in keys], dtype=np.float64).T
         )
 
-    def _simulate(self, controls: FloatArray, reals: IntArray, pending: dict[str, int]) -> None:
+    def _simulate(
+        self,
+        controls: FloatArray,
+        reals: IntArray,
+        pending: dict[str, int],
+        simulator_for: SimulatorFor | None = None,
+        row_extra: Mapping[str, object] | None = None,
+    ) -> None:
         members: list[MemberInput] = []
         needs_dir = bool(getattr(self.simulator, "needs_work_dir", False))
         _ = self.journal.values  # read before the first id is given
@@ -300,7 +393,16 @@ class SimulatedObjective:
             def callback(member_id: int, ok: bool) -> None:
                 reporter.member_finished(member_id=member_id, ok=ok)
 
-        results = self.executor.run_all(self.simulator, members, self.keys, on_result=callback)
+        # Member ids are given here, so a simulator that needs each member's companion data
+        # (a coarse-corrected surrogate's coarse forecast) is made here too.
+        simulator = (
+            self.simulator
+            if simulator_for is None
+            else simulator_for(
+                {m.member_id: j for m, j in zip(members, pending.values(), strict=True)}
+            )
+        )
+        results = self.executor.run_all(simulator, members, self.keys, on_result=callback)
         self.simulated += len(members)
         failures = [r for r in results if isinstance(r, MemberFailure)]
         if self.progress is not None:
@@ -337,11 +439,26 @@ class SimulatedObjective:
                     "responses": [float(v) for v in result],
                     # which source made it (absent in a plain run's rows).
                     **({} if self.source is None else {"source": self.source}),
+                    **(row_extra or {}),
                 }
             )
         if self.source is not None:
             for row in rows:
                 row.setdefault("source", self.source)
+        # A stack that fails every new simulation of a batch (two or more) is broken, not
+        # unlucky: the run stops, and the failures are retried on resume once it is fixed.
+        # Distinct controls, not members: one control vector failing at every realization
+        # (a check step's batch) is that vector's failure, which falls back (the review).
+        distinct = {np.ascontiguousarray(controls[:, j]).tobytes() for j in pending.values()}
+        broken = (
+            self.tolerate_failures
+            and self.broken_stack is not None
+            and len(distinct) >= 2
+            and len(bad) == len(members)
+        )
+        if broken:
+            for row in rows:
+                row["retry"] = True
         self.journal.record(rows, len(members))
         failed_ids = {f.member_id for f in failures}
         self._prune(members, failed_ids)
@@ -353,7 +470,19 @@ class SimulatedObjective:
                 "journal": len(self.journal.values),
             },
         )
-        if bad:
+        if broken:
+            raise BrokenStackError(
+                f"every one of the {len(members)} new runs of {self.broken_stack} failed: the "
+                "optimization stops at its last checkpoint; fix the stack (its deck, its "
+                "includes, the simulator's environment) and resume, which runs them again:\n  "
+                + "\n  ".join(bad[:10])
+            )
+        if bad and self.tolerate_failures:
+            logger.warning(
+                "evaluations_failed_tolerated",
+                extra={"source": self.source, "failed": len(bad), "details": bad[:10]},
+            )
+        elif bad:
             raise WorkflowError(
                 f"{len(bad)} of {len(members)} simulations failed; the run can be resumed "
                 "once the cause is fixed:\n  " + "\n  ".join(bad[:10])

@@ -201,7 +201,9 @@ class PlanArguments(BaseModel):
     )
     metrics: list[str] | None = Field(
         default=None,
-        description="'metric:label' to compare. A study of optimizations compares "
+        description="'metric:label' to compare (the facies scores by facies variable, e.g. "
+        "'facies_log_score:facies', and ssim by variable; they have no 'all'). A study of "
+        "optimizations compares "
         "'objective:final', 'objective:best', 'evaluations:all', 'iterations:all', and for "
         "several objectives 'hypervolume:final' and 'front_size:final'.",
     )
@@ -592,9 +594,11 @@ SYSTEM = (
     "user's questions about their runs, jobs, studies and APEX itself, using the tools; "
     "never guess a number a tool can give. Answer a follow-up with only what it asks, and "
     "point to your earlier answer (or the draft) for the rest: never repeat the earlier "
-    "answer or the whole draft. The agents are tools: monitor_run checks a "
-    "run's health (it does not read the job's events: when the user asks about logs, "
-    "errors or warnings, call job_events for the run's job before saying it is healthy), "
+    "answer or the whole draft. Answer only what the user asked, and never say the user "
+    "mentioned or asked something their messages do not say. The agents are tools: "
+    "monitor_run checks a run's health (it does not read the job's events; only if the "
+    "user's own message asks about a run's logs, errors or warnings: call job_events for "
+    "the run's job before saying it is healthy; otherwise don't mention them), "
     "diagnose_run explains its problems and what to change, write_report "
     "writes its narrative, plot_run draws its result figures (a request in words, or a "
     "preset such as brugge_classic; they appear on the run's page; say what its options "
@@ -1094,6 +1098,27 @@ class ChatAssistant:
                     proposal = proposal.model_copy(update={"name": args.name})
                 if args.simulator:
                     proposal = proposal.model_copy(update={"simulator": args.simulator})
+                # #304: the metrics (and replicates) the assistant asked for, also when the
+                # rules design the arms (they were dropped for the rules' defaults without a
+                # word).
+                # The rules' hypothesis and reasoning name their own values: what replaced
+                # them is said after them. planner.check still holds the budget.
+                given: dict[str, Any] = {}
+                if args.metrics and list(args.metrics) != list(proposal.metrics):
+                    given["metrics"] = list(args.metrics)
+                if args.replicates and args.replicates != proposal.replicates:
+                    given["replicates"] = args.replicates
+                if given:
+                    said = "; ".join(
+                        f"{k} {', '.join(v) if isinstance(v, list) else v}"
+                        for k, v in given.items()
+                    )
+                    proposal = proposal.model_copy(update={
+                        **given,
+                        "hypothesis": f"{proposal.hypothesis} (as asked, {said})",
+                        "reasoning": f"{proposal.reasoning}; the assistant's {said} replace "
+                        "the rules' values",
+                    })  # fmt: skip
             # A setting both arms' strategies take (the truncation energy) is the case's
             # unless the arm sets it (#256); the rest of how compared algorithms differ is
             # reported, never changed: each algorithm is its own base.
@@ -2018,8 +2043,9 @@ class ChatAssistant:
             LocalTool("monitor_run", "Check a run's health with the run monitor's rules, "
                       "and a diagnosis (advisory; it never stops anything). Call the run "
                       "healthy only when 'healthy' is true (null: not confirmed, say so). "
-                      "It does not read the job's events: for logs, errors or warnings, "
-                      "call job_events too.",
+                      "It does not read the job's events; only if the user's own message "
+                      "asks about a run's logs, errors or warnings: call job_events too "
+                      "(otherwise don't mention them).",
                       RunArgument, monitor),
             LocalTool("diagnose_run", "Diagnose a run: causes (with evidence) and "
                       "recommended changes, with validated patches.", RunArgument, diagnose),
@@ -3863,10 +3889,37 @@ def _shown_value(
 #: 2026-11-17): monitor_run does not read a job's events, so the assistant called a run
 #: healthy before reading them, though they had been asked for.
 _ASKS_FOR_LOGS = re.compile(r"\b(logs|errors?|warnings?)\b(?!-)", re.IGNORECASE)
-LOGS_NOTE = (
-    "\n\n(This message asks about logs, errors or warnings: read the job's events with "
-    "job_events before stating a run's health; monitor_run does not read them.)"
+#: "Error" as a quantity, not a failure (issue #303, 2026-11-21): "the error against the
+#: true model" got :data:`LOGS_NOTE`, and the answer then said the user had mentioned logs.
+_ERROR_AS_QUANTITY = re.compile(
+    r"\b(?:model|observation|observational|data|measurement|estimation|prediction|"
+    r"forecast|truncation|approximation|discretization|squared?|absolute|relative|mean|"
+    r"rms|standard|sampling|statistical)\s+errors?\b(?!\s+(?:in|on|during)\b)"
+    r"|\berrors?\s+(?:against|relative|versus|vs\b|between|to\s+the\s+truth|"
+    r"(?:of|in|on)\s+the\s+(?:model|estimate|parameters|posterior|prior|mean)\b"
+    r"(?!\s+(?:run|job|forecast|simulation|iteration|step)s?\b)|norms?\b|"
+    r"metrics?\b|bars?\b|covariance|variance|sigma|statistics)",
+    re.IGNORECASE,
 )
+LOGS_NOTE = (
+    "\n\n(If this message asks about a run's logs, errors or warnings: read the job's "
+    "events with job_events before stating a run's health; monitor_run does not read "
+    "them. If it does not, don't mention them.)"
+)
+
+
+def _asks_for_logs(text: str) -> bool:
+    """Return whether a message names logs, warnings or errors as failures (#301, #303)."""
+    for found in _ASKS_FOR_LOGS.finditer(text):
+        if not found.group(1).lower().startswith("error"):
+            return True
+        # Is this "error" inside a quantity ("model error", "the error against ...")?
+        quantity = any(
+            q.start() <= found.start() < q.end() for q in _ERROR_AS_QUANTITY.finditer(text)
+        )
+        if not quantity:
+            return True
+    return False
 
 
 def _task(text: str, context: Mapping[str, Any], methods: Sequence[str] = ()) -> str:
@@ -3874,7 +3927,8 @@ def _task(text: str, context: Mapping[str, Any], methods: Sequence[str] = ()) ->
 
     The methods are stated as a fact (issue #266): a name that is also a word
     ("the assimilated method") is otherwise easily read as a word, and dropped. A message
-    about logs, errors or warnings gets :data:`LOGS_NOTE` (#301).
+    about logs, errors or warnings (as failures, not "the error against the truth", #303)
+    gets :data:`LOGS_NOTE` (#301).
     """
     if methods:
         text += (
@@ -3882,7 +3936,7 @@ def _task(text: str, context: Mapping[str, Any], methods: Sequence[str] = ()) ->
             + ", ".join(methods)
             + ". Plan or answer about each as named; if one is unclear, ask.)"
         )
-    if _ASKS_FOR_LOGS.search(text):
+    if _asks_for_logs(text):
         text += LOGS_NOTE
     if not context:
         return text

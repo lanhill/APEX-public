@@ -79,6 +79,7 @@ nav:
       - guide/cli/surrogate.md
       - guide/plugins/surrogate_designs.md
       - guide/notebooks/prediction.ipynb
+      - guide/plugins/case_state_readers.md
   - Reference:
       - reference/agents.md
       - reference/assistant-tools.md

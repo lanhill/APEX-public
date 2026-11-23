@@ -111,6 +111,11 @@ class EclipseSimulator:
         (``multilevel_esmda``) rather than set here: one table per level, coarsest first,
         with its first member and size, and optionally its own ``deck_template_file`` or
         an ``upscale`` table that coarsens the grid with Eclipse's ``COARSEN``.
+    upscale
+        One grid coarsening (``COARSEN``) for every member, whatever its id: the table of a
+        level's ``upscale``. Exclusive with ``levels``; the deck template gets ``level`` 0 and
+        ``coarse``, its records. For a coarse simulator stack made from the fine deck
+        (amended).
 
     Raises
     ------
@@ -135,6 +140,7 @@ class EclipseSimulator:
         template_values: Annotated[Mapping[str, object] | None, TEXT] = None,
         transient_patterns: TextList = (),
         levels: Annotated[Sequence[Mapping[str, object]] | None, LEVELS] = None,
+        upscale: Annotated[Mapping[str, object] | None, TEXT] = None,
         case_dir: InputFolder | None = None,
     ) -> None:
         self.template_path = Path(deck_template_file).resolve()
@@ -144,7 +150,7 @@ class EclipseSimulator:
         if self.case_dir is not None and not self.case_dir.is_dir():
             raise ValueError(f"case_dir is not a folder: {self.case_dir}")
         # Multilevel ensembles: the composition passes the method's levels.
-        self.levels = FidelityLevels(levels, self.template_path)
+        self.levels = FidelityLevels(levels, self.template_path, upscale)
         if version not in PROGRAMS:
             raise ValueError(f"version must be one of {sorted(PROGRAMS)}, got {version!r}")
         if timeout_s <= 0:
