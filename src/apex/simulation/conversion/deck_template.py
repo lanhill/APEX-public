@@ -29,7 +29,10 @@ from apex.simulation.conversion.deck_reader import (
     resolve_include,
     walk,
 )
-from apex.simulation.deck import _KEYWORD, _path_aliases, _terminator
+from apex.simulation.deck import KeywordLine, _path_aliases, _terminator
+
+#: One matcher for every line (OPM's keyword rule, the comment cut first).
+_KEYWORD_LINE = KeywordLine()
 
 HEADER = """<%!
 import math
@@ -146,7 +149,7 @@ class _Writer:
         while index < len(lines):
             line = lines[index]
             code = line.split("--", 1)[0].strip()
-            keyword = _KEYWORD.match(code)
+            keyword = _KEYWORD_LINE.match(code)
             name = keyword.group(1) if keyword else None
             if name in SECTIONS:
                 self.section = name

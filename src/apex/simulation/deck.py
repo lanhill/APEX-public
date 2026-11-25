@@ -475,7 +475,187 @@ _SCAN_MAX_BYTES = 5_000_000
 #: includes many (Norne: over 50, its schedule last); the bound only guards against a
 #: runaway deck, and is an error when reached, never a silent truncation.
 _MAX_DECK_FILES = 2_000
-_KEYWORD = re.compile(r"^([A-Z][A-Z0-9_]{0,7})\s*$")
+#: A keyword's name as OPM Flow accepts it (opm-common ParserKeyword::validDeckName): a letter,
+#: then letters, digits, "_", "-" or "+", in Eclipse's 8 columns. Upper case only: OPM
+#: upper-cases a line's token before matching it (Parser.cpp make_deck_name), APEX's readers
+#: take a lower-case line as data (decks write keywords in upper case).
+KEYWORD_NAME = r"[A-Z][A-Z0-9_+-]{0,7}"
+#: OPM Flow's keywords with "-" or "+" in their names (opm-common release/2026.04: every
+#: "name" and "deck_names" entry in share/keywords; 117): MULTX-, MULTZ-, ... (a cell's
+#: negative faces), the directional end points (SWCRX- ...), PVT-M. A token with
+#: "-" or "+" is a keyword only if it is one of them; otherwise it is data, such as an unquoted
+#: well name (OP-1) alone on a record's line. OPM knows each keyword's records; this list is
+#: how a reader without them tells the two apart (2026-11-25).
+DASHED_KEYWORDS = frozenset(
+    {
+        "BFLOGI-",
+        "BFLOGJ-",
+        "BFLOGK-",
+        "BFLOOI-",
+        "BFLOOJ-",
+        "BFLOOK-",
+        "BFLOWI-",
+        "BFLOWJ-",
+        "BFLOWK-",
+        "BVELGI-",
+        "BVELGJ-",
+        "BVELGK-",
+        "BVELOI-",
+        "BVELOJ-",
+        "BVELOK-",
+        "BVELWI-",
+        "BVELWJ-",
+        "BVELWK-",
+        "DIFFMR-",
+        "DIFFMTH-",
+        "DIFFMX-",
+        "DIFFMY-",
+        "DIFFMZ-",
+        "IKRGRX-",
+        "IKRGRY-",
+        "IKRGRZ-",
+        "IKRGX-",
+        "IKRGY-",
+        "IKRGZ-",
+        "IKRORGX-",
+        "IKRORGY-",
+        "IKRORGZ-",
+        "IKRORWX-",
+        "IKRORWY-",
+        "IKRORWZ-",
+        "IKROX-",
+        "IKROY-",
+        "IKROZ-",
+        "IKRWRX-",
+        "IKRWRY-",
+        "IKRWRZ-",
+        "IKRWX-",
+        "IKRWY-",
+        "IKRWZ-",
+        "ISGCRX-",
+        "ISGCRY-",
+        "ISGCRZ-",
+        "ISGUX-",
+        "ISGUY-",
+        "ISGUZ-",
+        "ISOGCRX-",
+        "ISOGCRY-",
+        "ISOGCRZ-",
+        "ISOWCRX-",
+        "ISOWCRY-",
+        "ISOWCRZ-",
+        "ISWCRX-",
+        "ISWCRZ-",
+        "ISWLX-",
+        "ISWLY-",
+        "ISWLZ-",
+        "ISWUX-",
+        "ISWUY-",
+        "ISWUZ-",
+        "KRGRX-",
+        "KRGRY-",
+        "KRGRZ-",
+        "KRGX-",
+        "KRGY-",
+        "KRGZ-",
+        "KRNUMR-",
+        "KRNUMT-",
+        "KRNUMX-",
+        "KRNUMY-",
+        "KRNUMZ-",
+        "KRORGX-",
+        "KRORGY-",
+        "KRORGZ-",
+        "KRORWX-",
+        "KRORWY-",
+        "KRORWZ-",
+        "KROX-",
+        "KROY-",
+        "KROZ-",
+        "KRWRX-",
+        "KRWRY-",
+        "KRWRZ-",
+        "KRWX-",
+        "KRWY-",
+        "KRWZ-",
+        "MULTR-",
+        "MULTTHT-",
+        "MULTX-",
+        "MULTY-",
+        "MULTZ-",
+        "PVT-M",
+        "SGCRX-",
+        "SGCRY-",
+        "SGCRZ-",
+        "SGUX-",
+        "SGUY-",
+        "SGUZ-",
+        "SOGCRX-",
+        "SOGCRY-",
+        "SOGCRZ-",
+        "SOWCRX-",
+        "SOWCRY-",
+        "SOWCRZ-",
+        "SWCRX-",
+        "SWCRY-",
+        "SWCRZ-",
+        "SWLX-",
+        "SWLY-",
+        "SWLZ-",
+        "SWUX-",
+        "SWUY-",
+        "SWUZ-",
+    }
+)
+#: OPM Flow's dashed keywords recognised by a pattern, not a name: the E300 region-to-region
+#: summary vectors (opm-common release/2026.04/final 0ea6297, REGION2REGION_PROBE_E300's
+#: "deck_name_regex"), such as RGFR-, RWFR- or ROFT+ABC. OPM's other 27 patterns are left
+#: out on purpose: they are catch-alls (WU.+, FU.+, SU.+, AA.+, ...) for user-defined and
+#: probe vectors, and would take unquoted well names such as ALPHA-1 or SUB-1 alone on a line
+#: for keywords. OPM keeps those as data because it knows each keyword's record count; a reader
+#: without the counts cannot, so for them a name must be listed (DASHED_KEYWORDS). Matched only
+#: for names with "-" or "+".
+DASHED_KEYWORD_PATTERNS = re.compile(r"R[OGWEK]F(R[-+]?|T[-+])([A-Z0-9_]{3})?")
+
+
+def is_keyword_name(word: str) -> bool:
+    """Return whether ``word`` (upper case) is a keyword name.
+
+    OPM's rule (:data:`KEYWORD_NAME`); a name with "-" or "+" only if OPM has it, by name
+    (:data:`DASHED_KEYWORDS`) or as an E300 region-to-region vector
+    (:data:`DASHED_KEYWORD_PATTERNS`).
+    """
+    if re.fullmatch(KEYWORD_NAME, word) is None:
+        return False
+    if "-" not in word and "+" not in word:
+        return True
+    return word in DASHED_KEYWORDS or DASHED_KEYWORD_PATTERNS.fullmatch(word) is not None
+
+
+class KeywordLine:
+    """A line holding a keyword alone (:func:`is_keyword_name`), for decks' readers.
+
+    As OPM Flow reads a line: the comment is cut at the first ``--`` (Parser.cpp
+    strip_comments), then the rest must be one name, so ``MULTZ---note`` is MULTZ and
+    ``PORO--`` is PORO. ``match`` returns the match of that name (group 1), or None.
+    """
+
+    _pattern = re.compile(rf"^({KEYWORD_NAME})\s*$")
+
+    def match(self, line: str) -> re.Match[str] | None:
+        """Return the name's match if ``line``, its comment cut, is a keyword alone."""
+        found = self._pattern.match(line.split("--", 1)[0].rstrip())
+        return found if found is not None and is_keyword_name(found.group(1)) else None
+
+
+_KEYWORD_LINE = KeywordLine()
+
+
+def _match_keyword(line: str) -> re.Match[str] | None:
+    """Return the keyword alone on ``line``, if it is one (:class:`KeywordLine`)."""
+    return _KEYWORD_LINE.match(line)
+
+
 #: A section keyword with other text after it on its line ("PROPS  ====="): Eclipse reads a
 #: keyword's first 8 columns only, so the rest is a comment (a ruler).
 _SECTION_RULER = re.compile(r"^(RUNSPEC|GRID|EDIT|PROPS|REGIONS|SOLUTION|SUMMARY|SCHEDULE)\s+\S")
@@ -682,7 +862,7 @@ def _keyword_records(
         line = raw.split("--", 1)[0].strip()
         if not line or line.startswith(("%", "<%", "##")):
             continue
-        keyword = _KEYWORD.match(line)
+        keyword = _match_keyword(line)
         # A ruler after a section keyword, but not in a TITLE's free text ("GRID test") or
         # in a record continued onto this line.
         if keyword is None and not parts and not (current == "TITLE" and records == []):
@@ -1514,7 +1694,7 @@ def _keywords_in_mako_blocks(text: str) -> set[str]:
         if depth and stripped and not stripped.startswith("--"):
             # The first token, without a trailing record end or comment (``RTEMP/``).
             word = re.split(r"[\s/]", stripped.split("--", 1)[0].strip())[0].upper()
-            if _KEYWORD.match(word):  # not a record's data (numbers, ${...})
+            if _match_keyword(word):  # not a record's data (numbers, ${...})
                 out.add(word)
     return out
 
@@ -1816,7 +1996,7 @@ def _inlined(
             if keyword == "TITLE":
                 keyword = ""  # TITLE's one line of free text, with no "/"
                 continue
-            match = _KEYWORD.match(line) or _SECTION_RULER.match(line)
+            match = _match_keyword(line) or _SECTION_RULER.match(line)
             if match is not None:
                 keyword = match.group(1)
                 if keyword in _SECTIONS:
@@ -1900,7 +2080,7 @@ def stop_deck_at(
         line = raw.split("--", 1)[0].strip()
         if not line:
             continue
-        match = _KEYWORD.match(line) if not record else None
+        match = _match_keyword(line) if not record else None
         if match is None and not record:
             ruler = re.match(
                 r"^(RUNSPEC|GRID|EDIT|PROPS|REGIONS|SOLUTION|SUMMARY|SCHEDULE)\b", line

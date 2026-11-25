@@ -402,6 +402,10 @@ def _property(
     reason = None
     if keyword in GEOMETRY:
         reason = "the grid's geometry or flags, not a property to match"
+    elif not keyword.isidentifier():
+        # MULTZ- and the like: a state variable is named after its keyword, and a name with
+        # "-" is no identifier (the deck template's loop would not compile).
+        reason = f"{keyword} is no valid variable name"
     arrays[keyword] = array
     # Cells set to 0 (inactive, or barriers) stay 0: the statistics are of the others.
     set_ = array[array != 0]
