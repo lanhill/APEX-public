@@ -48,6 +48,8 @@ items:
 
 By the end of this lesson you will know what each page of the APEX web UI shows, how to move between the pages, and how to follow a piece of work from an example configuration to its results.
 
+Two pages matter from the first minute: `editor`, where you open, edit, validate, save and submit a configuration, and `agents`, which lists APEX's public agents and how to run each from the web UI.
+
 ## Prerequisites
 
 - A running APEX web UI that you can open in your browser.
@@ -76,7 +78,7 @@ The pages `jobs`, `runs`, `optimizations` and `studies` are empty until work has
 - **Optimization**: work that improves an objective over several steps. `apex optimize` runs one in a terminal. An optimization configuration can list several objectives in its `optimization:objectives` entry, each a plugin with options and an optional label. The `optimization` page shows the objective over its steps, and its front when there are several objectives.
 - **Study**: a set of variants that you compare. `apex study compare NAME` compares a study's variants at each run's posterior. The `studies` page lists your studies and their state. `apex validate` accepts a study configuration.
 - **Job**: a unit of submitted work. It has a kind, a state and progress.
-- **Approval**: a large submission is held until it is approved. The service's `[approval]` section (`service:approval`) sets when: `max_simulator_runs` (default 20000) and `max_runs` (default 20). The editor then shows an `apex approve TOKEN` command. `apex approve` takes the pending approval's token (and `--root` for the services root). After approval, submit again.
+- **Approval**: a large submission is held until it is approved. The service's `[approval]` section (`service:approval`) sets when: `max_simulator_runs` (default 20000) and `max_runs` (default 20). The `editor` then shows an `apex approve TOKEN` command. `apex approve` takes the pending approval's token (and `--root` for the services root). After approval, submit again.
 
 How to configure and start optimizations and studies is covered in later lessons. `apex summary` already reports optimization steps.
 
@@ -105,7 +107,7 @@ The plugins page picture was taken with some optional add-on packages installed,
 
 ![The agents page](img/webui-agents.png)
 
-The editor and agents pictures may differ in detail from the pages you see (both pages have been updated since the pictures were taken); the table above describes what each page is for.
+The pictures of `editor` and `agents` may differ in detail from the pages you see, because both pages have changed since the pictures were taken. The table above describes what each page is for.
 
 ### Following work in progress
 
@@ -143,9 +145,9 @@ The editor and agents pictures may differ in detail from the pages you see (both
 
 ## Steps
 
-1. Open the web UI in your browser and start at `examples` if you are new, or at `jobs` if you already have work going.
+1. Open the web UI in your browser and start at `examples` if you are new, or at `jobs` if you already have work going. The `agents` page is the place to learn which public agents exist and how to run them from the web UI.
 2. To configure something, use `examples` to copy a configuration into your workspace folder. The copy is then among the workspace's configurations that you can open in `editor`.
-3. While editing, look up plugin names, options and defaults in `plugins` instead of guessing them. The same list is available in a terminal:
+3. While editing, look up plugin names, options and defaults in `plugins` instead of guessing them. The same list is available in a terminal with `apex plugins`:
 
    ```bash
    uv run apex plugins --json
@@ -159,7 +161,7 @@ The editor and agents pictures may differ in detail from the pages you see (both
    ```
 
    Replace `config.toml` with the path of your file. `apex validate` accepts a run, prediction, optimization, study or surrogate build configuration, reports any problem it finds, and plans the cost without simulating anything. Add `--json` to get the result as JSON, and `--root` to name the services root.
-5. Start the work from the `editor`: save the file, then press *submit*. The service runs it as a job, whatever its kind. If the submission is large, the editor shows an `apex approve TOKEN` command instead of starting it: the submission is waiting for approval. Run that command from the APEX folder, replacing `TOKEN` with the token shown:
+5. Start the work from the `editor`: save the file, then press *submit*. The service runs it as a job, whatever its kind. If the submission is large, the `editor` shows an `apex approve TOKEN` command instead of starting it: the submission is waiting for approval. Run that command from the APEX folder, replacing `TOKEN` with the token shown:
 
    ```bash
    uv run apex approve TOKEN
@@ -189,12 +191,12 @@ This example takes you from the catalogue to the charts of a history-matching ru
 
    Avoid options that set sizes, such as an ensemble size: a large value can make the run much longer, and a large submission is held for approval. `full` only works with the methods `gies`, `lm_enrml` and `gn_enrml`; with `esmda` it is refused, so keep the strategy the example already uses if it is not `full`.
 
-   You have done it right when the line uses the exact option name shown on `plugins` and the editor's validation (next step) reports no problem. Another option you will meet is `ensemble_file` of the `file` priors plugin: it is required, and it is the path of an `.npz` file with one array per variable.
-3. Validate the file in the editor and fix anything it reports. Save the file when it validates.
-4. With the saved file open in the editor, press *submit*. If the editor reports an error, fix the file, save it and submit again. If it shows an `apex approve TOKEN` command, run `uv run apex approve TOKEN` from the APEX folder (with the token shown in place of `TOKEN`), then submit again. A refused submission does not appear in `jobs`.
-5. Go to `#/jobs`. Each row shows a job's kind, state, progress and when it ran. Find the row whose kind matches what you submitted (a history-matching run) and whose time is the most recent; if several rows look alike, open each and check that its live events refer to your work. If the list is empty, look at the editor for an error from the previous step.
+   You have done it right when the line uses the exact option name shown on `plugins` and the validation of the `editor` (next step) reports no problem. Another option you will meet is `ensemble_file` of the `file` priors plugin: it is required, and it is the path of an `.npz` file with one array per variable.
+3. Validate the file in the `editor` and fix anything it reports. Save the file when it validates.
+4. With the saved file open in the `editor`, press *submit*. If the `editor` reports an error, fix the file, save it and submit again. If it shows an `apex approve TOKEN` command, run `uv run apex approve TOKEN` from the APEX folder (with the token shown in place of `TOKEN`), then submit again. A refused submission does not appear in `jobs`.
+5. Go to `#/jobs`. Each row shows a job's kind, state, progress and when it ran. Find the row whose kind matches what you submitted (a history-matching run) and whose time is the most recent; if several rows look alike, open each and check that its live events refer to your work. If the list is empty, look at the `editor` for an error from the previous step.
 6. On the `job` page, watch the live events and the progress. How long a run takes depends on the example, so wait until the run links appear, or until the progress stops changing and the events say the job has ended, before you read the charts.
-7. Optional: try Stop and Resume. Stop does not act at once: it asks the run to stop at its next checkpoint, so the run may keep working for a while. Keep watching the live events and progress on the `job` page until they stop moving; a slow stop is normal. Then press Resume to continue it from its last checkpoint, and wait until the events and progress move again. Use these buttons on the `job` page so that you keep following the work there. From a terminal, `uv run apex stop RUN_DIR` asks a running run to stop and `uv run apex resume RUN_DIR` continues it; `--max-steps` on either `apex run` or `apex resume` stops after that many analysis steps.
+7. Optional: try Stop and Resume. Stop does not act at once: it asks the run to stop at its next checkpoint, so the run may keep working for a while. Keep watching the live events and progress on the `job` page until they stop moving; a slow stop is normal. Then press Resume to continue it from its last checkpoint, and wait until the events and progress move again. From a terminal, `uv run apex stop RUN_DIR` asks a running run to stop and `uv run apex resume RUN_DIR` continues it; `--max-steps` on either `apex run` or `apex resume` stops after that many analysis steps.
 8. Follow the links from the job to a `run` page. The links may not be there at the start; if the live events keep moving, wait and check again after some analysis steps have finished. If the job has stopped or failed and still shows no run links, read the last live events and the error on the `job` page. On the `run` page, look at the charts of the performance metrics and find the data mismatch: for a finished run it should go down from the first step to the last. If it does not, check the events for warnings.
 9. To see all your runs, go to `#/runs`. The list shows each run's method and state. Open an entry to reach its `run` page.
 10. Optional, in a terminal: for a written overview, run from the APEX folder:
@@ -235,3 +237,4 @@ This example takes you from the catalogue to the charts of a history-matching ru
 - The lessons on plugins and their options, alongside the `plugins` page.
 - The lessons on running work and following jobs, to go deeper on `jobs` and `job`.
 - The lessons on optimizations, studies and predictions, to start them and to read `optimization`, `studies` and `prediction` with confidence.
+- The page on APEX's public agents, to go deeper on what the `agents` page offers.

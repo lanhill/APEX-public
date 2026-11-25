@@ -21,13 +21,16 @@ items:
   - plugin:simulators:linear
   - plugin:simulators:opm_flow
   - plugin:simulators:toy_reservoir
+  - plugin:surrogate_designs:file
+  - plugin:surrogate_designs:prior
+  - plugin:surrogate_designs:run
 ---
 
 # Simulators
 
-A simulator plugin turns the inputs of one member (one realization of the ensemble) into outputs. This page covers the simulator plugins, their options and defaults, and how to configure one.
+A simulator plugin turns the inputs of one member (one realization of the ensemble) into outputs. This page covers the plugins in the `simulators` registry: `eclipse`, `ert`, `linear`, `opm_flow` and `toy_reservoir`. It shows their options and defaults and how to configure one.
 
-Some names also exist in other plugin registries, where they are not simulators: `ert` is also an executor, `linear` is also a `gmac_constraints` plugin, `file` is also a prior generator, and `state` is a `gmac_transforms` plugin. This page covers only the registry `simulators`.
+Some of these names also exist in other registries, where they are different plugins. `ert` is also an executor, `linear` is also a `gmac_constraints` plugin, `file` is a prior generator and a `surrogate_designs` plugin, `state` is a `gmac_transforms` plugin, and `prior` and `run` are `surrogate_designs` plugins. This page covers only the `simulators` registry.
 
 ## Goal
 
@@ -35,7 +38,8 @@ By the end of this page you will be able to:
 
 - choose the right simulator plugin for your case;
 - write the simulator section of a configuration in TOML;
-- check it with `apex validate` before you start a run with `apex run`.
+- check it with `uv run apex validate` before you start a run with `uv run apex run`;
+- stop, resume and inspect a run.
 
 ## Prerequisites
 
@@ -52,7 +56,7 @@ Run `uv run apex plugins` to list every plugin with its options. Add `--json` fo
 | Plugin | What it does |
 | --- | --- |
 | `eclipse` | Runs Eclipse (E100 or E300) through `eclrun` for one member in its work directory. |
-| `ert` | Runs an ERT case's forward model, run by ERT through the `ert` executor. |
+| `ert` | Runs an ERT case's forward model. ERT runs it, through the `ert` executor. |
 | `linear` | Computes `y = f(G x)` for a fixed matrix `G`, where `f` is the identity or `tanh`. |
 | `opm_flow` | Runs OPM Flow for one member in its work directory. |
 | `toy_reservoir` | Returns field totals of a toy waterflood, for optimization tests and demos. Its status is `validated`. |
@@ -72,27 +76,37 @@ Only `toy_reservoir` reports a status; the other four report none.
 
 A run works in analysis steps and can be stopped and continued from its last checkpoint. You pass the run's directory (`RUN_DIR`) to the commands below.
 
-- `uv run apex run your-config.toml --max-steps 3` stops after 3 analysis steps; continue later with `apex resume`.
+- `uv run apex run your-config.toml --max-steps 3` stops after 3 analysis steps; continue later with `uv run apex resume RUN_DIR`.
 - `uv run apex stop RUN_DIR` asks a running run to stop at its next checkpoint.
 - `uv run apex resume RUN_DIR` continues a stopped or interrupted run from its last checkpoint. It also accepts `--max-steps`.
 - `--no-progress` turns off the progress display on standard error (it is on by default) for `apex run` and `apex resume`.
 
-To look at results, use `uv run apex report RUN_DIR` (data mismatch history and performance metrics; add `--plots` to also write figures, `--output` to choose their directory) or `uv run apex summary PATHS` (every metric at every step). `PATHS` can be run directories or folders holding runs, which are searched, so you can point `apex summary` at a folder if you do not know the exact run directory.
+To look at results, use `uv run apex report RUN_DIR` (data mismatch history and performance metrics; add `--plots` to also write figures, `--output` to choose their directory, `--font-size` to set the font size) or `uv run apex summary PATHS` (every metric at every step; `--output` writes the Markdown and a CSV next to it, `--title` sets the title). `PATHS` can be run directories or folders holding runs, which are searched, so you can point `apex summary` at a folder if you do not know the exact run directory.
 
 ## Options
 
 ### Deck templates
 
-For `eclipse` and `opm_flow`, `deck_template_file` is a Mako template of the `.DATA` deck. Two things are passed to it:
+For `eclipse` and `opm_flow`, `deck_template_file` is a [Mako](https://docs.makotemplates.org) template of the `.DATA` deck. In practice it is your normal deck with the parts that APEX or you fill in replaced by Mako expressions. Two things are passed to it:
 
-- `${case_dir}` is the folder named by the option `case_dir` (default: the template's folder). Use it in `INCLUDE` paths so that the deck finds its data files:
+- `${case_dir}` is the folder named by the option `case_dir` (default: the template's folder). Use it in `INCLUDE` paths so that the deck finds its data files.
+- `template_values` is a table of extra fixed values passed to the template.
+
+Before, in the original deck:
+
+```
+INCLUDE
+  'grid.grdecl' /
+```
+
+After, in the template:
 
 ```
 INCLUDE
   '${case_dir}/grid.grdecl' /
 ```
 
-- `template_values` is a table of extra fixed values passed to the template.
+Mako treats a few characters specially. A line that starts with `%` is a control line, and `##` starts a comment; write `%%` to get a literal `%` at the start of a line. `${...}` is substituted, so a deck must not contain a stray `${`.
 
 If the template lives in one folder and the data files in another, set `case_dir` to the data folder:
 
@@ -123,6 +137,7 @@ Required: `deck_template_file`.
 | `template_values` | table or none | none |
 | `transient_patterns` | list of strings | `[]` |
 | `levels` | list of tables or none | none |
+| `upscale` | table or none | none |
 | `case_dir` | string (path) or none | none |
 
 - `version`: `e100` is black oil (`eclrun eclipse`), `e300` is compositional.
@@ -131,6 +146,7 @@ Required: `deck_template_file`.
 - `timeout_s`: wall-clock limit per run; exceeding it kills the run and fails the member.
 - `keep_files`: keeps the member's deck and outputs. With `false`, everything is deleted after reading except the log, the deck, the `.PRT` and `.ECLEND` reports and the summary files.
 - `licenses`: the number of Eclipse licences available. At most this many members run at once; none means no cap.
+- `upscale`: one grid change with Eclipse's `COARSEN`, applied to every member whatever its id. It is exclusive with `levels`. The deck template then receives `level` 0 and `coarse`, its records.
 
 ### `opm_flow`
 
@@ -146,25 +162,29 @@ Required: `deck_template_file`.
 | `template_values` | table or none | none |
 | `transient_patterns` | list of strings | `[]` |
 | `levels` | list of tables or none | none |
+| `upscale` | table or none | none (refused) |
 | `case_dir` | string (path) or none | none |
 
 - `executable`: the OPM Flow command, looked up on `PATH`.
 - `flow_args`: extra command-line arguments, for example `["--threads-per-process=1"]`.
 - `timeout_s`: wall-clock limit per run; exceeding it fails the member.
 - `keep_files`: with `false`, everything is deleted after reading except the log and the summary files, to save disk space.
+- `upscale`: refused, because OPM Flow has no `COARSEN`. A coarse level needs its own deck instead.
 
 ### Options shared by `eclipse` and `opm_flow`
 
 - `transient_patterns`: extra case-insensitive regular expressions. A failed run whose log matches one is transient, and the executor retries it. This is on top of built-in licence and file-system patterns.
-- `levels`: see "Fidelity levels" below. You do not set it here.
+- `levels`: leave it at none. APEX fills it in only when you use the `multilevel_esmda` method, which you configure in `[method]` (see "Fidelity levels").
 
 ### Fidelity levels
 
-A multilevel ensemble splits its members over several models of different fidelity: a cheap coarse model and the expensive fine model. Each part is a level. The `multilevel_esmda` method (ES-MDA's schedule on such an ensemble) is configured in `[method]` with one table per level, coarsest first. Each level table has `members` (at least 2) and `weight`; the weights are normalised to sum 1, and the members of all levels add up to `[prior] ensemble_size`. A level may also have its own `deck_template_file`, or, for `eclipse`, an `upscale` table that coarsens the grid with Eclipse's `COARSEN`. OPM Flow has no `COARSEN`, so a coarse `opm_flow` level needs its own deck. A level with no simulator key runs the fine model.
+A multilevel ensemble splits its members over several models of different fidelity: a cheap coarse model and the expensive fine model. Each part is a level. The `multilevel_esmda` method (ES-MDA's schedule on such an ensemble) is configured in `[method]` with one table per level, coarsest first. Each level table has `members` (at least 2) and `weight`; the weights are normalised to sum 1, and the members of all levels add up to `[prior] ensemble_size`.
 
-APEX passes these levels on to the simulator, so the simulator's `levels` option stays at none. Leave it alone unless you use `multilevel_esmda`, and then set the levels in `[method]`, not in `[simulator.options]`.
+A level may also have its own `deck_template_file` or, for `eclipse`, an `upscale` table that coarsens the grid with Eclipse's `COARSEN`. OPM Flow has no `COARSEN`, so a coarse `opm_flow` level needs its own deck. A level that names none of these (no `deck_template_file`, `upscale`, `forward_file` or `matrix`) runs the fine model, that is, the deck in `[simulator.options]`.
 
-A complete example with two levels (15 + 5 = 20 members); the `[prior]` here reads a stored ensemble with the `file` generator, so it needs one array per state variable in the `.npz`:
+APEX passes these levels on to the simulator, so set them in `[method]`, not in `[simulator.options]`.
+
+A complete example with two levels (15 + 5 = 20 members); the `[prior]` reads a stored ensemble with the `file` generator, so the `.npz` needs one array per state variable:
 
 ```toml
 [prior]
@@ -221,12 +241,14 @@ Terms: the run path is the directory in which ERT runs one member's forward mode
 - `fields`: one entry per field state variable. The key is the state variable's name in APEX; its value is a table with two strings: `keyword`, the field's ERT name (its GRDECL keyword), and `file`, the file in the run path that APEX writes the field to and the forward model reads. In the worked example below, the state variable `poro` has keyword `PORO` and file `poro.grdecl`.
 - `eclbase`: the case's `ECLBASE`, the simulator's case name in the run path (`<IENS>` and `<ITER>` are replaced).
 - `responses`: with `summary`, each realization's summary is read. With `storage`, the batch keeps the case's `OBS_CONFIG` and the responses of every observation type are read from the batch's ERT storage.
-- `results_program`: with `storage`, the program that reads the responses (`python -m apex.integrations.ert.observations`). Leave it at its default; it is filled in when APEX builds the configuration from an ERT case (see below).
+- `results_program`: used with `storage`; it is the program that reads the responses. When APEX builds the configuration from an ERT case (see below), it sets this for you. If you write the options by hand with `responses = "storage"`, set it yourself to `["python", "-m", "apex.integrations.ert.observations"]`. With the default `summary` you do not need it.
 - `step_parameters`: for parameters that are not plain fields written through `fields`, but that ERT's own writers put into the run path: `GEN_KW` groups, surfaces, and fields in other formats or with transforms. The table maps each state variable (or property) to its ERT name. The values are saved in `apex_parameters.npz`.
 - `parameter_step`: the forward-model step that writes those parameters (`APEX_WRITE_PARAMETERS(<CASE>=...)`), put before the case's first `FORWARD_MODEL`. Leave both `step_parameters` and `parameter_step` at none if all your variables go through `fields`.
 - `skip_forward_steps`: the number of the case's first `FORWARD_MODEL` steps to leave out of every batch. These are steps that make `FORWARD_INIT` parameters, run once for the prior.
 
-The `ert` executor (a different plugin, in the registry `executors`) runs a forecast's members as one ERT ensemble experiment, locally. Its options are `workers` (default `1`), `retries` (default `0`), `timeout_s` (default `86400.0`) and `ert_executable` (default none).
+#### The `ert` simulator and the `ert` executor
+
+The `ert` simulator describes what to run; the `ert` executor (a different plugin, in the `executors` registry) is what runs a forecast's members, as one ERT ensemble experiment, locally. The simulator is meant to be used with this executor. The executor has its own options: `workers` (default `1`, realizations ERT runs at once), `retries` (default `0`, resubmissions of a failed realization), `timeout_s` (default `86400.0`, the longest a batch may take) and `ert_executable` (default none: the `ert` in APEX's environment, else on `PATH`). `uv run apex plugins` lists them.
 
 #### Letting APEX read the case
 
@@ -236,12 +258,16 @@ Instead of writing the `ert` options yourself, you can run:
 uv run apex ert history-match my_case.ert
 ```
 
-This history-matches the ERT case with APEX's methods; ERT runs the forward model. The case supplies the fields, observations and steps. Your APEX choices come from the `apex.toml` next to the case, or from a file you pass after the case. Choose this route when you already have a complete ERT case and want APEX's methods on it; write the `ert` options by hand when you want to keep a configuration for `apex run`. The `apex.toml` holds one `[methods.<label>]` section per method to run, with a label of your choice. Flags:
+This history-matches the ERT case with APEX's methods; ERT runs the forward model. The case supplies the fields, observations and steps. Your APEX choices come from the `apex.toml` next to the case, or from a file you pass after the case. That file holds one `[methods.<label>]` section per method to run, with a label of your choice; the options inside a section are those of the method you pick (see the methods plugin page).
+
+Choose this route when you already have a complete ERT case and want APEX's methods on it. Write the `ert` options by hand when you want to keep a configuration for `apex run`, `apex validate` and `apex resume`; `apex validate` checks run configurations, not ERT cases.
+
+Flags:
 
 - `--methods a,b` runs only the listed `[methods.<label>]` (default: all).
 - `--max-steps N` stops after N analysis steps; run the same command again to resume.
 - `--no-progress` hides progress output (`--progress` is the default).
-- `--no-write-back` stops APEX adding the iterates to the case's ERT storage (by default they are added, so you can see them in ERT's GUI).
+- `--no-write-back` stops APEX adding the iterates to the case's ERT storage. By default they are added, so you can inspect them in ERT's GUI.
 
 ### `linear`
 
@@ -279,7 +305,7 @@ The remaining options are test aids; leave them at their defaults for normal use
 - `delay_s`: seconds each run waits before answering.
 - `resources`: machine-wide tokens each run holds, for example `{ cpu = 1 }`, to test admission.
 - `write_files`: gives each run a work directory and writes `output.txt` there, to test work-directory handling such as `[output] keep_simulations`.
-- `levels`: filled in for multilevel ensembles (see "Fidelity levels"); per level `first`, `size` and optionally its own `G` (`matrix` or `forward_file`). You normally do not set it.
+- `levels`: filled in for multilevel ensembles (see "Fidelity levels"); per level `first`, `size` and optionally its own `G` (`matrix` or `forward_file`). You do not set it yourself.
 
 ### `toy_reservoir`
 
@@ -292,7 +318,9 @@ No required options. All have defaults.
 | `oil_rate` | number | `20.0` |
 | `water_rate` | number | `1.0` |
 
-`start` is the simulation's start as an ISO date; `TIME` is the days since. `control` is the name of the controls block (the member's state key). `oil_rate` gives the yearly oil per square root of pressure, and `water_rate` the water per unit of pressure. Raising `oil_rate` from `20.0` to `25.0` therefore scales the oil totals by 1.25 at the same pressure.
+- `start` is the simulation's start as an ISO date; `TIME` is the days since.
+- `control` is the name of the controls block, which is the key of the member's state that holds the controls the plugin reads.
+- `oil_rate` and `water_rate` set the totals: both options are described as the yearly oil per square root of pressure, and the water per unit of pressure.
 
 ## Worked example
 
@@ -378,15 +406,17 @@ uv run apex run your-config.toml
 - **Wrong section layout.** The plugin name goes in `name` under `[simulator]`, and its settings go under `[simulator.options]`. Do not write a section named after the plugin.
 - **Missing required options.** `eclipse` and `opm_flow` need `deck_template_file`; `ert` needs `case_file`, `fields` and `eclbase`; `linear` needs `outputs` and `variables`, and in practice `matrix` or `forward_file`.
 - **Unknown options.** Every simulator rejects options it does not define. Do not carry an `eclipse` option such as `version` over to `opm_flow`.
+- **`upscale` on `opm_flow`.** It is refused; give a coarse level its own deck instead.
 - **Fixed choices.** `version` accepts only `e100` or `e300`. `nonlinearity` accepts only `none` or `tanh`. `responses` accepts only `summary` or `storage`.
+- **`storage` without a reader.** With `responses = "storage"` written by hand, set `results_program` as described above.
 - **Timeouts.** `timeout_s` defaults to `3600.0` seconds for `eclipse` and `opm_flow`. Raise it for long runs.
 - **Disk use.** `keep_files` defaults to `true`, so member files are kept. Set it to `false` if you do not need them.
 - **Executable names.** `executable` defaults to `eclrun` for `eclipse` and `flow` for `opm_flow`. Set it only if your installation uses a different name.
-- **Setting `levels` by hand.** It is filled in from the levels of `multilevel_esmda`; leave it alone otherwise.
+- **Setting `levels` by hand.** Set levels in `[method]` for `multilevel_esmda`; leave the simulator's `levels` alone.
 - **Demo plugin.** `toy_reservoir` is meant for optimization tests and demos, not for real reservoir models.
 
 ## What to read next
 
 - Run `uv run apex plugins --json` for the full description of every option.
 - Use `uv run apex validate` on your configuration, then `uv run apex run`, and inspect results with `uv run apex report` or `uv run apex summary` on the run directory.
-- The other plugin pages in this guide, for the components that use a simulator's outputs: the `[prior]` generators (such as `file`) and the `[method]` algorithms (such as `multilevel_esmda`).
+- The other plugin pages in this guide, for the components around a simulator: the `[prior]` generators (such as `file`) and the `[method]` algorithms (such as `multilevel_esmda`).

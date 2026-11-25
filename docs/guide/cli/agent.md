@@ -27,6 +27,7 @@ items:
   - cli:apex resume
   - cli:apex run
   - cli:apex stop
+  - cli:apex study run
   - cli:apex submit
   - cli:apex summary
   - config:history_match:prior
@@ -37,8 +38,10 @@ items:
   - plugin:executors:ert
   - plugin:figure_presets:brugge_classic
   - plugin:metrics:model_change
+  - plugin:metrics:normalized_data_mismatch
   - plugin:optimizers:enopt
   - plugin:response_objectives:npv
+  - plugin:simulators:eclipse
   - plugin:simulators:ert
   - plugin:simulators:opm_flow
   - plugin:surrogate_designs:run
@@ -48,11 +51,11 @@ items:
 
 ## Goal
 
-By the end of this lesson you will know what each `apex agent` command does and which ones can run on rules alone, with no model. You will use them to ask questions, check runs, understand failures, draw figures, write reports, plan studies, convert cases, give a case a prior and draft optimizations. You will also meet the commands that work alongside them: `apex run`, `apex resume`, `apex stop`, `apex submit`, `apex approve`, `apex optimize` and `apex report`.
+By the end of this lesson you will know what each `apex agent` command does and which ones can run on rules alone, with no model. You will use them to ask questions, check runs, understand failures, draw figures, write reports, plan studies, convert cases, give a case a prior and draft optimizations. You will also meet the commands that work alongside them: `apex run`, `apex resume`, `apex stop`, `apex submit`, `apex approve`, `apex study run`, `apex predict`, `apex optimize`, `apex report`, `apex summary`, `apex pet-import` and `apex ert import`.
 
 The agent commands are `apex agent ask`, `apex agent monitor`, `apex agent diagnose`, `apex agent plot`, `apex agent report`, `apex agent plan`, `apex agent draft-optimization`, `apex agent geomodel`, `apex agent providers`, and the converters `apex agent convert create`, `apex agent convert from`, `apex agent convert from-pet`, `apex agent convert import`, `apex agent convert observe`, `apex agent convert skills`, `apex agent convert to` and `apex agent convert to-pet`.
 
-The lesson also shows three configuration sections: `study:study` (the `[study]` section of a study), `optimization_study:study` (`[study]` with `kind = "optimization"`) and `service:service` (the `[service]` section).
+The lesson also shows these configuration sections: `study:study` (the `[study]` section of a study), `optimization_study:study` (`[study]` with `kind = "optimization"`), `prediction:prediction` (`[prediction]`), `history_match:prior` (`[prior]`) and `service:service` (`[service]`).
 
 ## Prerequisites
 
@@ -83,9 +86,9 @@ Most agent commands share the same model options:
 
 The commands `apex agent convert create`, `apex agent convert import`, `apex agent diagnose`, `apex agent geomodel`, `apex agent monitor`, `apex agent plan`, `apex agent plot` and `apex agent report` also accept `--no-llm`. It means rules only: no model is asked. Default: off, so a model is asked. `apex agent draft-optimization` never uses a model.
 
-**What the model receives.** An agent sends the model facts computed from your runs and cases: configuration settings, data-mismatch and metric values, well and data-type names, and paths. A hosted provider (`anthropic`, `claude_code`, or a `--base-url` outside your own machines) receives them on its servers, under its terms. A local server (Ollama, vLLM, llama.cpp on `localhost` or your network) keeps them on your machines, and `--no-llm` sends nothing. See [what a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
+**What the model receives.** An agent sends the model facts computed from your runs and cases: configuration settings, data-mismatch and metric values, well and data-type names, and paths. A hosted provider (`anthropic`, `claude_code`, or a `--base-url` outside your own machines) receives them on its servers, under its terms. A local server (Ollama, vLLM, llama.cpp on `localhost` or on your own machines) keeps them on your machines, and `--no-llm` sends nothing. See [what a provider receives, and how to keep it local](../../agents.md#what-a-provider-receives-and-how-to-keep-it-local).
 
-**About `--root`.** All agent commands accept `--root` except `apex agent providers` and `apex agent convert skills`. Of the other commands in this lesson, `apex submit` and `apex approve` accept it too, but `apex run`, `apex resume`, `apex stop`, `apex optimize` and `apex report` do not: they work on the directory or configuration you give them.
+**About `--root`.** All agent commands accept `--root` except `apex agent providers` and `apex agent convert skills`. Of the other commands in this lesson, `apex submit`, `apex approve` and `apex study run` accept it too, but `apex run`, `apex resume`, `apex stop`, `apex predict`, `apex optimize` and `apex report` do not: they work on the directory or configuration you give them.
 
 ## Step 3: Ask a question with `apex agent ask`
 
@@ -93,7 +96,7 @@ The commands `apex agent convert create`, `apex agent convert import`, `apex age
 uv run apex agent ask "Which runs have finished?"
 ```
 
-The `question` argument is required. The agent may use APEX's tools to answer.
+The `question` argument is required. The agent may use APEX's tools to answer. This command asks a model, so the model receives facts from your runs (see Step 2).
 
 - `--tools` offers APEX's tools (the default). `--no-tools` turns them off, so the model answers on its own.
 - `--max-turns` limits the number of model calls. Default: 8.
@@ -103,12 +106,12 @@ The `question` argument is required. The agent may use APEX's tools to answer.
 ## Step 4: Check health with `apex agent monitor`
 
 ```bash
-uv run apex agent monitor RUN_ID
+uv run apex agent monitor RUN_ID --no-llm
 ```
 
 `apex agent monitor` checks the health of a run, an optimization or a surrogate build. It applies rules and adds a model's judgement (with `--no-llm`, only the rules). The `target` is a run directory, a run id or a job id; the path of the run's directory (the one you would give to `apex resume`) always works.
 
-Read the result as an assessment of whether the job looks healthy. For a running iterative run (a run that proceeds in iterations), it also says whether stopping is recommended.
+Read the result as an assessment of whether the job looks healthy. For a running iterative run, it also says whether stopping is recommended.
 
 What to do next:
 
@@ -156,18 +159,19 @@ uv run apex agent plot RUN_ID --preset brugge_classic
 
 Figures go to `RUN/report/plots` unless you set `--output`. `--no-llm` gives a rules-only run.
 
-The `brugge_classic` preset is the classic figure set of an ensemble history-matching study. Its options are `histogram_variable` (the state variable of the `nn_hist/` figures; default `nn_params`), `normalized` (also draw `normalized_data_mismatch`; default false) and `model_change` (also draw `model_change`; default false). The `model_change` figure comes from the `model_change` metric, which scores the change of each member's parameters since the ensemble it was updated from.
+The `brugge_classic` preset is the classic figure set of an ensemble history-matching study. Its options are `histogram_variable` (the state variable of the `nn_hist/` figures; default `nn_params`), `normalized` (also draw `normalized_data_mismatch`; default false) and `model_change` (also draw `model_change`; default false). The `model_change` figure comes from the `model_change` metric, which scores the change of each member's parameters since the ensemble it was updated from. The `normalized_data_mismatch` metric is `mean(((d_obs - y_j) / sigma)^2)` against the observed values.
 
-A related command is `apex report RUN_DIR`. It prints the data mismatch history and performance metrics of a run or a prediction. With `--plots` it also writes the figures (PNG and PDF) to `--output` (default `RUN_DIR/report`); `--no-plots` turns that off (the default), and `--font-size` sets the font in points (default 12.0).
+Two related commands print results without a model. `apex report RUN_DIR` prints the data mismatch history and performance metrics of a run or a prediction. With `--plots` it also writes the figures (PNG and PDF) to `--output` (default `RUN_DIR/report`); `--no-plots` turns that off (the default), and `--font-size` sets the font in points (default 12.0). `apex summary PATHS...` summarises every metric at every step of one or more runs (or folders holding runs); `--output` writes the Markdown (and a CSV next to it) instead of printing, and `--title` sets the title (default `Results summary`).
 
 ```bash
 uv run apex report RUN_DIR --plots --font-size 14
+uv run apex summary RUN_DIR --output summary.md
 ```
 
 ## Step 7: Write a report with `apex agent report`
 
 ```bash
-uv run apex agent report RUN_ID --out report.md
+uv run apex agent report RUN_ID --out report.md --no-llm
 ```
 
 `apex agent report` writes a narrative report, in Markdown, of a run, an optimization, a surrogate build or a study.
@@ -176,16 +180,16 @@ uv run apex agent report RUN_ID --out report.md
 - `--out` says where to write the Markdown.
 - `--no-llm` gives a rules-only report.
 
-To report on a study, write the study first (Step 8 shows how to write one) and then point `--study` at it:
+To report on a study, write the study first (Step 8) and then point `--study` at it:
 
 ```bash
-uv run apex agent report --study study.toml --out study_report.md
+uv run apex agent report --study study.toml --out study_report.md --no-llm
 ```
 
-## Step 8: Plan a study with `apex agent plan`
+## Step 8: Plan and run studies
 
 ```bash
-uv run apex agent plan case.toml --goal "Find out which parameters the history constrains"
+uv run apex agent plan case.toml --goal "Find out which parameters the history constrains" --no-llm
 ```
 
 `apex agent plan` proposes a study for a case and a goal. It submits the study only if you confirm.
@@ -212,7 +216,9 @@ uv run apex approve TOKEN
 uv run apex agent plan case.toml --goal "Find out which parameters the history constrains" --approval-token TOKEN
 ```
 
-The plain `apex submit` command works the same way. It runs a configuration, or resumes a run with `--resume`, in the job service's background. Useful options:
+### Submitting by hand
+
+`apex submit` runs a configuration, or resumes a run with `--resume`, in the job service's background. Useful options:
 
 - `--kind`: `run`, `prediction`, `optimization` or `surrogate` (default: by the file).
 - `--max-steps`: stop after this many steps (iterations of an optimization, member runs of a surrogate build).
@@ -231,6 +237,12 @@ uv run apex submit case.toml --priority low --wait
 ```
 
 A surrogate build can use the `run` surrogate design, which takes the forecasts a history-matching run already holds (its `run_dir`), so no simulator runs.
+
+`apex study run STUDY` validates and submits a study file; its runs go on in the background. It accepts `--yes`, `--wait` / `--no-wait`, `--max-concurrent-jobs` (default: `service.toml`, else 2), `--priority` (default `normal`), `--approval-token`, `--code` and `--root`.
+
+```bash
+uv run apex study run study.toml --wait
+```
 
 ### What a study file looks like
 
@@ -273,7 +285,7 @@ name = "short"
 patch = { method = { max_iterations = 5 } }
 ```
 
-An optimization study is the same `[study]` section with `kind = "optimization"`. Its cases are optimization configurations, its `metrics` are such as `objective:final`, `objective:best`, `evaluations:all` and `iterations:all`, and its `methods` are complete `[optimizer]`-style sections.
+An optimization study is the same `[study]` section with `kind = "optimization"`. Its cases are optimization configurations, its `metrics` are such as `objective:final`, `objective:best`, `evaluations:all` and `iterations:all`, and its `methods` are complete `[optimizer]` sections.
 
 ```toml
 [study]
@@ -298,6 +310,30 @@ max_retries = 2
 routines = true
 ```
 
+### Forecasting beyond history
+
+`apex predict CONFIG` forecasts the ensembles of a history-matching run beyond history. Its configuration is a `[prediction]` section with a `name`, the `run_dir` of the run, the `ensembles` to forecast (`posterior`, `prior`, `iteration:<k>` and, in synthetic cases, `truth`) and the series in `[prediction.outputs]`:
+
+```toml
+[prediction]
+name = "forecast_2032"
+run_dir = "runs/hm_run"
+ensembles = ["posterior", "prior"]
+include_mean_model = false
+check_history = true
+percentile_convention = "percentile"
+
+[prediction.outputs]
+vectors = ["WOPR:*", "FOPT"]
+times = "report"
+```
+
+```bash
+uv run apex predict prediction.toml
+```
+
+By default the forecast is written in `<run_dir>/predictions/<name>`. `check_history` (default true) makes the command fail unless the forecast reproduces the run's stored forecasts over the history period. `percentile_convention` is `percentile` (p10 is the 10th percentile) or `exceedance` (SPE-PRMS labels).
+
 ## Step 9: Convert cases with `apex agent convert`
 
 The `convert` commands translate cases between formats. Those marked "nothing runs" only write files.
@@ -316,13 +352,31 @@ uv run apex agent convert skills
 - `apex agent convert create --out OUTPUT` creates a synthetic case: deck, truth, prior and observations from one truth run. `--request` describes the case in words (default: a five-spot), `--name` names it, `--skill` sets the simulator's skill (default `opm_flow`), and `--observe` / `--no-observe` runs the truth once now to make the observations (default on). `--yes` runs the truth without asking.
 - `apex agent convert observe CASE` runs a created case's truth once and writes its observations, for a case `convert create` wrote with `--no-observe`. `--yes` runs it without asking.
 
-`create` and `import` also take `--no-llm` and the model options. If you have no deck of your own, `apex agent convert create` is the way to get one to practise on.
+Both `--option NAME=VALUE` (repeatable) on `to`, `from` and `import` set a converter skill's own options; `apex agent convert skills` lists each skill's. `create` and `import` also take `--no-llm` and the model options. If you have no deck of your own, `apex agent convert create` is the way to get one to practise on.
 
 ```bash
 uv run apex agent convert create --out synthetic_case --no-llm --yes
 ```
 
-The simulators a converted case can name include `opm_flow` (it needs a `deck_template_file`) and `ert` (it needs a `case_file`, `fields` and `eclbase`); an `ert` case runs through the `ert` executor, which runs a forecast's members as one ERT ensemble experiment, locally.
+### The simulators a converted case names
+
+A converted case names its simulator in `[simulator]`:
+
+- `opm_flow` runs OPM Flow for each member. It needs `deck_template_file` (a Mako template of the `.DATA` deck). Other options: `executable` (default `flow`), `flow_args` (extra arguments, default none), `timeout_s` (default 3600.0), `keep_files` (default true), `template_values`, `transient_patterns` and `case_dir` (the folder `${case_dir}` names in the template).
+- `eclipse` runs Eclipse through `eclrun`. It needs `deck_template_file` too. Other options: `version` (`e100`, the default, or `e300`), `executable` (default `eclrun`), `eclrun_args` (default none), `timeout_s` (default 3600.0), `keep_files` (default true), `licenses` (at most this many members run at once; default no cap), `template_values`, `transient_patterns` and `case_dir`.
+- `ert` needs `case_file`, `fields` and `eclbase`. It runs through the `ert` executor, which runs a forecast's members as one ERT ensemble experiment, locally.
+
+```toml
+[simulator]
+name = "eclipse"
+
+[simulator.options]
+deck_template_file = "case/DECK.DATA.mako"
+version = "e100"
+timeout_s = 7200.0
+```
+
+If you already have an ERT case that ERT has run, `apex ert import CASE_DIR [RUN_DIR]` replays its iterations into an APEX run directory (default `CASE_DIR/apex_run`), so you can use `apex report` and `apex summary` on it. To bring in a PET history-matching configuration, `apex pet-import PET_CONFIG OUTPUT_DIR` does what `apex agent convert from-pet` does, with more options: `--prior` (a stored prior ensemble, `.npz`), `--simulator` (default `opm_flow`), `--seed`, `--truth` (a true model, `.npz`, for a synthetic case), `--grid-file` (an EGRID of the deck, for geophysical data), `--pet-geometry` / `--intended-geometry` (which prior correlation geometry to use; default `--pet-geometry`) and `--avo-angles-checked` / `--no-avo-angles-checked` (default off).
 
 ## Step 10: Give a case a prior with `apex agent geomodel`
 
@@ -330,12 +384,23 @@ The simulators a converted case can name include `opm_flow` (it needs a `deck_te
 uv run apex agent geomodel config.toml --request "Smooth permeability with a long correlation length"
 ```
 
-`apex agent geomodel` gives a case's state variables a prior, checked on a drawn sample. It writes a new configuration to `--out` (default `<config>_prior.toml`).
+`apex agent geomodel` gives a case's state variables a prior, checked on a drawn sample. It writes a new configuration to `--out` (default `<config>_prior.toml`). It asks a model unless you pass `--no-llm`, so the model receives facts from your case (see Step 2).
 
 - `--request` states the prior you want, in words (for the model).
 - `--reference` is an `.npz` of reference fields in state space, such as the deck's values. The prior shares their mean, std and variogram without reproducing them.
 - `--data` is hard data to estimate from and condition to: a CSV of `i,j,k,property,value` (1-based cells; values in the deck's units; for the property `facies`, codes).
 - `--no-llm` gives rules only, and the model options apply.
+
+The result is a `[prior]` section: a `generator` that applies to every state variable unless `[prior.variables.<name>]` overrides it. Generators are `gaussian` (independent normals), `file` (a stored `.npz`), `gaussian_field` (variogram and Cholesky, PET's sampler) and `geostatspy_sgsim`. `ensemble_size` (at least 2) is optional when every variable is read from a file. Realisations are clipped to the state bounds.
+
+```toml
+[prior]
+ensemble_size = 100
+generator = "gaussian"
+
+[prior.variables.permx]
+name = "gaussian_field"
+```
 
 ## Step 11: Draft an optimization with `apex agent draft-optimization`
 
@@ -436,7 +501,7 @@ Every agent command above ran with `--no-llm` or without a model, so nothing lef
 - **Passing the key itself.** `--api-key-env` takes the name of a variable, never the key.
 - **Mixing up the switches.** `--no-tool-calls` turns on prompting for JSON; it is not the same as `--no-tools`, which stops the agent from being offered APEX's tools.
 - **Expecting a model to be asked with `--no-llm`.** It gives rules only.
-- **Passing `--root` to `apex run`, `apex resume`, `apex stop`, `apex optimize` or `apex report`.** They do not accept it.
+- **Passing `--root` to `apex run`, `apex resume`, `apex stop`, `apex predict`, `apex optimize` or `apex report`.** They do not accept it.
 - **Forgetting `--forecast-end`.** `apex agent draft-optimization` requires it, and the date must come after the history.
 - **Using `--producer-bhp` with `oil_rate` control.** The bounds are for bhp control.
 - **Expecting `apex agent plan` to submit by itself.** It submits only after you confirm, and only with `--submit` or `--approval-token`.
@@ -446,6 +511,7 @@ Every agent command above ran with `--no-llm` or without a model, so nothing lef
 - **Using `--interval` alone.** It only matters together with `--watch`.
 - **Running `apex agent report` with no target.** Give a `target` or `--study`.
 - **Expecting a converter to run the simulator.** `apex agent convert to`, `from`, `to-pet`, `from-pet` and `import` run nothing; only `create` and `observe` run a truth, and they ask first unless you pass `--yes`.
+- **Leaving out `deck_template_file`.** Both `opm_flow` and `eclipse` require it.
 
 ## What to read next
 

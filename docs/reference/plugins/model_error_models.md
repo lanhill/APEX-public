@@ -29,8 +29,8 @@ name = "pg_lstm"
 | `producer_data` | array | ["WOPR", "WBHP", "WWCT"] | Their data types, e.g. `["WOPR", "WBHP", "WWCT"]` and `["WBHP"]`. |
 | `producers` | array | | Well names. |
 | `report_dates` | array | | The ISO date of each report step, in order. Needed by `causal_mask` and `save_inputs`, which must place a datum at its report step before any run; every case's own report dates are checked against them. |
-| `report_steps` | array | required | 1-based report steps of the network's report times (the observation times). |
+| `report_steps` | array | | 1-based report steps of the network's report times (the observation times). |
 | `save_inputs` | boolean | false | Also answer the inputs, `MEC:X<j>:<well>` at each report date (feature `j` of the well's inputs), saved with the residuals: a run of the prior gives a per-step prior's sequential pass its inputs. |
-| `schedule_file` | string | required | The history schedule: one COMPDAT, WCONHIST and WCONINJH block per report step. |
+| `schedule_file` | string or null | | The history schedule: one COMPDAT, WCONHIST and WCONINJH block per report step. Left out on a simulator whose wells come from its own input (`WellLayout`: GEOS), which then needs `report_dates`. |
 | `shut_wells` | string | zero | `"zero"` (the manuscript): no residual while a well is shut (WBHP excepted); `"ignore"`: residuals at every report time ('s published runs). |
 | `state_variable` | string | nn_params | The state variable holding the parameters of every well's network, producers then injectors, each in torch's layout. |

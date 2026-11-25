@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from apex.simulation.deck import deck_keywords, deck_layout
+import pytest
+
+from apex.simulation import deck as deck_module
+from apex.simulation.deck import deck_keywords, deck_layout, schedule_summary
 
 TEMPLATE = """\
 <%!
@@ -106,6 +109,63 @@ def test_the_includes_are_read_from_case_dir(tmp_path: Path) -> None:
     wells = deck_layout(tmp_path / "deck.mako", copy)["wells"]
     assert isinstance(wells, dict)
     assert set(wells) == {"P1", "INJ"}
+
+
+def test_a_schedule_after_many_includes_is_read(tmp_path: Path) -> None:
+    """A deck of more than 50 includes still has its last one read (Norne's schedule).
+
+    The reader stopped at 50 files and dropped the rest without a word, so Norne's schedule,
+    included last after 49 others, gave no wells.
+    """
+    (tmp_path / "inc").mkdir()
+    for i in range(60):
+        (tmp_path / "inc" / f"part{i}.inc").write_text(f"-- part {i}\n")
+    includes = "".join(f"INCLUDE\n '${{case_dir}}/inc/part{i}.inc' /\n" for i in range(60))
+    (tmp_path / "inc" / "SCHEDULE.SCH").write_text(
+        "DATES\n 1 JAN 2000 /\n/\nWCONHIST\n 'P1' OPEN ORAT 100 5 /\n/\n"
+        "WCONINJE\n 'I1' WATER OPEN RATE 300 /\n/\n"
+    )
+    template = tmp_path / "deck.mako"
+    template.write_text(
+        "RUNSPEC\nSTART\n 1 DEC 1999 /\nGRID\n"
+        + includes
+        + "SCHEDULE\nINCLUDE\n '${case_dir}/inc/SCHEDULE.SCH' /\nEND\n"
+    )
+    summary = schedule_summary(template, tmp_path)
+    producers, injectors = summary["producers"], summary["injectors"]
+    assert isinstance(producers, dict)
+    assert isinstance(injectors, dict)
+    assert set(producers) == {"P1"}
+    assert set(injectors) == {"I1"}
+
+
+def test_a_deck_beyond_the_file_bound_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the bound, the reader fails loudly instead of leaving the later files out."""
+    monkeypatch.setattr(deck_module, "_MAX_DECK_FILES", 3)
+    for i in range(4):
+        (tmp_path / f"part{i}.inc").write_text("-- part\n")
+    template = tmp_path / "deck.mako"
+    template.write_text("RUNSPEC\n" + "".join(f"INCLUDE\n 'part{i}.inc' /\n" for i in range(4)))
+    with pytest.raises(ValueError, match="more than 3 files"):
+        schedule_summary(template, tmp_path)
+
+
+def test_a_file_reached_by_two_spellings_is_read_once(tmp_path: Path) -> None:
+    """A self-include written with '..' ends at once, and its wells are not repeated."""
+    (tmp_path / "inc").mkdir()
+    (tmp_path / "inc" / "wells.inc").write_text(
+        "WELSPECS\n 'P1' G1 2 3 2000 OIL /\n/\nCOMPDAT\n 'P1' 2* 1 1 OPEN /\n/\n"
+        "INCLUDE\n '../inc/wells.inc' /\n"
+    )
+    template = tmp_path / "deck.mako"
+    template.write_text("RUNSPEC\nDIMENS\n 4 4 2 /\nSCHEDULE\nINCLUDE\n 'inc/wells.inc' /\n")
+    layout = deck_layout(template)
+    assert layout["wells"] == {"P1": [[2, 3, 1]]}
+    files = layout["files"]
+    assert isinstance(files, list)
+    assert len(files) == 2
 
 
 def test_paths_aliases_reach_the_wells(tmp_path: Path) -> None:

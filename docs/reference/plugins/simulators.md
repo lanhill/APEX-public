@@ -30,6 +30,7 @@ name = "eclipse"
 | `template_values` | object or null | | Extra fixed values passed to the template. |
 | `timeout_s` | number | 3600.0 | Wall-clock limit per run; exceeding it kills the run and fails the member. |
 | `transient_patterns` | array | | Extra case-insensitive regular expressions: a failed run whose log matches one is transient, and the executor retries it (on top of the built-in licence and file-system patterns, `apex.simulation.deck.TRANSIENT_PATTERNS`). |
+| `upscale` | object or null | | One grid coarsening (`COARSEN`) for every member, whatever its id: the table of a level's `upscale`. Exclusive with `levels`; the deck template gets `level` 0 and `coarse`, its records. For a coarse simulator stack made from the fine deck (amended). |
 | `version` | string | e100 | `"e100"` (black oil, `eclrun eclipse`) or `"e300"` (compositional). |
 
 ## `ert`
@@ -103,6 +104,7 @@ name = "opm_flow"
 | `template_values` | object or null | | Extra fixed values passed to the template. |
 | `timeout_s` | number | 3600.0 | Wall-clock limit per run; exceeding it fails the member. |
 | `transient_patterns` | array | | Extra case-insensitive regular expressions: a failed run whose log matches one is transient, and the executor retries it (on top of the built-in licence and file-system patterns, `apex.simulation.deck.TRANSIENT_PATTERNS`). |
+| `upscale` | object or null | | Refused: OPM Flow has no `COARSEN` (the Eclipse simulator's option). |
 
 ## `toy_reservoir`
 

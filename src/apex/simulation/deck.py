@@ -471,6 +471,10 @@ def _coarse_records(upscale: Mapping[str, object], member: MemberInput) -> list[
 
 #: Included files larger than this are not scanned for wells (grid geometry files).
 _SCAN_MAX_BYTES = 5_000_000
+#: At most this many files (the template and its includes) are scanned. A real field deck
+#: includes many (Norne: over 50, its schedule last); the bound only guards against a
+#: runaway deck, and is an error when reached, never a silent truncation.
+_MAX_DECK_FILES = 2_000
 _KEYWORD = re.compile(r"^([A-Z][A-Z0-9_]{0,7})\s*$")
 #: A section keyword with other text after it on its line ("PROPS  ====="): Eclipse reads a
 #: keyword's first 8 columns only, so the rest is a comment (a ruler).
@@ -493,6 +497,11 @@ def deck_layout(template_path: Path, case_dir: Path | None = None) -> dict[str, 
         1-based Eclipse cells ``[[i, j, k], ...]``, in deck order (the format of distance
         localization's ``positions``); ``files``: the files read; ``skipped``: COMPDAT
         records that could not be read (e.g. Mako expressions).
+
+    Raises
+    ------
+    ValueError
+        If the deck includes more than :data:`_MAX_DECK_FILES` files.
     """
     grid: list[int] | None = None
     heads: dict[str, tuple[int, int]] = {}
@@ -529,6 +538,11 @@ def deck_keywords(template_path: Path, case_dir: Path | None = None) -> list[tup
     In the order the files are read (the template, then each included file, each once);
     comments dropped; a table's rows up to its ``/`` are one record. For readers of a
     deck's tables (e.g. ``SWOF``, ``PVTW``) outside the simulators.
+
+    Raises
+    ------
+    ValueError
+        If the deck includes more than :data:`_MAX_DECK_FILES` files.
     """
     found: list[tuple[str, list[str]]] = []
     for path in _deck_files(template_path, case_dir):
@@ -570,23 +584,40 @@ def schedule_keywords(
 
 
 def _deck_files(template_path: Path, case_dir: Path | None = None) -> list[Path]:
-    """Return the template and the files it includes, recursively (each once)."""
+    """Return the template and the files it includes, recursively (each once).
+
+    Raises
+    ------
+    ValueError
+        If the deck includes more than :data:`_MAX_DECK_FILES` files (its later files, e.g.
+        the schedule, would otherwise be left out silently).
+    """
     case_dir = (case_dir or template_path.resolve().parent).resolve()
     seen: list[Path] = []
+    known: set[Path] = set()
     aliases: dict[str, str] = {}
     pending = [template_path.resolve()]
-    while pending and len(seen) < 50:
+    while pending:
         path = pending.pop(0)
-        if path in seen or not path.is_file() or path.stat().st_size > _SCAN_MAX_BYTES:
+        if path in known or not path.is_file() or path.stat().st_size > _SCAN_MAX_BYTES:
             continue
+        if len(seen) >= _MAX_DECK_FILES:
+            # File names only: the message may reach a web-UI user (case_info, drafts).
+            raise ValueError(
+                f"{template_path.name} includes more than {_MAX_DECK_FILES} files (e.g. "
+                f"{path.name}); the deck reader stops there rather than leave the rest out"
+            )
         seen.append(path)
+        known.add(path)
         for keyword, records in _keyword_records(path.read_text(errors="replace")):
             if keyword == "PATHS":
                 aliases.update(_path_aliases(records, template_path, case_dir))
             elif keyword == "INCLUDE" and records:
                 target = _include_target(records[0], path, case_dir, aliases)
                 if isinstance(target, Path):
-                    pending.append(target)
+                    # Resolved, so that one file reached by two spellings ('../inc/a.inc'
+                    # from inside inc/) is read once and a self-include ends at once.
+                    pending.append(target.resolve())
     return seen
 
 
@@ -782,6 +813,11 @@ def schedule_summary(template_path: Path, case_dir: Path | None = None) -> dict[
         ``tstep``: whether ``TSTEP`` is used (its steps are not dates);
         ``unreadable``: wells whose control records hold template expressions (``${...}``,
         Mako lines), so their rates cannot be read.
+
+    Raises
+    ------
+    ValueError
+        If the deck includes more than :data:`_MAX_DECK_FILES` files.
     """
     start: dt.date | None = None
     dates: list[dt.date] = []

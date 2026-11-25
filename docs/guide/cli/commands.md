@@ -20,6 +20,7 @@ items:
   - cli:apex summary
   - cli:apex validate
   - cli:apex version
+  - config:history_match:prior
   - config:history_match:validation
   - config:prediction:prediction
   - config:service:approval
@@ -27,6 +28,7 @@ items:
   - config:service:guests
   - config:service:service
   - plugin:simulators:opm_flow
+  - plugin:surrogate_designs:prior
   - plugin:surrogate_designs:run
 ---
 
@@ -333,9 +335,40 @@ uv run apex pet-import pet/config.toml apex_case --seed 7
 
 This reads `pet/config.toml`, fixes the seed at 7 and writes the APEX case to `apex_case`. The simulator stays `opm_flow`. Replace the paths with your own. If your PET configuration samples a stored prior, add `--prior` with the path to that `.npz` file.
 
-The simulator `opm_flow` runs OPM Flow for one member in its work directory. Its one required option is `deck_template_file`, the Mako template of the `.DATA` deck. Others include `executable` (default `flow`), `flow_args`, `timeout_s` (default `3600.0`) and `keep_files` (default `true`). Print every plugin option with `uv run apex plugins`.
+#### The simulator `opm_flow`
 
-The surrogate-design plugin `run` is a related plugin you may meet in that list: it uses the forecasts a history-matching run already holds (`run_dir`), so it needs no simulator runs.
+The simulator `opm_flow` runs OPM Flow for one member in its work directory. Its one required option is `deck_template_file`, the Mako template of the `.DATA` deck. The others are optional:
+
+- `executable`: the OPM Flow command, looked up on `PATH`. Default: `flow`.
+- `flow_args`: extra command-line arguments, for example `["--threads-per-process=1"]`. Default: none.
+- `timeout_s`: wall-clock limit per run; exceeding it fails the member. Default: `3600.0`.
+- `keep_files`: keep the member's deck and outputs. With `false`, everything but the log and the summary files is deleted after reading, to save disk space. Default: `true`.
+- `template_values`: extra fixed values passed to the template.
+- `transient_patterns`: extra case-insensitive regular expressions; a failed run whose log matches one is treated as transient and retried by the executor, on top of the built-in licence and file-system patterns.
+- `case_dir`: the folder that `${case_dir}` names in the template (its `INCLUDE` paths). Default: the template's folder. A copied example sets it to its own folder, so that its data files are read while the template stays where it is.
+
+Print every plugin option with `uv run apex plugins`.
+
+#### The prior of a case
+
+The `[prior]` section of a run configuration says how the initial ensemble is generated. Its `generator` applies to every state variable unless a `[prior.variables.<name>]` section overrides it for one variable. Generators are plugins: `gaussian` (independent normals), `file` (a stored `.npz`), `gaussian_field` (variogram and Cholesky, PET's sampler) and `geostatspy_sgsim` (GeostatsPy). Realisations are clipped to the state bounds.
+
+- `ensemble_size`: the number of members, at least 2. It is optional when every variable is read from a file.
+- `generator`: a plugin name alone, or a section with `name` and `options`.
+- `variables`: per-variable generators.
+- `groups`: variables drawn together by one joint generator, each with `name`, `options` and a list of `variables`.
+
+```toml
+[prior]
+ensemble_size = 100
+generator = "gaussian"
+```
+
+This draws 100 members with independent normals for every state variable. It is only the `[prior]` part of a run configuration.
+
+#### Surrogate designs
+
+Two surrogate-design plugins appear in the list of `uv run apex plugins`. The plugin `prior` draws from the case's prior generators, so fields keep their geostatistics. It has no options. The plugin `run` uses the forecasts a history-matching run already holds (`run_dir`), so it needs no simulator runs. It also has no options.
 
 ## Housekeeping and integration
 
@@ -494,6 +527,7 @@ If a run is still going and you want it to pause, use `apex stop runs/case_run`,
 - `--truth` is for synthetic cases and expects one array per variable.
 - `--avo-angles-checked` is only for data you know holds each angle's own traces. Leave it off for SimulatorWrap's data.
 - `apex submit` returns at once unless you add `--wait`.
+- The `[prior]` section of a run configuration and the surrogate-design plugin `prior` share a name but are different things.
 
 ## What to read next
 
