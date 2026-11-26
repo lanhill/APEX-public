@@ -85,6 +85,7 @@ from apex.core.simulation import (
     ModelErrorModel,
     SeriesRequest,
     Simulator,
+    StateInputModel,
     match_vectors,
 )
 from apex.core.surrogates import (
@@ -4416,7 +4417,10 @@ def surrogate_forecasting(
         # The model error of the members the surrogate forecasts is
         # computed on its block states; refused when either part cannot. The deck's report
         # dates (from its text) after the configuration's refusals.
-        step_dates = composition.model_error_step_dates(config)
+        # A state-input model (revision 8) reads the member's state: no dates, no states.
+        state_inputs = isinstance(model_error, StateInputModel)
+        if not state_inputs:
+            step_dates = composition.model_error_step_dates(config)
         try:
             ModelErrorSimulator(original.simulator, model_error, step_dates=step_dates)
         except ValueError as error:
@@ -4424,7 +4428,8 @@ def surrogate_forecasting(
                 f"[surrogate] with [model_error]: {error} (the surrogate "
                 f"{section.model_file}, plugin {original.manifest.plugin!r})"
             ) from error
-        _refuse_untrained_dates(original, model_error, step_dates)
+        if step_dates is not None:
+            _refuse_untrained_dates(original, model_error, step_dates)
     manifest = original.manifest
     coarse = run_coarse_stack(config, original, layout, executor)
     assert manifest.gate is not None  # refused otherwise

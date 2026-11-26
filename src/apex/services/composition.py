@@ -97,6 +97,7 @@ from apex.core.plugins import (
 )
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import (
+    PRIOR_FIT_FILE,
     DataTransform,
     FieldResponses,
     MaskingModel,
@@ -105,6 +106,7 @@ from apex.core.simulation import (
     PriorGenerator,
     RemoteSpec,
     Simulator,
+    StateInputModel,
 )
 from apex.core.surrogates import EarlyStartSurrogate
 from apex.core.validation import StoppingRule
@@ -833,6 +835,7 @@ def build_run(
         auxiliary = stack.auxiliary
         executor = executors.create(config.execution.name, **config.execution.options)
         check_executor(executor, simulator)
+        refuse_remote_state_inputs(executor, stack.model_error)
         prepare_remote(executor, simulator, config)
         parameterizations = build_parameterizations(config)
         method = _build_method(config, layout, parameterizations)
@@ -935,6 +938,7 @@ def build_run(
             parameterizations=parameterizations,
             auxiliary_variables=auxiliary,
             surrogate=forecasting,
+            model_error=stack.model_error,
         )
     except ValueError as error:  # a transform or metric that does not fit the case
         raise ConfigError(f"invalid configuration: {error}") from error
@@ -1772,7 +1776,28 @@ def build_model_error(
         model.fit(observations)
     except ValueError as error:  # e.g. an output the observations no longer hold
         raise ConfigError(f"[model_error] {section.name}: {error}") from error
+    if isinstance(model, StateInputModel) and config.run.output_dir is not None:
+        # The model's prior fit is the run's file, written once by the
+        # workflow and read by every other build of the model (workers, a resume).
+        model.prior_fit_file = Path(config.run.output_dir) / PRIOR_FIT_FILE  # type: ignore[attr-defined]
     return model
+
+
+def refuse_remote_state_inputs(executor: object, model: ModelErrorModel | None) -> None:
+    """Refuse remote members for a state-input model-error model.
+
+    Raises
+    ------
+    ConfigError
+        If the executor runs whole members on other hosts (``remote``), which do not have
+        the run's prior fit (a file of this host's run).
+    """
+    if isinstance(model, StateInputModel) and getattr(executor, "remote", False):
+        raise ConfigError(
+            f"the model-error model reads the member's state with the run's prior fit "
+            f"({PRIOR_FIT_FILE}), which remote members do not have: run members on this "
+            "host (e.g. the ssh executor's files mode)"
+        )
 
 
 def _use_simulator_wells(config: HistoryMatchConfig, model: object) -> None:
@@ -1850,6 +1875,8 @@ def check_model_error_summary(config: HistoryMatchConfig, model: ModelErrorModel
         If the deck's GRID section certainly lacks ``INIT``, or its SUMMARY section a
         vector the model reads.
     """
+    if isinstance(model, StateInputModel):
+        return  # it reads the member's state, not the deck's files
     template = config.simulator.options.get("deck_template_file")
     if not isinstance(template, str):
         return

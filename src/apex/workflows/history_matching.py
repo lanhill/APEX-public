@@ -37,6 +37,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
@@ -60,7 +61,7 @@ from apex.algorithms.data_assimilation.data_error import DataErrorCovariance
 from apex.algorithms.surrogates.domain import check_members
 from apex.algorithms.surrogates.gate import gate
 from apex.core.diagnostics import DiagnosticsPlan, NoDiagnostics, RecordingDiagnostics
-from apex.core.errors import ConfigError, WorkflowError
+from apex.core.errors import ConfigError, SimulationError, WorkflowError
 from apex.core.metrics import MetricContext, PerformanceMetric
 from apex.core.progress import (
     GuardedProgress,
@@ -69,12 +70,15 @@ from apex.core.progress import (
     ProgressReporter,
 )
 from apex.core.simulation import (
+    PRIOR_FIT_FILE,
     DataTransform,
     Executor,
     MemberFailure,
     MemberInput,
+    ModelErrorModel,
     Parameterization,
     Simulator,
+    StateInputModel,
 )
 from apex.core.surrogates import EarlyStartSurrogate
 from apex.core.validation import StoppingRule
@@ -83,7 +87,7 @@ from apex.domain.observations import DataKey, ObservationSet
 from apex.domain.results import HistoryMatchResult, IterationRecord
 from apex.domain.state import StateLayout
 from apex.domain.surrogate import GateResult
-from apex.simulation.model_error import ModelErrorSimulator
+from apex.simulation.model_error import ModelErrorSimulator, install_prior_fit
 from apex.simulation.sensitivity import SensitivityRun
 from apex.storage.run_directory import SIMULATOR, SURROGATE, RunDirectory, upgrade_iterate
 from apex.workflows.parameterization import PropertyMap, parameterized
@@ -210,6 +214,10 @@ class HistoryMatchingWorkflow:
         A fitted surrogate makes the forecasts (``[surrogate]``); ``simulator``
         and ``executor`` then run only its checks, its fallbacks and the posterior's
         forecast. ``None`` (default): the simulator makes every forecast.
+    model_error
+        The run's model-error model. One whose residuals come from the member's
+        state (``StateInputModel``, revision 8) is fitted to the prior once, before the
+        first forecast, and the fit written to the run's ``model_error_prior_fit.npz``.
 
     A simulator with ``auxiliary_keys(keys)`` (a model-error simulator's residuals) is
     asked for those keys after the observations'; their values are saved with each saved
@@ -242,6 +250,7 @@ class HistoryMatchingWorkflow:
         parameterizations: Sequence[Parameterization] = (),
         auxiliary_variables: frozenset[str] = frozenset(),
         surrogate: SurrogateForecasting | None = None,
+        model_error: ModelErrorModel | None = None,
     ) -> None:
         if not 0 < min_success_fraction <= 1:
             raise ValueError(f"min_success_fraction must be in (0, 1], got {min_success_fraction}")
@@ -319,6 +328,7 @@ class HistoryMatchingWorkflow:
         )
         self._last_raw: NDArray[np.float64] | None = None
         self.surrogate = surrogate
+        self.model_error = model_error
         if surrogate is not None and self._transformed_remotely:
             # Composition refuses it first ("Refused"); kept here for other callers.
             raise ValueError(
@@ -408,12 +418,19 @@ class HistoryMatchingWorkflow:
             prior = self._check_prior(prior)
             self._save_truth()
             self._save_split()
+            self._fit_model_error_prior(prior)
             step = algorithm.start(self._setup(prior))
             # The prior forecast is not counted: max_steps = 2 gives iterations 0, 1, 2.
             completed = 0
             sequence = 0
         else:
             saved = self._load()
+            if isinstance(self.model_error, StateInputModel):
+                # The fit written at the start, never refitted.
+                try:
+                    install_prior_fit(self.model_error, self.run_dir.path / PRIOR_FIT_FILE)
+                except SimulationError as error:
+                    raise WorkflowError(str(error)) from error
             self._restore_validation(saved)
             self._restore_surrogate(saved)
             setup = self._setup(np.empty((self.layout.n_state, 0)))
@@ -2214,6 +2231,40 @@ class HistoryMatchingWorkflow:
             self._evaluate_metrics(state, predicted, self.layout.split(state))
         except WorkflowError as error:
             raise ValueError(str(error)) from None
+
+    def _fit_model_error_prior(self, prior: NDArray[np.float64]) -> None:
+        """Fit a state-input model-error model to the prior, once.
+
+        The fit is written to ``<run>/model_error_prior_fit.npz`` (atomically) and installed
+        in this process's model; every other build of the model reads the file, and a
+        resume never refits (bit-identical). ``prior`` is ``(n_state, N)``; the model sees
+        each variable's ``(size, N)`` block, its own parameters' excluded.
+        """
+        model = self.model_error
+        if not isinstance(model, StateInputModel):
+            return
+        blocks = {
+            name: np.array(block, order="C")  # copies: the model may not touch the prior
+            for name, block in self.layout.split(prior).items()
+            if name != model.state_variable
+        }
+        arrays = {k: np.asarray(v) for k, v in model.fit_prior(blocks).items()}
+        odd = sorted(k for k, v in arrays.items() if v.dtype.kind not in "biuf")
+        if odd:
+            raise WorkflowError(f"the model-error model's prior fit has non-numeric arrays {odd}")
+        path = self.run_dir.path / PRIOR_FIT_FILE
+        partial = path.with_name(path.name + ".partial")
+        with partial.open("wb") as handle:
+            np.savez(handle, **arrays)
+            handle.flush()
+            os.fsync(handle.fileno())  # resume's bit-identity rests on this file
+        partial.replace(path)
+        model.use_prior_fit(arrays)
+        logger.info(
+            "model error: fitted to the prior (%s)",
+            path.name,
+            extra={"event": "model_error_prior_fit", "arrays": sorted(arrays)},
+        )
 
     def _save_split(self) -> None:
         """Write ``checkpoints/data_split.json`` and log the roles (runs with a split)."""

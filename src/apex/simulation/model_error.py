@@ -49,6 +49,7 @@ from apex.core.simulation import (
     ModelErrorModel,
     SeriesRequest,
     Simulator,
+    StateInputModel,
     StepStates,
     extrapolates,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "ModelErrorSimulator",
     "WellSchedule",
     "feature_names",
+    "install_prior_fit",
     "read_schedule",
     "well_features",
     "well_schedules",
@@ -591,6 +593,28 @@ def residual_keys(keys: Sequence[DataKey]) -> list[DataKey]:
     return [DataKey(k.time, f"{RESIDUAL_PREFIX}{k.datatype}", k.index) for k in keys]
 
 
+def install_prior_fit(model: StateInputModel, path: Path | None) -> None:
+    """Install a run's prior fit (``model_error_prior_fit.npz``) in a state-input model.
+
+    The history-matching workflow writes the file once, before the
+    first forecast; every other build of the model (a worker, a resume, a prediction) reads
+    it here and never refits.
+
+    Raises
+    ------
+    SimulationError
+        If no file is named or it does not exist (a run started before the model was
+        fitted, or a deleted file): the model's inputs would otherwise be unscaled.
+    """
+    if path is None or not Path(path).is_file():
+        raise SimulationError(
+            f"{type(model).__name__} reads the member's state with the run's prior fit, and "
+            f"there is none ({path}): start the run again (a resume never refits)"
+        )
+    with np.load(path, allow_pickle=False) as fit:
+        model.use_prior_fit({name: np.array(fit[name]) for name in fit.files})
+
+
 class ModelErrorSimulator:
     """The effective simulator ``g(m) + r(m, theta)``.
 
@@ -617,7 +641,18 @@ class ModelErrorSimulator:
         # is asked at; given, a deck run's own dates are checked against them once.
         self._step_dates = None if step_dates is None else dict(step_dates)
         self._dates_checked = False
-        if isinstance(inner, CaseFileSimulator):
+        # a model whose residuals come from the member's state reads no
+        # simulation, so it wraps any simulator: g from it, r from the state.
+        self.state_inputs = isinstance(model, StateInputModel)
+        self._prior_installed = False
+        if self.state_inputs:
+            if extrapolates(model):
+                raise ValueError(
+                    f"{type(model).__name__} reads the member's state and extrapolates its "
+                    "parameters past the history: not supported together"
+                )
+            self.proxy = False
+        elif isinstance(inner, CaseFileSimulator):
             self.proxy = False
         elif isinstance(inner, BlockStateSimulator) and inner.gives_block_states():
             if not isinstance(model, BlockStateModel):
@@ -654,7 +689,7 @@ class ModelErrorSimulator:
         # a model whose residuals apply past the history (it declares
         # ``forecasts``) forecasts whole series, when the inner simulator can read them from
         # a simulated case; otherwise no ``run_series`` (predictions list keys or refuse).
-        reader = None if self.proxy else getattr(inner, "read_series", None)
+        reader = None if self.proxy or self.state_inputs else getattr(inner, "read_series", None)
         self._read_series: Callable[[Path, SeriesRequest], MemberSeries] | None = (
             reader if callable(reader) else None
         )
@@ -673,7 +708,12 @@ class ModelErrorSimulator:
 
     @property
     def needs_work_dir(self) -> bool:
-        """A deck's runs write files in a work directory; a surrogate's predictions none."""
+        """A deck's runs write files in a work directory; a surrogate's predictions none.
+
+        With a state-input model (revision 8), whatever the wrapped simulator needs.
+        """
+        if self.state_inputs:
+            return bool(getattr(self.inner, "needs_work_dir", True))
         return not self.proxy
 
     def _deck(self) -> CaseFileSimulator:
@@ -681,7 +721,13 @@ class ModelErrorSimulator:
         return self.inner
 
     def state_names_read(self) -> frozenset[str] | None:
-        """Return the wrapped simulator's (its members' state reaches it unchanged)."""
+        """Return the wrapped simulator's (its members' state reaches it unchanged).
+
+        None (every variable) with a state-input model (revision 8), which reads the
+        state itself.
+        """
+        if self.state_inputs:
+            return None
         read = getattr(self.inner, "state_names_read", None)
         return read() if callable(read) else None
 
@@ -786,6 +832,8 @@ class ModelErrorSimulator:
         # replace(), not a new MemberInput: the member keeps where it runs.
         physical = replace(member, state={k: v for k, v in member.state.items() if k != name})
         data_rows = [i for i, k in enumerate(keys) if not k.datatype.startswith(RESIDUAL_PREFIX)]
+        if self.state_inputs:
+            return self._run_state(physical, theta, keys, data_rows)
         if self.proxy:
             return self._run_proxy(member, physical, theta, keys, data_rows)
         case = self._deck().simulate(physical)
@@ -805,6 +853,36 @@ class ModelErrorSimulator:
             raise
         self._deck().clean(case)
         return values
+
+    def _run_state(
+        self,
+        physical: MemberInput,
+        theta: NDArray[np.float64],
+        keys: Sequence[DataKey],
+        data_rows: list[int],
+    ) -> NDArray[np.float64]:
+        """``g`` from the wrapped simulator, ``r`` from the member's state (revision 8)."""
+        self._ensure_prior_fit()
+        model = cast(StateInputModel, self.model)
+        state = {k: np.asarray(v, dtype=np.float64) for k, v in physical.state.items()}
+        values = np.array(model.input_residuals(state, theta, keys), dtype=np.float64)
+        if values.shape != (len(keys),):
+            raise SimulationError(
+                f"{type(model).__name__}.input_residuals returned {values.shape} for "
+                f"{len(keys)} keys"
+            )
+        if data_rows:
+            g = np.asarray(self.inner.run(physical, [keys[i] for i in data_rows]), dtype=float)
+            values[data_rows] += g
+        return values
+
+    def _ensure_prior_fit(self) -> None:
+        """Install the run's prior fit in this instance's model, once (revision 8)."""
+        if not self._prior_installed:
+            install_prior_fit(
+                cast(StateInputModel, self.model), getattr(self.model, "prior_fit_file", None)
+            )
+            self._prior_installed = True
 
     def _run_proxy(
         self,

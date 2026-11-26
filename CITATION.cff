@@ -1,7 +1,7 @@
-# How to cite APEX. A placeholder until the paper describing APEX is published: then fill in
-# preferred-citation below (and the authors' ORCIDs), so that GitHub's "Cite this
-# repository" offers the paper. There, year is an integer, doi has no https://doi.org/
-# prefix, and volume and start (the first page or article number) may be added.
+# How to cite APEX: the paper describing it (arXiv, 2026), which GitHub's "Cite this
+# repository" offers. Once it is published in a journal, replace preferred-citation with the
+# journal article (year an integer, doi without the https://doi.org/ prefix; volume and start,
+# the first page or article number, may be added) and keep the preprint's DOI under identifiers.
 cff-version: 1.2.0
 message: "If you use APEX, please cite it as below."
 type: software
@@ -21,12 +21,18 @@ keywords:
   - data assimilation
   - reservoir simulation
   - optimization
-# preferred-citation:
-#   type: article
-#   title: "TODO: the paper's title"
-#   authors:
-#     - family-names: Luo
-#       given-names: Xiaodong
-#   journal: "TODO"
-#   year: TODO
-#   doi: "TODO"
+preferred-citation:
+  type: article
+  title: "APEX: Agentic Platform for Ensemble eXploration"
+  authors:
+    - family-names: Luo
+      given-names: Xiaodong
+  journal: "arXiv preprint arXiv:2611.33450"
+  year: 2026
+  month: 11
+  doi: "10.48550/arXiv.2611.33450"
+  url: "https://arxiv.org/abs/2611.33450"
+  identifiers:
+    - type: other
+      value: "arXiv:2611.33450"
+      description: "The arXiv identifier (physics.geo-ph)"

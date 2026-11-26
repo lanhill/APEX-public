@@ -221,7 +221,23 @@ Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Re
 
 ## Citing
 
-If you use APEX, please cite it: [CITATION.cff](CITATION.cff) (GitHub's *Cite this repository*). 
+If you use APEX, please cite the paper that describes it ([CITATION.cff](CITATION.cff); GitHub's *Cite this repository* gives the same):
+
+> Luo, X. (2026). APEX: Agentic Platform for Ensemble eXploration. arXiv preprint arXiv:2611.33450. https://doi.org/10.48550/arXiv.2611.33450
+
+```bibtex
+@article{luo2026apex,
+  title         = {{APEX}: Agentic Platform for Ensemble {eXploration}},
+  author        = {Luo, Xiaodong},
+  journal       = {arXiv preprint arXiv:2611.33450},
+  year          = {2026},
+  eprint        = {2611.33450},
+  archivePrefix = {arXiv},
+  primaryClass  = {physics.geo-ph},
+  doi           = {10.48550/arXiv.2611.33450},
+  url           = {https://arxiv.org/abs/2611.33450}
+}
+```
 
 ## Disclaimer
 

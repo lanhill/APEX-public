@@ -30,9 +30,11 @@ from apex.core.plugins import (
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import (
     FORECAST_STATE_OPTION,
+    PRIOR_FIT_FILE,
     ExtrapolatingModel,
     ModelErrorModel,
     SeriesRequest,
+    StateInputModel,
     extrapolates,
 )
 from apex.domain.config import HistoryMatchConfig, PluginSection
@@ -583,6 +585,7 @@ def _predict(
                 simulator = ModelErrorSimulator(simulator, model_error)
             executor = executors.create(execution.name, **execution.options)
             composition.check_executor(executor, simulator)
+            composition.refuse_remote_state_inputs(executor, model_error)
             # an executor running members whole on other hosts rebuilds the
             # prediction's simulator there: the run's configuration with the prediction's
             # simulator, and nothing that wraps the run's (no geophysics, model error or
@@ -762,7 +765,11 @@ def _forecasting_model_error(
             "surrogate would forecast g alone, the run's forecasts were g + r"
         )
     composition.check_model_error_summary(as_run, model)
-    _check_model_error_restarts(simulator, section.name)
+    if isinstance(model, StateInputModel):
+        # The run's prior fit, from the run being predicted.
+        model.prior_fit_file = Path(section.run_dir) / PRIOR_FIT_FILE  # type: ignore[attr-defined]
+    else:
+        _check_model_error_restarts(simulator, section.name)
     return model
 
 

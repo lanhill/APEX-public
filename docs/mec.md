@@ -125,6 +125,15 @@ A history-matching run may forecast with a surrogate (`[surrogate]`) and keep it
 - **Not with:** `on_check_failure = "refit"` (a refit would learn from the checks' runs, which include the model error), a model-error model that extrapolates its parameters, a surrogate that predicts from companion runs (coarse-corrected, early-start), or predictions with a surrogate.
 - **What is saved.** The residuals (`MEC:` vectors) are saved where every member runs on the deck: the posterior's forecast by the deck (`full_<k>`), and the iterates after a switch to the simulator; the surrogate's iterates save none. `variance_in_errors` adds the surrogate's predictive variance of its forecast only, not of `r`.
 
+## Models that read the member's state
+
+A model-error model may compute its residuals from the member's own state variables (its property fields and scalar parameters, through physics coordinates of its choice) instead of from a simulation (`StateInputModel` in `apex.core.simulation`).
+
+- **It wraps any simulator.** `g` comes from the simulator, whatever it is: a deck, a surrogate with or without block states, or an analytic model. `r` comes from the state. There are no restart files to write and no block states to predict.
+- **Its inputs are scaled from the prior, once.** Before the first forecast, the run fits what the model fixes from the prior ensemble (`fit_prior`), for example each input's mean and spread. It writes the fit to the run's `model_error_prior_fit.npz`. Every other build of the model reads that file: the run's worker processes, a resume and a prediction of the run. A resume never refits, so it stays bit-identical.
+- **Not with remote members** (an executor that runs whole members on other hosts): the fit is a file of this host's run.
+- `pg_lstm` reads the simulation's grid blocks. It is not such a model and is unchanged.
+
 ## Parity with the reference implementation
 
 **The Brugge comparison's first iterations differ.** APEX's MEC + AdaLoc run on OPM Flow reduced the data mismatch from 1.04e9 to 5.4e8 in its first iteration; the reference implementation's published run went to 9.7e8, and then decreased steadily for 20 iterations. Two known differences explain it, not the case set-up:

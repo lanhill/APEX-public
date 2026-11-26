@@ -726,6 +726,46 @@ class BlockStateModel(Protocol):
         ...
 
 
+#: The run's file holding a :class:`StateInputModel`'s prior fit.
+PRIOR_FIT_FILE = "model_error_prior_fit.npz"
+
+
+@runtime_checkable
+class StateInputModel(Protocol):
+    """A model-error model whose residuals come from the member's state.
+
+    ``r(m, theta)`` from the member's state variables (``theta``'s excluded), not from a
+    simulation, so the effective simulator wraps any simulator: ``g`` from it, ``r`` from
+    the state. What the model fixes from the prior ensemble (e.g. its inputs'
+    standardisation) is fitted once, by the history-matching workflow, before the first
+    forecast (:meth:`fit_prior`), written to the run's :data:`PRIOR_FIT_FILE` and installed
+    (:meth:`use_prior_fit`); a model rebuilt elsewhere (a worker, a prediction, a resume)
+    reads that file and never refits. The framework does both (the workflow, and the
+    effective simulator once per instance, from the path composition sets as the model's
+    attribute ``prior_fit_file``), so a model only computes and installs. The fit uses the
+    whole drawn prior, failed members included (deterministic from the prior).
+    """
+
+    state_variable: str
+
+    def fit_prior(self, prior: Mapping[str, NDArray[np.float64]]) -> dict[str, NDArray[np.float64]]:
+        """Return the arrays the model fixes from the prior, ``{variable: (size, N)}``."""
+        ...
+
+    def use_prior_fit(self, arrays: Mapping[str, NDArray[np.float64]]) -> None:
+        """Install arrays :meth:`fit_prior` returned."""
+        ...
+
+    def input_residuals(
+        self,
+        state: Mapping[str, NDArray[np.float64]],
+        theta: NDArray[np.float64],
+        keys: Sequence[DataKey],
+    ) -> NDArray[np.float64]:
+        """Return r at ``keys`` (0 where it does not apply) from one member's state."""
+        ...
+
+
 @runtime_checkable
 class BlockStateSimulator(Protocol):
     """A simulator that gives a member's :class:`DatedStates`.
