@@ -55,17 +55,17 @@ def test_the_mask_multiplies_its_rows_only_and_survives_resume(
     assert isinstance(masked, RestrictableLocalization)
     masked.restrict(slice(6, 10), _mask)
     masked.prepare(state, forecast, KEYS, np.random.default_rng(1))
-    assert plain.taper_matrix is not None
-    assert masked.taper_matrix is not None
-    np.testing.assert_array_equal(masked.taper_matrix[:6], plain.taper_matrix[:6])
-    np.testing.assert_array_equal(masked.taper_matrix[6:], plain.taper_matrix[6:] * _mask(KEYS))
-    assert masked.taper_matrix[6:, :3].sum() == 0
+    assert plain.prepared
+    assert masked.prepared
+    np.testing.assert_array_equal(masked.dense_taper()[:6], plain.dense_taper()[:6])
+    np.testing.assert_array_equal(masked.dense_taper()[6:], plain.dense_taper()[6:] * _mask(KEYS))
+    assert masked.dense_taper()[6:, :3].sum() == 0
     if unlocalized:  # the mask alone: ones inside it
-        np.testing.assert_array_equal(masked.taper_matrix[6:], _mask(KEYS).astype(float))
+        np.testing.assert_array_equal(masked.dense_taper()[6:], _mask(KEYS).astype(float))
     restored = PriorAdaptiveLocalization([6, 4], **options)
     restored.restrict(slice(6, 10), _mask)
     restored.restore_state(masked.export_state())
-    np.testing.assert_array_equal(restored.taper_matrix, masked.taper_matrix)
+    np.testing.assert_array_equal(restored.dense_taper(), masked.dense_taper())
 
 
 def test_the_mask_is_checked() -> None:
@@ -82,8 +82,8 @@ def test_the_mask_is_checked() -> None:
     ok = PriorAdaptiveLocalization([4, 6])
     ok.restrict(slice(None, 4), _mask)
     ok.prepare(state, forecast, KEYS, np.random.default_rng(1))
-    assert ok.taper_matrix is not None
-    assert ok.taper_matrix[:4, :3].sum() == 0
+    assert ok.prepared
+    assert ok.dense_taper()[:4, :3].sum() == 0
 
 
 def _method(localization: object) -> object:
@@ -101,14 +101,14 @@ def test_composition_hands_the_mask_over_and_prepare_applies_it() -> None:
     loc = PriorAdaptiveLocalization([6, 4])
     attach_parameter_mask(_method(loc), LAYOUT, MODEL, KEYS)
     loc.prepare(state, forecast, KEYS, np.random.default_rng(1))
-    assert loc.taper_matrix is not None
-    assert loc.taper_matrix[6:, :3].sum() == 0  # the first date's data: masked off
+    assert loc.prepared
+    assert loc.dense_taper()[6:, :3].sum() == 0  # the first date's data: masked off
     # The mask is evaluated on the keys the run assimilates (here a held-out subset).
     held = PriorAdaptiveLocalization([6, 4])
     attach_parameter_mask(_method(held), LAYOUT, MODEL, KEYS)
     held.prepare(state, forecast[3:], KEYS[3:], np.random.default_rng(1))
-    assert held.taper_matrix is not None
-    assert held.taper_matrix.shape == (10, 3)
+    assert held.prepared
+    assert held.dense_taper().shape == (10, 3)
 
 
 @pytest.mark.parametrize(
@@ -145,7 +145,7 @@ def test_runs_without_a_declared_mask_are_unchanged() -> None:
     plain = PriorAdaptiveLocalization([6, 4])
     loc.prepare(state, forecast, KEYS, np.random.default_rng(1))
     plain.prepare(state, forecast, KEYS, np.random.default_rng(1))
-    np.testing.assert_array_equal(loc.taper_matrix, plain.taper_matrix)
+    np.testing.assert_array_equal(loc.dense_taper(), plain.dense_taper())
 
 
 def test_a_wrong_or_empty_mask_is_refused() -> None:
@@ -240,8 +240,8 @@ def test_a_pg_lstm_with_causal_mask_hands_its_mask_over(tmp_path: Any) -> None: 
                                     variable_names=["k", "nn"])  # fmt: skip
     attach_parameter_mask(_method(loc), layout, model, keys)
     loc.prepare(state, forecast, keys, np.random.default_rng(1))
-    assert loc.taper_matrix is not None
-    np.testing.assert_array_equal(loc.taper_matrix[3:], model.parameter_mask(keys).astype(float))
+    assert loc.prepared
+    np.testing.assert_array_equal(loc.dense_taper()[3:], model.parameter_mask(keys).astype(float))
     off: Any = [DataKey("2000-01-05", "WOPR:P1")]
     with pytest.raises(ConfigError, match="not at one of the report dates"):
         attach_parameter_mask(_method(PriorAdaptiveLocalization([3, model.n_params])), layout,

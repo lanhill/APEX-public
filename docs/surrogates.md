@@ -11,7 +11,7 @@ audience: public
 
 A surrogate model is a fast model fitted to full simulator runs of one case, which can later stand in for the simulator. `apex surrogate build` makes one: it runs a design of full simulations, fits a surrogate plugin to some of them, and gates it on the others, which it never saw. `apex surrogate check` gates an existing model on new full runs.
 
-After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator. You can also build one over an optimization's controls and optimize with it, and use one in predictions (see [Predictions with a surrogate](#predictions-with-a-surrogate) below). A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer, unless a history match explicitly asks it to extrapolate (`outside = "surrogate"`, below).
+After this page you can build a surrogate of a history-matching case, read its gate, check it again later, resume a build that stopped, and history-match the case with the surrogate making the forecasts, checked by the simulator. You can also build one over an optimization's controls and optimize with it, and use one in predictions (see [Predictions with a surrogate](#predictions-with-a-surrogate) below). A model is only ever used inside the domain where it was validated and within its gate's tolerance; outside, it refuses to answer, unless a history match or an optimization explicitly asks it to extrapolate (`outside = "surrogate"`, below).
 
 ## Prerequisites
 
@@ -292,6 +292,28 @@ Each surrogate plugin declares what it takes and gives: its inputs (the member's
 
 A case that transforms its field data (`[[data_transforms]]`) cannot have its observations as outputs yet: list scalar vectors instead.
 
+## Validation by folds
+
+By default (`[design] validation = "held_out"`) the model is gated on held-out runs it never saw. With few runs, holding some out costs training data. `validation = "folds"` instead makes every design run a training run and gates the plugin's fitting procedure by K-fold cross-validation:
+
+```toml
+[design]
+plan = "prior"
+training = 100
+validation = "folds"
+folds = 5          # K (default 5; at least 2, at most the training runs)
+# fold_seed = 7    # the split's seed (default: [surrogate] seed)
+# held_out = 0     # must be 0 (or left out) with folds
+```
+
+- **The split.** The successful runs, in id order, are permuted by `numpy.random.default_rng(fold_seed)` and cut into K near-equal folds by `numpy.array_split` (the first `n mod K` folds one run larger). With plan `run`, a member's id is its column in the run, so the split of a run's members is `array_split(default_rng(fold_seed).permutation(n), K)`.
+- **Each fold.** The plugin is fitted, through its own `fit`, on the other folds' runs with a generator of the fold's own (the `k`-th child of the build's stream `folds`), and predicts the fold's runs.
+- **The gate** is evaluated once over every run's out-of-fold prediction: the same measures and tolerances as [the gate](#the-gate), over all the runs (`gate.json`, and the model's `gate`). Each fold's own measures are recorded beside it (`folds.json`, the manifest's `validation`, the summary's `validation`, and `apex summary`'s `fold_<k>_gate_error`); the pooled gate is the verdict (a fold's own rank check is recorded only for folds of at least 3 runs).
+- **The shipped model** is fitted on every run, with the build's stream `surrogate`, and its domain is every run's inputs. Since every input is in sample for it, the domain's residual bound is at least the largest out-of-fold residual (each fold's model's residual of the runs it left out), as a held-out run's residual would set it. **It is not itself gated: only its fitting procedure is.** The manifest, `folds.json`, the summary, `apex validate`'s plan and `apex surrogate build`'s output all say so.
+- **Resuming.** Each fold's predictions are saved as it ends (`folds/fold_<k>.npz`), so a build stopped between folds resumes with the remaining folds only, and writes the files an uninterrupted build writes. Changing `folds` or `fold_seed` refits on the runs made (they change no run); changing `validation` or `held_out` is another build.
+- **Checks and runs.** `apex surrogate check` gates such a model on new runs as any other. In a history match, a refit after a failed check has no held-out runs of the build to keep: it trains on every build run and the checked runs it does not hold out, and is gated on those it holds out (`refit_held_out`), so it needs at least two checked runs.
+- **Refused:** `held_out > 0`, `folds` greater than `training`, fewer successful runs than folds, `folds` or `fold_seed` without `validation = "folds"`, and plans other than `prior`, `lhs`, `file` and `run` (an adaptive plan chooses its runs with held-out runs of its own).
+
 ## Resuming and refitting
 
 Each finished run is saved at once. Running the same configuration again (or `uv run apex surrogate build --resume runs/NAME`) runs only the missing members, and the model files it writes are identical, byte for byte, to an uninterrupted build's. `--max-runs N` runs at most N full runs now. A configuration whose plugin, options or gate changed is fitted again on the runs already made; one whose case, design or seed changed is refused in the same directory, naming what differs (for example `stack.simulator_version` or `design`). The exception is a larger `training` with plan `file` or `run` and nothing else changed: the columns are permuted once by the seed (held-out runs first, then training, then calibration), so the held-out runs stay, every training run made stays a training run, and the old calibration runs fall into the new training or calibration runs (by column); the design is drawn again, checked to keep them, and only the new members run. A smaller count, or one with coarse-only runs, is still another build.
@@ -332,6 +354,7 @@ runs/<name>/
   model/surrogate.json, model/surrogate.npz   the model: a JSON manifest and plain arrays
   model/surrogate.cost.json   the full runs' times (mean, median, total), for the runs that use it
   gate.json, summary.json
+  folds/, folds.json  validation by folds only: each fold's predictions, and the folds' record
   checks/<id>/        the checks of the model
 ```
 
@@ -372,7 +395,7 @@ max_refits = 2
 What happens during the run:
 
 - **Every decision is made on the surrogate's forecasts:** the acceptance of trials and their damping, the stopping criteria and, with `[validation]`, the cross-validation rule and its choice of the minimum-CV iterate. The update uses the surrogate's forecast of every member, so that the members' errors stay alike.
-- **Members outside the domain** stop the run with the members, the coordinates outside and by how much (`outside = "stop"`), or are run by the simulator and recorded as such (`outside = "simulator"`). They are never dropped. `outside = "surrogate"` answers them by the surrogate anyway: an explicit choice to extrapolate beyond where the model was validated, for a study that wants one source for every member (a simulator forecast beside surrogate forecasts mixes two error levels in one ensemble). Every forecast with members outside logs `surrogate_outside` (policy `surrogate`) as a warning, its `surrogate_forecast` event counts them (`extrapolated`), and `summary.json`'s `surrogate.extrapolated` gives the run's total of member forecasts outside the domain (a member counts at every forecast it is outside in: trials and repeated forecasts included). Keys or times outside the domain still stop the run. History matching only; predictions and optimizations take `stop` or `simulator`.
+- **Members outside the domain** stop the run with the members, the coordinates outside and by how much (`outside = "stop"`), or are run by the simulator and recorded as such (`outside = "simulator"`). They are never dropped. `outside = "surrogate"` answers them by the surrogate anyway: an explicit choice to extrapolate beyond where the model was validated, for a study that wants one source for every member (a simulator forecast beside surrogate forecasts mixes two error levels in one ensemble). Every forecast with members outside logs `surrogate_outside` (policy `surrogate`) as a warning, its `surrogate_forecast` event counts them (`extrapolated`), and `summary.json`'s `surrogate.extrapolated` gives the run's total of member forecasts outside the domain (a member counts at every forecast it is outside in: trials and repeated forecasts included). Keys or times outside the domain still stop the run. History matching and optimization (see below); predictions take `stop` or `simulator`.
 - **Checks:** at the check iterations, `check_members` members are run by the simulator too and gated against the surrogate's forecasts, with observation errors (`sigma_ratio`, in the space the method sees), the history-matching data and the cross-validation data apart. A check that fails:
   - `stop` (default): the run stops before the update, at its last checkpoint, with the event `surrogate_check_failed` and the errors per datatype. Set `on_check_failure` in the run's `config.json` and resume. A rebuilt model is another model (another identity), which a resume refuses: start a new run with it.
   - `refit`: the checked runs join the model's snapshots, the plugin is fitted again and gated on the held-out runs plus a share of the new ones, and the iteration's forecast is repeated with the refit. After `max_refits` refits a failing check stops the run.
@@ -415,7 +438,7 @@ runs/<name>/
    model_file = "runs/opt_surrogate/model/surrogate.json"
    check_every = 3            # accepted steps 3, 6, 9, ... are checked by the simulator (0: none)
    on_check_failure = "stop"  # "stop" | "simulator"
-   outside = "stop"           # controls outside the model's domain: "stop" | "simulator"
+   outside = "stop"           # controls outside the model's domain: "stop" | "simulator" | "surrogate"
    # relative = { rate = 0.02 }   # the checks' tolerances: may only tighten the model's gate
    # workers = 4              # local processes for the surrogate's evaluations
    # max_evaluations = 50000  # the run's bound on surrogate evaluations
@@ -432,7 +455,7 @@ runs/<name>/
 What happens during the run:
 
 - **Every evaluation the optimizer asks for is the surrogate's**, journalled in `evaluations.jsonl` with `source = "surrogate"` under a key that includes the model's identity. A run without the surrogate, or with another model, never reuses them. The simulator's evaluations (`source = "simulator"`) are journalled under the plain run's keys, so within the run directory they are reused as a plain run's would be.
-- **Controls outside the domain** stop the run at its last checkpoint (`outside = "stop"`), or are evaluated by the simulator (`outside = "simulator"`).
+- **Controls outside the domain** stop the run at its last checkpoint (`outside = "stop"`), are evaluated by the simulator (`outside = "simulator"`), or, as an explicit choice to extrapolate, by the surrogate anyway (`outside = "surrogate"`): each batch is logged as a warning, the journal's rows are marked `extrapolated`, and the result's `surrogate.extrapolated_evaluations` counts them. An accepted step outside the domain is still checked (when a check is due), the check marked `extrapolated`. The reported optimum is still evaluated by the simulator.
 - **Checks:** every `check_every` accepted steps, the accepted controls are evaluated by the simulator at every realization and gated against the surrogate's values by relative errors, before the step's checkpoint. The history row records the check (`surrogate_check`), and `surrogate_state.json` keeps every check. A check that fails:
   - `stop` (default): the run stops at its last checkpoint. Set `on_check_failure = "simulator"` in the run's `config.json` and resume. A rebuilt model is another model: a run refuses to resume with it, so start a new optimization.
   - `simulator`: the optimization starts again from its start with the simulator for every evaluation, as the plain run with the same seed; the evaluations the simulator made already are reused from the journal. A resume keeps the switch.

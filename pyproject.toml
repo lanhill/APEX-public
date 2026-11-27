@@ -12,7 +12,7 @@ license-files = [
 ]
 dependencies = [
     "numpy>=2.0",
-    "pydantic>=2.9",
+    "pydantic>=2.11",
     "pywavelets>=1.8",
     "rich>=13.7",
     "scipy>=1.14",

@@ -248,13 +248,16 @@ def test_a_checkpoint_with_a_dense_taper_resumes_identically(
     linear_case: CaseFactory, taper: str
 ) -> None:
     """Checkpoints written before the taper was packed (a dense
-    ``method_state:taper``) resume as before, bit for bit."""
+    ``method_state:taper``) resume as before, bit for bit. Such runs are older than the
+    low-memory taper, so they keep the dense one (snapshot version
+    < 7): pinned here."""
     from apex.algorithms.data_assimilation.localization import unpack_taper
 
     method = (
         'name = "esmda"\noptions = { inflation = [2, 2] }\n'
         'strategy = { name = "approx", options = { energy = 1.0 } }\n'
-        f'localization = {{ name = "adaptive_prior", options = {{ taper = "{taper}" }} }}'
+        f'localization = {{ name = "adaptive_prior", options = {{ taper = "{taper}", '
+        'taper_storage = "dense", block_rows = 0 } }'
     )
     whole = linear_case(name="whole", ensemble_size=30, method=method)
     parts = linear_case(name="parts", ensemble_size=30, method=method)
@@ -299,9 +302,11 @@ def test_localized_esmda_runs_and_resumes_identically(
         "algorithm_state_*.npz"
     )
     saved = np.load(state_file)
-    # "adaptive" is the prior-only method (2026-09-28), as its alias "adaptive_prior".
-    # Packed exactly since 2026-11-26 (localization.pack_taper): the shape and the bits or rows.
-    assert ("method_state:taper_shape" in saved) == (localization != "adaptive_per_update")
+    # "adaptive" is the prior-only method (2026-09-28), as its alias "adaptive_prior". A soft
+    # taper is recomputed by default since 2026-11-27: its inputs are
+    # stored; a dense or packed one is packed exactly (localization.pack_taper).
+    prior_only = localization != "adaptive_per_update"
+    assert ("method_state:recompute_state" in saved) == prior_only
 
 
 @pytest.mark.parametrize(

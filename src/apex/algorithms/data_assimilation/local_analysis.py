@@ -140,7 +140,10 @@ class LocalAnalysisUpdate(EmitsDiagnostics):
         if localization is None:
             if block_sizes is None:
                 raise ValueError("give block_sizes (the composition does) or a localization")
-            localization = PriorAdaptiveLocalization(block_sizes, taper="hard")
+            # The selection needs the whole taper: kept dense, built whole (as before).
+            localization = PriorAdaptiveLocalization(
+                block_sizes, taper="hard", taper_storage="dense", block_rows=0
+            )
         self.energy = energy
         self.localization: Localization = localization
         self.weight = bool(weight)
@@ -148,7 +151,12 @@ class LocalAnalysisUpdate(EmitsDiagnostics):
         self._groups_of: NDArray[np.float64] | None = None  # the taper they came from
 
     def _taper(self, n_state: int, n_data: int) -> NDArray[np.float64]:
-        taper = getattr(self.localization, "taper_matrix", None)
+        localization = self.localization
+        if isinstance(localization, PriorAdaptiveLocalization):
+            # Dense, or packed or recomputed and made whole once (taper_storage).
+            taper = localization.dense_taper() if localization.prepared else None
+        else:
+            taper = getattr(localization, "taper_matrix", None)
         if taper is None:
             raise ValueError(
                 "the selection's localization is not prepared (the loop prepares it from "

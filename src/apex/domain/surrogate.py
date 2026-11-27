@@ -906,6 +906,43 @@ class GateResult(_Frozen):
         return lines
 
 
+#: How a build validated by folds says what was gated, stated with
+#: every result: the gate judged the fitting procedure, not the model shipped.
+FOLDS_NOTE = (
+    "validated by K-fold cross-validation: every design run was a training run, and the gate "
+    "judged the out-of-fold predictions of models fitted by the same procedure on the other "
+    "folds' runs; the shipped model was fitted on every run and was not itself gated, only "
+    "its procedure was"
+)
+
+
+class FoldGate(_Frozen):
+    """One fold of a build validated by folds: its runs and its own errors (recorded only)."""
+
+    fold: int = Field(ge=0, description="The fold's number, 0..K-1.")
+    runs: list[int] = Field(
+        description="The fold's run ids: predicted by a model fitted on the other folds' runs."
+    )
+    gate: GateResult = Field(
+        description="The gate's measures on this fold alone (its errors; the verdict that "
+        "counts is the pooled gate's)."
+    )
+
+
+class FoldValidation(_Frozen):
+    """How a build validated by folds gated its model (``[design] validation = "folds"``).
+
+    The pooled verdict is the manifest's (and the build's) ``gate``: one gate over every
+    run's out-of-fold prediction. ``per_fold`` records each fold's own measures.
+    """
+
+    mode: Literal["folds"] = "folds"
+    folds: int = Field(ge=2, description="K, the number of folds.")
+    fold_seed: int = Field(ge=0, description="The seed of the split.")
+    per_fold: list[FoldGate]
+    note: str = FOLDS_NOTE
+
+
 # ----------------------------------------------------------------------------- manifest
 
 
@@ -1012,13 +1049,20 @@ class SurrogateManifest(_Frozen):
         "controls after their parameterizations), its entrywise range over the design's runs: "
         "the space the model saw, which a prediction's scenario must lie within.",
     )
+    validation: FoldValidation | None = Field(
+        default=None,
+        description="A build validated by folds: the folds and each "
+        "fold's measures; ``gate`` is then the pooled out-of-fold verdict on the procedure, "
+        "and the model itself, fitted on every run, was not gated. Absent: gated on held-out "
+        "runs.",
+    )
 
     @model_serializer(mode="wrap")
     def _without_absent_coarse(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         # Absent before coarse stacks and control boxes
         # existed: manifests without them keep their bytes, so their identities do not change.
         document: dict[str, Any] = handler(self)
-        for name in ("coarse", "control_box", "input_sizes", "control_inputs"):
+        for name in ("coarse", "control_box", "input_sizes", "control_inputs", "validation"):
             if document.get(name) is None:
                 document.pop(name, None)
         return document
@@ -1150,6 +1194,10 @@ class SurrogateCaseSection(_Frozen):
         return self
 
 
+#: K of a build validated by folds when ``[design] folds`` is not given.
+DEFAULT_FOLDS = 5
+
+
 class DesignSection(_Frozen):
     """``[design]``: the full runs a surrogate trains on and is gated on (held-out).
 
@@ -1181,6 +1229,15 @@ class DesignSection(_Frozen):
     members run on the coarse stack only, drawn after the held-out and the training runs (so
     those stay the same for a given seed; plan ``file``: the next columns), e.g. for a
     network pretrained on many cheap coarse runs and fine-tuned on the fewer fine ones.
+
+    ``validation``: ``held_out`` (the default) gates the shipped model
+    on its held-out runs; ``folds`` makes every design run a training run (``held_out = 0``)
+    and gates the fitting procedure by K-fold cross-validation instead: the successful runs,
+    in id order, are permuted by ``numpy.random.default_rng(fold_seed)`` and cut into
+    ``folds`` (K, default 5) near-equal folds (``numpy.array_split``); each fold is predicted
+    by the plugin fitted on the other folds' runs, the gate is evaluated once over every
+    run's out-of-fold prediction, and the shipped model is fitted on every run, so it is not
+    itself gated. Plans ``prior``, ``lhs``, ``file`` and ``run`` only.
     """
 
     plan: str = Field(
@@ -1191,7 +1248,29 @@ class DesignSection(_Frozen):
         default_factory=dict, description="Another plan's options (core's plans take none)."
     )
     training: int = Field(ge=2, description="Training runs: the plugin is fitted on these.")
-    held_out: int = Field(ge=1, description="Held-out runs: the gate's, never fitted on.")
+    held_out: int = Field(
+        default=0,
+        ge=0,
+        description="Held-out runs: the gate's, never fitted on (at least 1; 0 with "
+        "validation = 'folds').",
+    )
+    validation: Literal["held_out", "folds"] = Field(
+        default="held_out",
+        description="held_out: the model is gated on the held-out runs; folds: every run "
+        "trains, and the fitting procedure is gated by K-fold cross-validation (the shipped "
+        "model, fitted on every run, is not itself gated).",
+    )
+    folds: int | None = Field(
+        default=None,
+        ge=2,
+        description="validation = 'folds': K, the number of folds (default 5; at most the "
+        "training runs).",
+    )
+    fold_seed: int | None = Field(
+        default=None,
+        ge=0,
+        description="validation = 'folds': the seed of the split (default: [surrogate] seed).",
+    )
     box: dict[str, tuple[float, float]] = Field(
         default_factory=dict,
         description="lhs: per state variable, the bounds of every entry.",
@@ -1237,7 +1316,49 @@ class DesignSection(_Frozen):
         # their bytes (the automatic count enters the build's identity on its own).
         if document.get("calibration") is None:
             document.pop("calibration", None)
+        # And the validation by folds: builds gated on held-out runs
+        # keep their configurations' and fingerprints' bytes.
+        if document.get("validation") == "held_out":
+            document.pop("validation", None)
+        for name in ("folds", "fold_seed"):
+            if document.get(name) is None:
+                document.pop(name, None)
         return document
+
+    @property
+    def n_folds(self) -> int:
+        """K, the number of folds of a build validated by folds (``folds``, default 5)."""
+        return DEFAULT_FOLDS if self.folds is None else self.folds
+
+    @model_validator(mode="after")
+    def _validation(self) -> Self:
+        if self.validation == "held_out":
+            if self.held_out < 1:
+                raise ValueError(
+                    "held_out must be at least 1: the model is gated on its held-out runs "
+                    "(or set validation = 'folds' to gate its fitting procedure by K-fold "
+                    "cross-validation on the training runs)"
+                )
+            given = [n for n in ("folds", "fold_seed") if getattr(self, n) is not None]
+            if given:
+                raise ValueError(f"{', '.join(given)} is for validation = 'folds'")
+            return self
+        if self.held_out != 0:
+            raise ValueError(
+                f"validation = 'folds' makes every design run a training run: held_out must be "
+                f"0, got {self.held_out}"
+            )
+        if self.plan not in ("prior", "lhs", "file", "run"):
+            raise ValueError(
+                f"validation = 'folds' is for plans prior, lhs, file and run; plan "
+                f"{self.plan!r} chooses its runs with the surrogate and its held-out runs"
+            )
+        if self.n_folds > self.training:
+            raise ValueError(
+                f"{self.n_folds} folds need at least {self.n_folds} training runs, got "
+                f"{self.training}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _plan_inputs(self) -> Self:
@@ -1413,6 +1534,12 @@ class SurrogateBuildPlan(_Frozen):
     plan: str
     training: int
     held_out: int
+    folds: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="validation = 'folds': K, the folds the fitting procedure is gated on "
+        "(absent: gated on the held-out runs).",
+    )
     simulator_runs: int = Field(description="Full runs the design needs (0 for plan 'run').")
     coarse_only: int = Field(default=0, description="Of them, runs on the coarse stack only.")
     calibration: int = Field(
@@ -1505,6 +1632,15 @@ class SurrogateBuildSummary(_Frozen):
     )
     simulator_median_seconds: float | None = Field(
         default=None, description="The median full run of the design."
+    )
+    validation: FoldValidation | None = Field(
+        default=None,
+        # Absent for builds gated on held-out runs: their summaries keep their keys (a field's
+        # exclude_if, not a model serializer, so the REST schema keeps the summary's fields).
+        exclude_if=lambda value: value is None,
+        description="A build validated by folds: the folds and each fold's measures; "
+        "``gate`` is then the pooled out-of-fold verdict on the fitting procedure, not on the "
+        "shipped model.",
     )
 
     @property

@@ -14,7 +14,9 @@ Each row records its ``source``.
 
 **Domain.** Controls outside the model's validated domain stop the optimization
 (:class:`~apex.core.errors.SurrogateDomainError`, never a dropped evaluation), or with
-``outside = "simulator"`` are evaluated by the simulator, which the row records.
+``outside = "simulator"`` are evaluated by the simulator, which the row records, or with
+``outside = "surrogate"`` (an explicit choice to extrapolate) by the surrogate anyway, the row
+marked ``extrapolated`` and the result counting them.
 
 **Checks.** Every ``check_every`` accepted steps the accepted controls are evaluated by the
 simulator at every realization and gated against the surrogate's predictions of the same
@@ -122,6 +124,8 @@ STANDS_IN = "stands_in_for"
 
 #: The simulator's rows of a scheduled iteration record this.
 SCHEDULED = "scheduled"
+#: A journal row the surrogate made outside its validated domain (``outside = "surrogate"``).
+EXTRAPOLATED = "extrapolated"
 
 #: The refits' folders in the run directory: ``surrogates/refit_<n>/``.
 REFITS = "surrogates"
@@ -209,7 +213,7 @@ class SurrogateObjective:
     inside
         Which columns lie inside the model's domain.
     outside
-        ``stop`` or ``simulator`` for columns outside.
+        ``stop``, ``simulator`` or ``surrogate`` (extrapolate) for columns outside.
     check_every
         Accepted steps between checks (0: none).
     on_check_failure
@@ -243,7 +247,7 @@ class SurrogateObjective:
         *,
         identity: str,
         inside: InsideCheck,
-        outside: Literal["stop", "simulator"] = "stop",
+        outside: Literal["stop", "simulator", "surrogate"] = "stop",
         check_every: int = 3,
         on_check_failure: Literal["stop", "simulator"] = "stop",
         tolerances: GateTolerances | None = None,
@@ -363,18 +367,27 @@ class SurrogateObjective:
             if np.any(ok):
                 inside[ok] = self._inside(controls[:, ok], reals[ok], coarse, ok)
         outside = ok & ~inside
+        if np.any(outside) and self.outside == "surrogate":
+            # The user's explicit choice to extrapolate: the surrogate answers every column,
+            # those outside marked in the journal (EXTRAPOLATED) and logged at every batch.
+            logger.warning(
+                "surrogate_outside_extrapolated", extra={"columns": int(np.count_nonzero(outside))}
+            )
         if np.any(outside) and self.outside == "stop":
             out = np.flatnonzero(outside)
             raise SurrogateDomainError(
                 f"{out.size} of {n} control vectors lie outside the surrogate's validated "
                 f"domain (columns {out[:10].tolist()}): the optimization stops at its last "
                 'checkpoint; set [surrogate] outside = "simulator" to evaluate them by the '
-                "simulator, or build the model over a wider box",
+                'simulator, or outside = "surrogate" to extrapolate (an explicit choice), or '
+                "build the model over a wider box",
                 members=tuple(int(j) for j in out),
             )
+        # The surrogate's columns: those inside, and those outside it extrapolates.
+        answered = inside | outside if self.outside == "surrogate" else inside
         new = sum(
             1
-            for key in set(self.surrogate.keys_of(controls[:, inside], reals[inside]))
+            for key in set(self.surrogate.keys_of(controls[:, answered], reals[answered]))
             if key not in self.surrogate.journal.values
         )
         done = self.surrogate.journal.by_source.get("surrogate", 0)
@@ -389,7 +402,14 @@ class SurrogateObjective:
             values[..., inside] = self._surrogate_values(
                 controls[:, inside], reals[inside], None if coarse is None else coarse[:, inside]
             )
-        if np.any(outside):
+        if np.any(outside) and self.outside == "surrogate":
+            values[..., outside] = self._surrogate_values(
+                controls[:, outside],
+                reals[outside],
+                None if coarse is None else coarse[:, outside],
+                row_extra={EXTRAPOLATED: True},
+            )
+        elif np.any(outside):
             logger.info(
                 "surrogate_outside_simulated", extra={"columns": int(np.count_nonzero(outside))}
             )
@@ -463,12 +483,18 @@ class SurrogateObjective:
         return np.asarray(self.inside(controls, reals, sliced), dtype=bool)
 
     def _surrogate_values(
-        self, controls: FloatArray, reals: IntArray, coarse: NDArray[np.float64] | None
+        self,
+        controls: FloatArray,
+        reals: IntArray,
+        coarse: NDArray[np.float64] | None,
+        row_extra: Mapping[str, object] | None = None,
     ) -> FloatArray:
         """Evaluate columns by the surrogate (given their coarse forecasts, if any)."""
         if coarse is None:
-            return self.surrogate(controls, reals)
-        return self.surrogate(controls, reals, simulator_for=self._simulator_for(coarse))
+            return self.surrogate(controls, reals, row_extra=row_extra)
+        return self.surrogate(
+            controls, reals, simulator_for=self._simulator_for(coarse), row_extra=row_extra
+        )
 
     def _simulator_for(
         self, coarse: NDArray[np.float64]
@@ -555,10 +581,16 @@ class SurrogateObjective:
         every = np.ones(reals.size, dtype=bool)
         if np.any(lost):
             reason = "a coarse run of the accepted controls failed: not checked"
+        extrapolated = False
         if reason is None and not np.all(self._inside(controls, reals, coarse, every)):
-            # Evaluated by the simulator (outside = "simulator"): nothing of the surrogate's
-            # to check there, and the model refuses to predict it.
-            reason = "the accepted controls lie outside the model's domain"
+            if self.outside == "surrogate":
+                # The surrogate answered these controls (the user's choice to extrapolate):
+                # exactly the steps a check must gate; the check records it.
+                extrapolated = True
+            else:
+                # Evaluated by the simulator (outside = "simulator"): nothing of the
+                # surrogate's to check there, and the model refuses to predict it.
+                reason = "the accepted controls lie outside the model's domain"
         if reason is not None:
             skipped = {
                 "epf_iteration": optimizer.epf_iteration,
@@ -575,6 +607,8 @@ class SurrogateObjective:
             "passed": result.passed,
             "failures": result.failures(),
         }
+        if extrapolated:
+            record["extrapolated"] = True
         self._record(record)
         logger.info(
             "surrogate_check",
@@ -893,6 +927,11 @@ class SurrogateObjective:
             "switched_to_simulator": self.switched,
             "objective_source": "simulator",
         }
+        if self.outside == "surrogate":
+            # Absent otherwise: such results keep their bytes.
+            updated["surrogate"]["extrapolated_evaluations"] = sum(
+                1 for row in read_evaluations(self.run_dir) if row.get(EXTRAPOLATED)
+            )
         if self.simulate_every:
             updated["surrogate"] |= {
                 "simulate_every": self.simulate_every,

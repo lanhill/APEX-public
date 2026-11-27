@@ -168,10 +168,10 @@ def test_gain_tapers_must_be_prepared_and_adaptive_needs_a_generator() -> None:
 
 def test_prior_taper_round_trips_through_export_and_restore() -> None:
     rng = np.random.default_rng(4)
-    original = PriorAdaptiveLocalization([5], taper="soft")
+    original = PriorAdaptiveLocalization([5], taper="soft", taper_storage="dense")
     original.prepare(rng.standard_normal((5, 20)), rng.standard_normal((3, 20)), [], rng)
 
-    restored = PriorAdaptiveLocalization([5], taper="soft")
+    restored = PriorAdaptiveLocalization([5], taper="soft", taper_storage="dense")
     restored.restore_state(original.export_state())
 
     assert restored.taper_matrix is not None
@@ -193,7 +193,7 @@ def test_a_hard_taper_with_unlocalized_rows_is_stored_as_bits_and_restored_bit_f
         [7, 6], taper="hard", unlocalized=["nn_params"], variable_names=["perm", "nn_params"]
     )
     original.prepare(rng.standard_normal((13, 30)), rng.standard_normal((11, 30)), [], rng)
-    assert original.taper_matrix is not None
+    assert original.prepared
     state = original.export_state()
     assert "taper" not in state
     assert "taper_rows" not in state
@@ -203,9 +203,9 @@ def test_a_hard_taper_with_unlocalized_rows_is_stored_as_bits_and_restored_bit_f
         [7, 6], taper="hard", unlocalized=["nn_params"], variable_names=["perm", "nn_params"]
     )
     restored.restore_state(state)
-    assert restored.taper_matrix is not None
-    assert _same_bits(restored.taper_matrix, original.taper_matrix)
-    assert np.all(restored.taper_matrix[7:] == 1.0)
+    assert restored.prepared
+    assert _same_bits(restored.dense_taper(), original.dense_taper())
+    assert np.all(restored.dense_taper()[7:] == 1.0)
 
 
 @pytest.mark.parametrize(
@@ -348,7 +348,7 @@ def test_the_fixed_threshold_defaults_to_three_over_root_n() -> None:
 
     assert loc._fixed_cutoff(100) == pytest.approx(0.3)
     expected = (np.abs(correlation(state, forecast)) > 3 / np.sqrt(100)).astype(float)
-    np.testing.assert_array_equal(loc.taper_matrix, expected)
+    np.testing.assert_array_equal(loc.dense_taper(), expected)
     assert expected[0].any()
 
 

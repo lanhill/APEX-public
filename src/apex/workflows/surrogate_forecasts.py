@@ -278,6 +278,11 @@ class SurrogateForecasting:
         gate = self.active.manifest.gate
         if gate is None:
             raise WorkflowError("the surrogate records no gate: it cannot be refitted")
+        if self.active.manifest.validation is not None:
+            # Validated by folds: every run of its build trained it,
+            # and its gate's runs are all of them (out of fold); none is held out of a refit,
+            # which is gated on its share of the new runs only.
+            return base, []
         return base, list(gate.held_out)
 
     def refit(
@@ -348,6 +353,14 @@ class SurrogateForecasting:
             calibration_ids=base.calibration_ids,
         )
         held_ids = set(held) | {new_ids[int(j)] for j in order[:n_held]}
+        if not held_ids:
+            # A model validated by folds holds no run out of a refit, and one checked member
+            # gives none to hold out: there would be nothing to gate the refit on.
+            raise WorkflowError(
+                f"iteration {iteration}: the surrogate was validated by folds and only {n} "
+                "checked member(s) came back: a refit needs at least 2 to hold one out of "
+                "its fit and gate it (raise [surrogate] check_members)"
+            )
         held_positions = [p for p, r in enumerate(combined.run_ids) if r in held_ids]
         train_positions = [p for p, r in enumerate(combined.run_ids) if r not in held_ids]
         manifest = self.active.manifest

@@ -85,7 +85,7 @@ from apex.core.errors import WorkflowError
 from apex.domain.results import IterationRecord
 
 #: Version of new runs' configuration snapshots (see :meth:`RunDirectory.snapshot_version`).
-SNAPSHOT_VERSION = 6
+SNAPSHOT_VERSION = 7
 
 #: Where a member's forecast came: the simulator, or a surrogate.
 SIMULATOR, SURROGATE = "simulator", "surrogate"
@@ -225,6 +225,9 @@ class RunDirectory:
         Version 6 (2026-11-01): ``[surrogate]``: saved ensembles may hold
         ``forecast_source`` and ``surrogate_id``; older ones were forecast by the simulator
         (:func:`upgrade_iterate`).
+        Version 7 (2026-11-27): the prior adaptive localization keeps its taper packed or
+        recomputed and forms the gain in blocks by default (``taper_storage``,
+        ``block_rows``); older snapshots keep the dense, whole computation.
         """
         marker = self.path / "snapshot_version"
         return int(marker.read_text().strip()) if marker.exists() else 1

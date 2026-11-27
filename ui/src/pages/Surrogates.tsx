@@ -164,7 +164,10 @@ function SurrogateView({ summary: s, job, path }: { summary: SurrogateBuildSumma
         </dd>
         <dt>Design</dt>
         <dd>
-          <code>{s.plan}</code>: {s.training_runs} training and {s.held_out_runs} held-out runs
+          <code>{s.plan}</code>:{" "}
+          {s.validation
+            ? `${s.training_runs} training runs, validated by ${s.validation.folds} folds`
+            : `${s.training_runs} training and ${s.held_out_runs} held-out runs`}
           {s.coarse_only_runs ? `, ${s.coarse_only_runs} on the coarse stack only` : ""}
         </dd>
         <dt>Runs</dt>
@@ -202,7 +205,14 @@ function SurrogateView({ summary: s, job, path }: { summary: SurrogateBuildSumma
       {gate && (
         <>
           <h2>Gate</h2>
-          <p className="muted">On the {gate.held_out.length} held-out runs, never fitted on. Runs use the model only if it passed.</p>
+          {s.validation ? (
+            <p className="muted">
+              On every run's out-of-fold prediction ({s.validation.folds} folds), pooled. {s.validation.note}. Runs
+              use the model only if it passed.
+            </p>
+          ) : (
+            <p className="muted">On the {gate.held_out.length} held-out runs, never fitted on. Runs use the model only if it passed.</p>
+          )}
           <div className="scroll">
             <table>
               <thead>

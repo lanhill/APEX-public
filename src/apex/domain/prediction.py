@@ -183,12 +183,13 @@ class PredictionSurrogateSection(_Strict):
     @field_validator("outside", mode="before")
     @classmethod
     def _no_extrapolation(cls, value: object) -> object:
-        # outside = "surrogate" (extrapolation by the user's explicit choice) is a history
-        # match's option only: said so, rather than pydantic's list of the allowed values.
+        # outside = "surrogate" (extrapolation by the user's explicit choice) is offered in
+        # history matching and optimization, not in predictions: said so, rather than
+        # pydantic's list of the allowed values.
         if value == "surrogate":
             raise ValueError(
-                'outside = "surrogate" (extrapolating beyond the validated domain) is offered '
-                'only in history matching; here give "stop" or "simulator"'
+                'outside = "surrogate" (extrapolating beyond the validated domain) is not '
+                'offered in predictions; here give "stop" or "simulator"'
             )
         return value
 

@@ -275,7 +275,8 @@ def test_esmda_with_prior_taper_localizes_the_gain() -> None:
     predicted = np.tanh(rng.standard_normal((9, 12)) @ state)
     perturbed = predicted.mean(axis=1, keepdims=True) + rng.standard_normal((9, 20))
     error = DataErrorCovariance.diagonal(rng.uniform(0.1, 0.5, 9))
-    local = PriorAdaptiveLocalization([12], taper="soft")
+    # Dense: the test sets the taper itself below.
+    local = PriorAdaptiveLocalization([12], taper="soft", taper_storage="dense", block_rows=0)
     local.prepare(state, predicted, [], rng)
     strategy = ApproxUpdate(energy=1.0, localization=local)
 

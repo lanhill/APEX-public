@@ -36,9 +36,13 @@ def surrogate_plan_lines(plan: SurrogateBuildPlan) -> list[str]:
         runs += f", {plan.coarse_only:,} of them coarse-only"
     if plan.calibration and plan.plan != "run":
         runs += f", {plan.calibration:,} of them for the spread's calibration"
+    runs_text = (
+        f"{plan.training} training and {plan.held_out} held-out runs"
+        if plan.folds is None
+        else f"{plan.training} training runs, validated by {plan.folds} folds"
+    )
     lines = [
-        f"surrogate {plan.name}: {plan.model} on a {plan.plan} design of {plan.training} "
-        f"training and {plan.held_out} held-out runs",
+        f"surrogate {plan.name}: {plan.model} on a {plan.plan} design of {runs_text}",
         f"  simulator runs: {runs} ({plan.simulator}, executor {plan.executor})",
         f"  keys: {plan.keys} ({', '.join(plan.datatypes[:6])}"
         + (", ..." if len(plan.datatypes) > 6 else "")
@@ -87,9 +91,14 @@ def _summary_lines(path: Path, summary: SurrogateBuildSummary) -> list[str]:
             f"{path}: stopped with {summary.pending} run(s) to go; continue with "
             f"`apex surrogate build --resume {path}`"
         ]
+    folds = summary.validation
+    gated = (
+        f"gated on {summary.held_out_runs}"
+        if folds is None
+        else f"its procedure gated by {folds.folds}-fold cross-validation"
+    )
     lines = [
-        f"{path}: {summary.plugin} fitted on {summary.training_runs} runs, gated on "
-        f"{summary.held_out_runs}"
+        f"{path}: {summary.plugin} fitted on {summary.training_runs} runs, {gated}"
         + (f" ({len(summary.failed)} failed)" if summary.failed else "")
         + (
             f", with {summary.coarse_only_runs} coarse-only runs"
@@ -105,6 +114,14 @@ def _summary_lines(path: Path, summary: SurrogateBuildSummary) -> list[str]:
     if summary.gate is not None:
         lines += _gate_lines(summary.gate)
         lines.append(f"gate {'passed' if summary.gate.passed else 'FAILED'}")
+    if folds is not None:
+        for fold in folds.per_fold:
+            errors = ", ".join(
+                f"{d.datatype} {'not finite' if d.error is None else format(d.error, '.4g')}"
+                for d in fold.gate.datatypes
+            )
+            lines.append(f"  fold {fold.fold} ({len(fold.runs)} runs): {errors}")
+        lines.append(f"note: {folds.note}")
     if summary.model is not None:
         lines.append(f"model: {path / summary.model} (identity {summary.identity})")
     return lines

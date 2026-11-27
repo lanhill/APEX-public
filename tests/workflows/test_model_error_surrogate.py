@@ -933,14 +933,16 @@ def test_the_plan_says_members_outside_are_extrapolated(built: Path) -> None:
 
 
 def test_predictions_and_optimizations_refuse_extrapolation_by_name() -> None:
-    """outside = "surrogate" is a history match's option: a prediction's or an optimization's
-    [surrogate] refuses it saying so."""
+    """outside = "surrogate" is refused by a prediction's [surrogate], saying so; an
+    optimization's accepts it since 2026-11-27 (the user's choice to extrapolate, marked and
+    counted: test_surrogate_optimization)."""
     import pydantic
 
     from apex.domain.optimization import OptimizationSurrogateSection
     from apex.domain.prediction import PredictionSurrogateSection
 
-    for section in (PredictionSurrogateSection, OptimizationSurrogateSection):
-        with pytest.raises(pydantic.ValidationError, match="only in history matching"):
-            section.model_validate({"model_file": "m.json", "outside": "surrogate"})
-        section.model_validate({"model_file": "m.json", "outside": "simulator"})
+    with pytest.raises(pydantic.ValidationError, match="not offered in predictions"):
+        PredictionSurrogateSection.model_validate({"model_file": "m.json", "outside": "surrogate"})
+    PredictionSurrogateSection.model_validate({"model_file": "m.json", "outside": "simulator"})
+    for outside in ("surrogate", "simulator"):
+        OptimizationSurrogateSection.model_validate({"model_file": "m.json", "outside": outside})

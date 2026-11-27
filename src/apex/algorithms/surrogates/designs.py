@@ -3,7 +3,9 @@
 Pure functions, drawing only from the generator they are given (the build's stream
 ``design``). Every design has training runs and held-out runs, and **the held-out runs are
 drawn first**: for a given seed they stay the same whatever the number of training runs, so
-gates of designs of different sizes compare like with like.
+gates of designs of different sizes compare like with like. A build validated by folds
+has no held-out runs (``n_held_out = 0``): nothing is drawn for them,
+and its held-out blocks are ``(size, 0)``.
 
 - ``lhs``: a Latin hypercube over a box of inputs (McKay, Beckman & Conover 1979,
   *Technometrics* 21(2), 239-245): each coordinate's range is cut into ``n`` equal strata and
@@ -110,11 +112,18 @@ class Design:
 
 
 def _counts(n_training: int, n_held_out: int) -> None:
-    if n_training < 1 or n_held_out < 1:
+    # No held-out runs only for a build validated by folds (its configuration says so; the
+    # gate then judges out-of-fold predictions of the training runs).
+    if n_training < 1 or n_held_out < 0:
         raise ValueError(
-            f"a design needs at least one training and one held-out run, got {n_training} "
-            f"and {n_held_out}"
+            f"a design needs at least one training run and no negative count of held-out "
+            f"runs, got {n_training} and {n_held_out}"
         )
+
+
+def _empty(sizes: Mapping[str, int]) -> dict[str, NDArray[np.float64]]:
+    """Return ``{variable: (size, 0)}``: the held-out blocks of a design without any."""
+    return {name: np.zeros((size, 0)) for name, size in sizes.items()}
 
 
 def latin_hypercube(
@@ -189,7 +198,11 @@ def lhs_design(
     if not sizes:
         raise ValueError("a Latin-hypercube design needs at least one variable")
     lower, upper = np.concatenate(lows), np.concatenate(highs)
-    held_out = latin_hypercube(lower, upper, n_held_out, rng)
+    held_out = (
+        latin_hypercube(lower, upper, n_held_out, rng)
+        if n_held_out > 0
+        else np.zeros((lower.size, 0))
+    )
     training = latin_hypercube(lower, upper, n_training, rng)
     coarse_only = (
         _split(latin_hypercube(lower, upper, n_coarse_only, rng), sizes)
@@ -267,7 +280,8 @@ def sampled_design(
 ) -> Design:
     """Return a design drawn from a generator, e.g. the case's prior (plan ``prior``).
 
-    ``draw(n_held_out, rng)`` is called first, then ``draw(n_training, rng)``, then (if
+    ``draw(n_held_out, rng)`` is called first (not at all when 0), then
+    ``draw(n_training, rng)``, then (if
     ``n_coarse_only > 0``) ``draw(n_coarse_only, rng)``, then (if ``n_calibration > 0``)
     ``draw(n_calibration, rng)``.
 
@@ -277,8 +291,12 @@ def sampled_design(
         If a held-out run repeats a training run (e.g. a generator that ignores ``rng``).
     """
     _counts(n_training, n_held_out)
-    held_out = _checked(draw(n_held_out, rng), n_held_out, "the drawn held-out input")
-    training = _checked(draw(n_training, rng), n_training, "the drawn training input")
+    if n_held_out > 0:
+        held_out = _checked(draw(n_held_out, rng), n_held_out, "the drawn held-out input")
+        training = _checked(draw(n_training, rng), n_training, "the drawn training input")
+    else:
+        training = _checked(draw(n_training, rng), n_training, "the drawn training input")
+        held_out = _empty({name: array.shape[0] for name, array in training.items()})
     if set(held_out) != set(training):
         raise ValueError("the draws gave different variables")
     _refuse_repeats(held_out, training)

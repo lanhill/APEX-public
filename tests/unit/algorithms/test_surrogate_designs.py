@@ -84,8 +84,32 @@ def test_an_ensemble_design_takes_disjoint_columns_reproducibly() -> None:
     assert len(again.training_columns) == 7
     with pytest.raises(ValueError, match="fewer than"):
         ensemble_design("file", ensemble, 3, np.random.default_rng(9), n_training=8)
-    with pytest.raises(ValueError, match="at least one"):
-        lhs_design({"x": (np.zeros(1), np.ones(1))}, 5, 0, np.random.default_rng(0))
+    with pytest.raises(ValueError, match="at least one training run"):
+        lhs_design({"x": (np.zeros(1), np.ones(1))}, 0, 1, np.random.default_rng(0))
+
+
+def test_a_design_validated_by_folds_has_no_held_out_runs() -> None:
+    """``n_held_out = 0`` draws nothing for them (empty blocks)."""
+    box = {"x": (np.zeros(2), np.ones(2))}
+    design = lhs_design(box, 5, 0, np.random.default_rng(0))
+    assert design.held_out["x"].shape == (2, 0)
+    # The training hypercube is the first draw, as a design of no held-out runs should be.
+    np.testing.assert_array_equal(
+        design.training["x"], latin_hypercube(np.zeros(2), np.ones(2), 5, np.random.default_rng(0))
+    )
+    asked: list[int] = []
+
+    def draw(n: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
+        asked.append(n)
+        return {"x": rng.standard_normal((2, n))}
+
+    sampled = sampled_design(draw, 4, 0, np.random.default_rng(1))
+    assert asked == [4]
+    assert sampled.held_out["x"].shape == (2, 0)
+    ensemble = {"x": np.arange(12.0).reshape(2, 6)}
+    columns = ensemble_design("file", ensemble, 0, np.random.default_rng(2), n_training=6)
+    assert columns.held_out_columns == ()
+    assert sorted(columns.training_columns or ()) == list(range(6))
 
 
 def test_held_out_runs_never_repeat_training_runs() -> None:

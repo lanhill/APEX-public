@@ -110,6 +110,7 @@ from apex.domain.optimization import OptimizationConfig
 from apex.domain.prediction import PredictionSurrogateSection
 from apex.domain.state import StateLayout, StateVariable
 from apex.domain.surrogate import (
+    FOLDS_NOTE,
     BuildCost,
     CoarseSection,
     DomainSummary,
@@ -154,6 +155,7 @@ from apex.storage.surrogate_directory import (
     CHECK,
     CHECK_FINGERPRINT,
     FIELDS_CONNECTIVITY,
+    FOLDS_RECORD,
     GATE,
     MODEL,
     SNAPSHOTS,
@@ -173,11 +175,15 @@ from apex.workflows.parameterization import PropertyMap, parameterized
 from apex.workflows.prediction import PredictionSurrogate
 from apex.workflows.simulated_objective import SimulatedObjective
 from apex.workflows.surrogate import (
+    FitOutcome,
+    FoldPrediction,
     MembersOutcome,
     check_success,
     column_objectives,
     early_data,
     fit_and_gate,
+    fit_folds_and_gate,
+    fold_split,
     gated_rows,
     run_members,
 )
@@ -276,7 +282,9 @@ def load_surrogate(path: Path, *, identity: str | None = None) -> LoadedSurrogat
 # =================================================================== the workflow (§7)
 
 #: The build's random streams, spawned from ``[surrogate] seed`` in this order.
-BUILD_STREAMS = ("design", "surrogate", "design_fit")
+#: ``folds`` (appended last, so the others' seeds are unchanged) is the parent of the
+#: per-fold fit generators of a build validated by folds (:func:`fold_stream`).
+BUILD_STREAMS = ("design", "surrogate", "design_fit", "folds")
 
 #: The build's subfolder of the coarse stack's runs.
 COARSE = "coarse"
@@ -295,6 +303,18 @@ def build_streams(seed: int) -> dict[str, np.random.Generator]:
         name: np.random.default_rng(child)
         for name, child in zip(BUILD_STREAMS, children, strict=True)
     }
+
+
+def fold_stream(seed: int, fold: int) -> np.random.Generator:
+    """Return fold ``fold``'s fit generator in a build validated by folds.
+
+    The ``fold``-th child of the build's stream ``folds`` (``SeedSequence(seed)``'s child at
+    its index in :data:`BUILD_STREAMS`, spawned ``fold + 1`` times): each fold's draws are
+    its own, whatever folds were fitted before, so a fold fitted on resume is the one an
+    uninterrupted build fits.
+    """
+    index = BUILD_STREAMS.index("folds")
+    return np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(index, fold)))
 
 
 def load_surrogate_config(path: Path, *, place: bool = True) -> SurrogateConfig:
@@ -2217,6 +2237,11 @@ def fingerprint_parts(
     # (:func:`_reconciled_design`), so the fingerprint needs no plugin (a complete build is
     # found without it) and builds without calibration runs keep theirs.
     design.pop("calibration", None)
+    # A validation by folds changes no run: its K and split's seed are the fit's
+    # (:func:`_fit_fingerprint`), so changing them refits on the runs made. (Absent for a
+    # build gated on held-out runs; the mode itself stays, with its held_out = 0.)
+    design.pop("folds", None)
+    design.pop("fold_seed", None)
     if not design.get("options"):
         # Absent before the plans' options existed: builds keep their digest.
         design.pop("options", None)
@@ -2453,9 +2478,37 @@ def _fingerprint(parts: Mapping[str, str]) -> str:
 def _fit_fingerprint(config: SurrogateConfig) -> str:
     # Files the options name count by their content (an edited case file refits); options
     # naming no file are unchanged, so existing builds keep their fingerprints.
-    return _digest({
+    document: dict[str, object] = {
         "model": config.surrogate.model, "options": _with_contents(config.surrogate.options),
         "extent": config.surrogate.extent, "gate": json.loads(config.gate.model_dump_json()),
+    }  # fmt: skip
+    if config.design.validation == "folds":
+        # The folds: absent for a build gated on held-out runs, whose
+        # fingerprint keeps its bytes.
+        document["validation"] = {
+            "folds": config.design.n_folds, "fold_seed": _fold_seed(config)
+        }  # fmt: skip
+    return _digest(document)
+
+
+def _fold_seed(config: SurrogateConfig) -> int:
+    """Return the seed of a validation by folds' split (else ``[surrogate] seed``)."""
+    seed = config.design.fold_seed
+    return config.surrogate.seed if seed is None else seed
+
+
+def _fold_key(
+    config: SurrogateConfig, snapshots: SnapshotSet, fold: int, runs: Sequence[int]
+) -> str:
+    """Return what a fold's saved predictions were made of, as a digest.
+
+    The plugin and its options (files by content), the snapshots, the fold's runs and its
+    generator's seed: a fold saved under another key is fitted again.
+    """
+    return _digest({
+        "model": config.surrogate.model, "options": _with_contents(config.surrogate.options),
+        "snapshots": snapshots.digest(), "fold": fold, "runs": [int(r) for r in runs],
+        "seed": config.surrogate.seed,
     })  # fmt: skip
 
 
@@ -2510,6 +2563,11 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         # The extra runs' cost (or the calibration without them), stated wherever the plan is
         # read: apex validate, REST, the web UI, the assistant's tools and the planner.
         warnings.append(notice)
+    if config.design.validation == "folds":
+        # Stated wherever the plan is read: the verdict will be on the procedure.
+        warnings.append(
+            f"[design] validation = 'folds' ({config.design.n_folds} folds): {FOLDS_NOTE}"
+        )
     if config.design.plan == "lhs" and case.layout.n_state > 50:
         warnings.append(
             f"a Latin hypercube over {case.layout.n_state} state entries spreads few runs over "
@@ -2551,6 +2609,7 @@ def plan_build(config: SurrogateConfig) -> SurrogateBuildPlan:
         plan=config.design.plan,
         training=config.design.training,
         held_out=config.design.held_out,
+        folds=config.design.n_folds if config.design.validation == "folds" else None,
         simulator_runs=runs,
         coarse_only=config.design.coarse_only,
         calibration=counted.runs,
@@ -3423,12 +3482,15 @@ def _build(
         return BuildResult(directory.path, summary)
     failed_ids = sorted(failed)
     calibration = _calibration_snapshots(case, design, calibration_values)
-    held_out = _snapshot_set(case, design.held_out_ids, design.held_out, values,
-                             plan_provenance, failed_ids, coarse_values, coarse_only,
-                             calibration)  # fmt: skip
-    training = _snapshot_set(case, design.training_ids, design.training, values,
-                             plan_provenance, failed_ids, coarse_values, coarse_only,
-                             calibration)  # fmt: skip
+    held_out: SnapshotSet | None = None
+    training: SnapshotSet | None = None
+    if config.design.validation != "folds":  # folds: every run trains, none is held out
+        held_out = _snapshot_set(case, design.held_out_ids, design.held_out, values,
+                                 plan_provenance, failed_ids, coarse_values, coarse_only,
+                                 calibration)  # fmt: skip
+        training = _snapshot_set(case, design.training_ids, design.training, values,
+                                 plan_provenance, failed_ids, coarse_values, coarse_only,
+                                 calibration)  # fmt: skip
     # Every successful run, in id order: the snapshot set a refit starts from (phase 3).
     everything = _snapshot_set(
         case,
@@ -3444,12 +3506,28 @@ def _build(
         raise ConfigError(f"[surrogate] {section.model}: {error}") from error
     try:
         _hand_connectivity(model, directory)
-        fitted = fit_and_gate(
-            model, training, held_out, streams["surrogate"],
-            tolerances=config.gate.tolerances(), variances=case.variances,
-            kinds=config.gate.kinds, extent=section.extent, failed=failed_ids,
-            objective=case.objective_of(),
-        )  # fmt: skip
+        if config.design.validation == "folds":
+            folded = _fit_by_folds(config, directory, everything, model, streams["surrogate"],
+                                   case, failed_ids, stopped)  # fmt: skip
+            if folded is None:
+                # Stopped between folds: the folds done are saved, the resume fits the rest.
+                summary = _summary(config, design, case, failed, 0, simulator_runs).model_copy(
+                    update={"calibration_fallback": fallback}
+                )
+                directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
+                directory.write_state(complete=False)
+                logger.info("build stopped", extra={"event": "surrogate_stopped", "pending": 0})
+                return BuildResult(directory.path, summary)
+            fitted = folded
+        else:
+            assert held_out is not None
+            assert training is not None
+            fitted = fit_and_gate(
+                model, training, held_out, streams["surrogate"],
+                tolerances=config.gate.tolerances(), variances=case.variances,
+                kinds=config.gate.kinds, extent=section.extent, failed=failed_ids,
+                objective=case.objective_of(),
+            )  # fmt: skip
     except (TypeError, ValueError, ArithmeticError, LookupError, AttributeError) as error:
         # A plugin's own failure (an option of the wrong type, a shape it cannot take), named
         # with its options, never a traceback from inside the plugin.
@@ -3487,8 +3565,12 @@ def _build(
             for name, values in everything.inputs.items()
             if name in _control_inputs(case)
         },
+        validation=fitted.validation,
     )
     directory.write_json(GATE, json.loads(fitted.gate.model_dump_json()))
+    if fitted.validation is not None:
+        directory.write_json(FOLDS_RECORD, json.loads(fitted.validation.model_dump_json()))
+        directory.prune_folds(fitted.validation.folds)
     # A changed plugin or gate refits on the runs made: the configuration follows the model
     # once it is written (a refit that fails leaves the last model's configuration).
     directory.write_config(config.model_dump_json(indent=2))
@@ -3522,6 +3604,7 @@ def _build(
             extent=fitted.domain.extent, residual_bound=fitted.domain.residual_bound),
         "fit_seconds": fitted.fit_seconds, "prediction_seconds": fitted.prediction_seconds,
         "simulator_median_seconds": float(np.median(times)) if times else None,
+        "validation": fitted.validation,
     })  # fmt: skip
     directory.write_json(SUMMARY, json.loads(summary.model_dump_json()))
     directory.write_state(complete=True, fit_fingerprint=fit_key, identity=stored.identity)
@@ -3531,6 +3614,55 @@ def _build(
                "passed": fitted.gate.passed},
     )  # fmt: skip
     return BuildResult(directory.path, summary)
+
+
+def _fit_by_folds(
+    config: SurrogateConfig,
+    directory: SurrogateDirectory,
+    snapshots: SnapshotSet,
+    first: SurrogateModel,
+    rng: np.random.Generator,
+    case: SurrogateCase,
+    failed: Sequence[int],
+    stopped: Callable[[], bool] | None,
+) -> FitOutcome | None:
+    """Gate the plugin's fitting procedure by folds and fit the shipped model (rev. 6).
+
+    ``first`` is the plugin already created (its options checked); each fold and the shipped
+    model get a fresh one with the same options. Each fold's predictions are saved in the
+    build (``folds/fold_<k>.npz``, under :func:`_fold_key`), so a resume fits only the folds
+    not done. ``None`` if ``stopped`` ended it between folds.
+    """
+    section = config.surrogate
+    made = [first]
+
+    def factory() -> SurrogateModel:
+        # The first call takes the model already created; the others create their own.
+        if made:
+            return made.pop()
+        model = surrogate_models.create(section.model, **section.options)
+        _hand_connectivity(model, directory)
+        return model
+
+    split = fold_split(snapshots.run_ids, config.design.n_folds, _fold_seed(config))
+    keys = [_fold_key(config, snapshots, k, fold) for k, fold in enumerate(split)]
+
+    def saved(k: int) -> FoldPrediction | None:
+        found = directory.load_fold(k, keys[k])
+        return None if found is None else FoldPrediction(*found)
+
+    def save(k: int, prediction: FoldPrediction) -> None:
+        directory.save_fold(k, keys[k], prediction.predicted, prediction.fields,
+                            prediction.fit_seconds, prediction.prediction_seconds,
+                            prediction.residuals)  # fmt: skip
+
+    return fit_folds_and_gate(
+        factory, snapshots, split, rng, lambda k: fold_stream(section.seed, k),
+        fold_seed=_fold_seed(config), tolerances=config.gate.tolerances(),
+        variances=case.variances, kinds=config.gate.kinds, extent=section.extent,
+        failed=failed, objective=case.objective_of(), saved=saved, save=save,
+        stopped=stopped,
+    )  # fmt: skip
 
 
 def _simulator_files(case: HistoryMatchConfig | OptimizationConfig) -> dict[str, Path]:
@@ -4333,6 +4465,20 @@ def refuse_model(
                 f"{model.model.early_until}, and every observation of this run lies up to "
                 "that date: the simulator's early runs would be the whole forecast"
             )
+    if (
+        section.on_check_failure == "refit"
+        and getattr(manifest, "validation", None) is not None
+        and isinstance(section.check_members, int)
+        and section.check_members < 2
+    ):
+        # Validated by folds: a refit keeps none of the build's runs
+        # out, so it is gated on a share of the checked runs only, and one leaves none.
+        raise ConfigError(
+            f'[surrogate] on_check_failure = "refit": the surrogate {name} was validated by '
+            "folds, so a refit is gated only on checked runs it holds out, and "
+            f"check_members = {section.check_members} leaves none; raise check_members to at "
+            'least 2, or use "stop" or "simulator"'
+        )
     if section.on_check_failure == "refit" and getattr(model.model, "uses_gradients", False):
         # A run's checks are plain simulator runs (no sensitivities): a refit set would have
         # no gradients for such a model to learn from.
@@ -5070,6 +5216,7 @@ def optimization_surrogate(
         else manifest.gate.tolerances
     )
     kinds = {d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None}
+    extrapolate = config.surrogate is not None and config.surrogate.outside == "surrogate"
 
     def surrogate_of(found: LoadedSurrogate) -> SurrogateSimulator:
         return SurrogateSimulator(
@@ -5077,7 +5224,9 @@ def optimization_surrogate(
             found.domain,
             identity=found.identity,
             loader=functools.partial(fitted_model, str(found.path.resolve()), found.identity),
-            guard=refuse_outside,
+            # outside = "surrogate" (the user's explicit choice): members outside the domain
+            # are answered (the workflow marks and counts them); keys outside are refused.
+            guard=refuse_keys_outside if extrapolate else refuse_outside,
         )
 
     def mapped(simulator: Simulator) -> Simulator:

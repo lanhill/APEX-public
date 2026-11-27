@@ -969,6 +969,8 @@ def _validate_surrogate(
             "design": plan.plan,
             "training": plan.training,
             "held_out": plan.held_out,
+            # Validated by folds: K; absent when gated on held-out runs.
+            **({} if plan.folds is None else {"folds": plan.folds}),
             "simulator_runs": plan.simulator_runs,
             "simulator": plan.simulator,
             "keys": plan.keys,

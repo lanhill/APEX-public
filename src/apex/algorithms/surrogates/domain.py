@@ -193,6 +193,7 @@ def domain_from_coordinates(
     field_times: Sequence[str] = (),
     time_range: tuple[str, str] | None = None,
     input_scale: float = 0.0,
+    residual_floor: float = 0.0,
 ) -> TrainingDomain:
     """Return the domain of the validated points.
 
@@ -213,6 +214,11 @@ def domain_from_coordinates(
     input_scale
         The inputs' magnitude (the largest norm of an input column), which scales the
         residual's round-off slack.
+    residual_floor
+        A lower bound of the residual bound (>= 0; default 0, none): out-of-sample residuals
+        of the same points under other fits of the model, when every point is in-sample (a
+        build validated by folds), whose in-sample residuals alone
+        would bound the domain too tightly.
 
     Raises
     ------
@@ -232,7 +238,9 @@ def domain_from_coordinates(
         raise ValueError("projection residuals must be finite and >= 0")
     lower = points.min(axis=-1)
     upper = points.max(axis=-1)
-    bound = float(residual.max())
+    if not (np.isfinite(residual_floor) and residual_floor >= 0):
+        raise ValueError(f"the residual floor must be finite and >= 0, got {residual_floor}")
+    bound = max(float(residual.max()), float(residual_floor))
     if time_range is None:
         time_range = _time_range([k.time for k in keys] + _dated(field_times))
     return TrainingDomain(
@@ -315,6 +323,7 @@ def training_domain(
     fields: Sequence[str] = (),
     field_times: Sequence[str] = (),
     time_range: tuple[str, str] | None = None,
+    residual_floor: float = 0.0,
 ) -> TrainingDomain:
     """Return a fitted model's validated domain: its coordinates of both sets of inputs.
 
@@ -322,6 +331,7 @@ def training_domain(
     model's own (:attr:`SurrogateModel.keys`). ``coarse``: the two sets' coarse forecasts,
     for a coarse-corrected model (:func:`model_coordinates`). An empty ``held_out`` mapping:
     no held-out runs (a refit gated by later checks instead).
+    ``residual_floor``: :func:`domain_from_coordinates`'s.
     """
     coordinates, residuals = [], []
     pairs = coarse if coarse is not None else (None, None)
@@ -340,6 +350,7 @@ def training_domain(
         field_times=field_times,
         time_range=time_range,
         input_scale=_input_scale(training, held_out),
+        residual_floor=residual_floor,
     )
 
 

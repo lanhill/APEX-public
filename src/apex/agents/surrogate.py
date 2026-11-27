@@ -98,6 +98,15 @@ class SurrogateFacts(BaseModel):
         default=0, description="Coarse runs left when a build stopped in its coarse stage."
     )
     gate_passed: bool | None = Field(description="The gate's verdict; none before the fit.")
+    folds: int | None = Field(
+        default=None,
+        description="Validated by K folds: K. The gate is then the "
+        "pooled out-of-fold verdict on the fitting procedure, and the shipped model, fitted "
+        "on every run, was not itself gated. None: gated on held-out runs.",
+    )
+    validation_note: str | None = Field(
+        default=None, description="With folds: what the gate judged, as the build states it."
+    )
     gate: list[DatatypeFact] = Field(default_factory=list)
     gate_failures: list[str] = Field(default_factory=list)
     rank_correlation: float | None = Field(
@@ -219,6 +228,10 @@ def surrogate_facts(path: Path, job: dict[str, object] | None) -> SurrogateFacts
         coarse_runs=coarse_finished,
         coarse_pending=coarse_pending,
         gate_passed=None if gate is None else gate.passed,
+        folds=config.design.n_folds if config.design.validation == "folds" else None,
+        validation_note=None
+        if summary is None or summary.validation is None
+        else summary.validation.note,
         gate=[]
         if gate is None
         else [
@@ -293,7 +306,13 @@ def surrogate_rules(facts: SurrogateFacts, thresholds: MonitorSection) -> Monito
     if facts.gate_passed is False:
         findings.append(Finding(
             code="gate_failed", severity="critical",
-            evidence="the gate on the held-out runs failed, so runs refuse the model: "
+            evidence=(
+                "the gate on the held-out runs failed"
+                if facts.folds is None
+                else f"the pooled out-of-fold gate of its fitting procedure ({facts.folds} "
+                "folds) failed"
+            )
+            + ", so runs refuse the model: "
             + "; ".join(facts.gate_failures),
         ))  # fmt: skip
     if facts.last_check is not None and not facts.last_check.passed:
@@ -367,9 +386,11 @@ def reconcile(model: MonitorReport, rules: MonitorReport) -> tuple[MonitorReport
 
 SYSTEM = (
     "You monitor an APEX surrogate build: full simulator runs of a design, a surrogate "
-    "model fitted on the training runs and gated on held-out ones, and checks of the model "
-    "on new runs. A model is used by runs only if its gate passed and its latest check did "
-    "not fail. You get facts computed from the build's folder and the report of threshold "
+    "model fitted on the training runs and gated on held-out ones (or, when the facts give "
+    "folds, fitted on every run with its fitting procedure gated by K-fold cross-validation: "
+    "the model itself was not gated; say so), and checks of the model on new runs. A model "
+    "is used by runs only if its gate passed and its latest check did not fail. You get "
+    "facts computed from the build's folder and the report of threshold "
     "rules. Decide its status. The facts are complete: answer from them, cite numbers as "
     "evidence, and keep every finding of the rules unless the facts contradict it. "
     "Recommend continue, investigate or none (this monitor never stops a build)."
@@ -554,9 +575,15 @@ def report_template(report: SurrogateReportFacts) -> NarrativeReport:
             if f.rank_correlation is None
             else f"\n\nThe held-out objectives' rank correlation: {_fmt(f.rank_correlation)}."
         )
+        where = (
+            "On the held-out runs, never fitted on:"
+            if f.folds is None
+            else f"On every run's out-of-fold prediction ({f.folds} folds), pooled: "
+            f"{f.validation_note}."
+        )
         sections.append(Section(
             heading="Gate",
-            text="On the held-out runs, never fitted on:\n\n| Datatype | Measure | Error | "
+            text=f"{where}\n\n| Datatype | Measure | Error | "
             f"Tolerance | Passed |\n|---|---|---|---|---|\n{rows}{rank}",
         ))  # fmt: skip
     if f.last_check is not None:

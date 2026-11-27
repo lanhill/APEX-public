@@ -16,6 +16,12 @@ Two steps, each resumable:
 
 A fit draws only from its stream and every input is read back from the build's files, so a
 resumed build writes model files identical, byte for byte, to an uninterrupted one's.
+
+A build validated by folds (``[design] validation = "folds"``) takes
+:func:`fit_folds_and_gate` instead of step 2: K models, each fitted on all folds but one and
+predicting that fold, give every run an out-of-fold prediction; the gate is evaluated once
+over all of them, and the shipped model is fitted on every run. Each fold's predictions are
+saved as it ends, so a resume fits only the folds not done.
 """
 
 import logging
@@ -27,7 +33,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from apex.algorithms.surrogates.domain import training_domain
+from apex.algorithms.surrogates.domain import model_coordinates, training_domain
 from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.progress import GuardedProgress, NullProgress, ProgressReporter
@@ -40,7 +46,10 @@ from apex.core.surrogates import (
 )
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import (
+    FOLDS_NOTE,
     DomainExtent,
+    FoldGate,
+    FoldValidation,
     GateResult,
     GateTolerances,
     QuantityKind,
@@ -323,6 +332,10 @@ class FitOutcome:
         The fit's generator state before the fit.
     fit_seconds, prediction_seconds
         The fit's time, and one member's prediction time (averaged over the held-out runs).
+    validation
+        A build validated by folds: its folds and each fold's measures (``gate`` is then
+        the pooled out-of-fold verdict, ``predicted`` every run's out-of-fold prediction);
+        ``None`` for a gate on held-out runs.
     """
 
     model: SurrogateModel
@@ -332,6 +345,7 @@ class FitOutcome:
     stream_state: dict[str, Any]
     fit_seconds: float
     prediction_seconds: float
+    validation: FoldValidation | None = None
 
 
 def column_objectives(
@@ -439,55 +453,129 @@ def fit_and_gate(
     fit_seconds = clock() - began
     if tuple(model.keys) != training.keys:
         raise WorkflowError("the surrogate answers other keys than it was fitted on")
-    coarse: tuple[NDArray[np.float64], NDArray[np.float64]] | None = None
-    if (
-        isinstance(model, CoarseCorrectedSurrogate)
-        and training.coarse_outputs is not None
-        and held_out.coarse_outputs is not None
-    ):
-        coarse = (training.coarse_outputs, held_out.coarse_outputs)
-    elif isinstance(model, EarlyStartSurrogate):
-        # A run's early data are its own values up to the early date.
-        coarse = (early_data(model, training), early_data(model, held_out))
-    names = tuple(sorted(training.fields))
-    if names and not isinstance(model, FieldSurrogate):
-        raise WorkflowError(
-            "the snapshots hold state fields, but the surrogate predicts none (predict_fields)"
-        )
+    coarse = _coarse_pair(model, training, held_out)
+    names = _field_names(model, training)
     domain = training_domain(
         model, training.inputs, held_out.inputs, coarse=coarse, extent=extent,
         fields=names, field_times=training.field_times if names else (),
     )  # fmt: skip
     began = clock()
+    predicted, predicted_fields = _predict_runs(model, training, held_out, coarse)
+    fields = (
+        None if not names
+        else {n: (predicted_fields[n], held_out.fields[n]) for n in names}
+    )  # fmt: skip
+    prediction_seconds = (clock() - began) / max(held_out.n_runs, 1)
+    verdict = _gate_runs(
+        model, predicted, held_out.outputs, training.keys, held_out.run_ids,
+        tolerances=tolerances, variances=variances, kinds=kinds, fields=fields,
+        failed=failed, objective=objective,
+    )  # fmt: skip
+    logger.info(
+        "surrogate gated",
+        extra={"event": "surrogate_gate", "passed": verdict.passed,
+               "failures": verdict.failures()},
+    )  # fmt: skip
+    return FitOutcome(model, domain, verdict, predicted, state, fit_seconds, prediction_seconds)
+
+
+def _coarse_pair(
+    model: SurrogateModel, training: SnapshotSet, held_out: SnapshotSet
+) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    """Return the two sets' coarse forecasts a model's coordinates and prediction take.
+
+    A coarse-corrected model's coarse runs; an early-start model's early data (a run's
+    own values up to the early date); ``None`` for any other model.
+    """
+    if (
+        isinstance(model, CoarseCorrectedSurrogate)
+        and training.coarse_outputs is not None
+        and held_out.coarse_outputs is not None
+    ):
+        return training.coarse_outputs, held_out.coarse_outputs
+    if isinstance(model, EarlyStartSurrogate):
+        return early_data(model, training), early_data(model, held_out)
+    return None
+
+
+def _field_names(model: SurrogateModel, training: SnapshotSet) -> tuple[str, ...]:
+    """Return the state fields the snapshots hold, which the model must predict.
+
+    Raises
+    ------
+    WorkflowError
+        If the snapshots hold fields and the model predicts none.
+    """
+    names = tuple(sorted(training.fields))
+    if names and not isinstance(model, FieldSurrogate):
+        raise WorkflowError(
+            "the snapshots hold state fields, but the surrogate predicts none (predict_fields)"
+        )
+    return names
+
+
+def _predict_runs(
+    model: SurrogateModel,
+    training: SnapshotSet,
+    runs: SnapshotSet,
+    coarse: tuple[NDArray[np.float64], NDArray[np.float64]] | None,
+) -> tuple[NDArray[np.float64], dict[str, NDArray[np.float64]]]:
+    """Return a fitted model's prediction of ``runs``: ``(n_keys, n)`` and its fields.
+
+    The fields are ``{name: (n_cells, n_times, n)}`` for the snapshots' fields, none
+    without them. ``coarse``: :func:`_coarse_pair`'s, its second half ``runs``'.
+    """
     if isinstance(model, CoarseCorrectedSurrogate) and coarse is not None:
         predicted = np.ascontiguousarray(
-            model.predict_corrected(held_out.inputs, coarse[1], training.keys)
+            model.predict_corrected(runs.inputs, coarse[1], training.keys)
         )
     elif isinstance(model, EarlyStartSurrogate) and coarse is not None:
         predicted = np.ascontiguousarray(
-            model.predict_from_early(held_out.inputs, coarse[1], training.keys)
+            model.predict_from_early(runs.inputs, coarse[1], training.keys)
         )
     else:
-        predicted = np.ascontiguousarray(model.predict(held_out.inputs, training.keys))
-    fields = None
+        predicted = np.ascontiguousarray(model.predict(runs.inputs, training.keys))
+    names = _field_names(model, training)
+    fields: dict[str, NDArray[np.float64]] = {}
     if names:
         # The state fields gated by relative errors (pressure on its change).
         assert isinstance(model, FieldSurrogate)
-        predicted_fields = model.predict_fields(held_out.inputs, names, training.field_times)
-        fields = {n: (np.asarray(predicted_fields[n]), held_out.fields[n]) for n in names}
-    prediction_seconds = (clock() - began) / max(held_out.n_runs, 1)
+        found = model.predict_fields(runs.inputs, names, training.field_times)
+        fields = {n: np.asarray(found[n]) for n in names}
+    return predicted, fields
+
+
+def _gate_runs(
+    model: SurrogateModel,
+    predicted: NDArray[np.float64],
+    reference: NDArray[np.float64],
+    keys: tuple[DataKey, ...],
+    run_ids: Sequence[int],
+    *,
+    tolerances: GateTolerances,
+    variances: NDArray[np.float64] | None,
+    kinds: Mapping[str, QuantityKind] | None,
+    fields: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None,
+    failed: Sequence[int],
+    objective: Callable[[NDArray[np.float64]], NDArray[np.float64]] | None,
+) -> GateResult:
+    """Gate predictions ``(n_keys, n)`` of runs against their simulator values ``reference``.
+
+    The rows :func:`gated_rows` names (an early-start model's later keys), and the runs'
+    objectives by rank when ``objective`` is given.
+    """
     objectives = None
     if objective is not None:
         objectives = (
             column_objectives(objective, predicted),
-            column_objectives(objective, held_out.outputs),
+            column_objectives(objective, reference),
         )
-    rows = gated_rows(model, training.keys)
-    verdict = gate(
+    rows = gated_rows(model, keys)
+    return gate(
         predicted if rows is None else np.ascontiguousarray(predicted[rows]),
-        held_out.outputs if rows is None else np.ascontiguousarray(held_out.outputs[rows]),
-        training.keys if rows is None else tuple(training.keys[r] for r in rows),
-        held_out.run_ids,
+        reference if rows is None else np.ascontiguousarray(reference[rows]),
+        keys if rows is None else tuple(keys[r] for r in rows),
+        run_ids,
         tolerances=tolerances,
         variances=variances if variances is None or rows is None else variances[rows],
         kinds=kinds,
@@ -495,9 +583,236 @@ def fit_and_gate(
         failed=failed,
         objectives=objectives,
     )
+
+
+# =========================================================== validation by folds (rev. 6)
+
+
+def fold_split(run_ids: Sequence[int], folds: int, seed: int) -> list[tuple[int, ...]]:
+    """Return the K folds of a build validated by folds: run ids, each fold in id order.
+
+    The runs, in id order, are permuted by ``numpy.random.default_rng(seed)`` and the
+    permutation cut by ``numpy.array_split`` into ``folds`` near-equal parts (the first
+    ``n mod K`` one run larger): the usual K-fold split, fixed by a seed of its own, so a
+    split made elsewhere as ``array_split(default_rng(seed).permutation(n), K)`` over runs
+    ``0..n-1`` is reproduced when the runs are those.
+
+    Raises
+    ------
+    WorkflowError
+        If there are fewer than two folds, or fewer runs than folds.
+    """
+    ordered = sorted(int(r) for r in run_ids)
+    if folds < 2:
+        raise WorkflowError(f"a validation by folds needs at least 2 folds, got {folds}")
+    if len(ordered) < folds:
+        raise WorkflowError(
+            f"{folds} folds need at least {folds} successful runs, got {len(ordered)}: "
+            "lower [design] folds, or add training runs"
+        )
+    permutation = np.random.default_rng(seed).permutation(len(ordered))
+    return [
+        tuple(sorted(ordered[int(i)] for i in part)) for part in np.array_split(permutation, folds)
+    ]
+
+
+#: A fold's own rank check needs at least this many runs (its recorded measure only; the
+#: pooled gate's rank check is over every run).
+MIN_FOLD_RANK_RUNS = 3
+
+
+@dataclass(frozen=True)
+class FoldPrediction:
+    """One fold's out-of-fold predictions, saved as the fold ends (a resume reads them).
+
+    Attributes
+    ----------
+    predicted
+        ``(n_keys, n_fold)``: the fold's runs, in the snapshot set's order, predicted by the
+        model fitted on the other folds' runs.
+    fields
+        ``{name: (n_cells, n_times, n_fold)}``: its predicted state fields (none without).
+    fit_seconds, prediction_seconds
+        The fold's fit, and its whole prediction.
+    residuals
+        ``(n_fold,)``: the fold's runs' projection residuals under the fold's model (out of
+        sample), which floor the shipped model's residual bound (its own residuals are all
+        in sample).
+    """
+
+    predicted: NDArray[np.float64]
+    fields: Mapping[str, NDArray[np.float64]]
+    fit_seconds: float
+    prediction_seconds: float
+    residuals: NDArray[np.float64]
+
+
+def fit_folds_and_gate(
+    factory: Callable[[], SurrogateModel],
+    snapshots: SnapshotSet,
+    split: Sequence[Sequence[int]],
+    rng: np.random.Generator,
+    fold_rng: Callable[[int], np.random.Generator],
+    *,
+    fold_seed: int,
+    tolerances: GateTolerances,
+    variances: NDArray[np.float64] | None,
+    kinds: Mapping[str, QuantityKind] | None = None,
+    extent: DomainExtent = "box",
+    failed: Sequence[int] = (),
+    objective: Callable[[NDArray[np.float64]], NDArray[np.float64]] | None = None,
+    saved: Callable[[int], FoldPrediction | None] | None = None,
+    save: Callable[[int, FoldPrediction], None] | None = None,
+    stopped: Callable[[], bool] | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+) -> FitOutcome | None:
+    """Gate a plugin's fitting procedure by K-fold cross-validation; fit the shipped model.
+
+    For each fold ``k`` of ``split`` (run ids, :func:`fold_split`), a fresh model from
+    ``factory`` is fitted, through its own ``fit``, on the other folds' runs (in the
+    snapshot set's order) with the generator ``fold_rng(k)``, independent of the other
+    folds' (so a fold fitted on resume is the one an uninterrupted build fits), and predicts
+    the fold's runs. The gate is then evaluated **once over every run's out-of-fold
+    prediction**: the same measures and tolerances as a gate on held-out runs, over all
+    ``n`` runs (the pooled verdict); each fold's own measures are recorded beside it. The
+    shipped model is fitted on every run with ``rng`` (the build's stream ``surrogate``, as
+    a model gated on held-out runs is), and its domain is built from every run's inputs: it
+    was not itself gated, only its procedure was (:data:`~apex.domain.surrogate.FOLDS_NOTE`).
+
+    ``saved(k)`` returns fold ``k``'s predictions if an earlier attempt saved them (the fold
+    is then not fitted again), and ``save(k, prediction)`` saves them as the fold ends.
+    ``stopped`` is checked before each fold is fitted: once true, ``None`` is returned, the
+    folds done staying saved. The other parameters are :func:`fit_and_gate`'s.
+
+    Raises
+    ------
+    WorkflowError
+        If the split is not a partition of the snapshots' runs, a model answers other keys
+        than it was fitted on, or a coarse-corrected model has no coarse runs.
+    ValueError
+        If the plugin cannot fit the snapshots, or the domain cannot be built.
+    """
+    positions = {int(r): p for p, r in enumerate(snapshots.run_ids)}
+    chosen = [int(r) for fold in split for r in fold]
+    if sorted(chosen) != sorted(positions) or len(chosen) != len(set(chosen)):
+        raise WorkflowError("the folds are not a partition of the snapshots' runs")
+    n = snapshots.n_runs
+    done: list[tuple[list[int], FoldPrediction]] = []
+    for k, fold in enumerate(split):
+        held = sorted(positions[int(r)] for r in fold)
+        found = None if saved is None else saved(k)
+        if found is None:
+            if stopped is not None and stopped():
+                logger.info(
+                    "folds stopped",
+                    extra={"event": "surrogate_folds_stopped", "done": k, "folds": len(split)},
+                )  # fmt: skip
+                return None
+            found = _fit_fold(factory, snapshots, held, fold_rng(k), clock)
+            if save is not None:
+                save(k, found)
+            logger.info(
+                "fold fitted", extra={"event": "surrogate_fold", "fold": k, "runs": len(held)}
+            )
+        if found.predicted.shape != (len(snapshots.keys), len(held)) or found.residuals.shape != (
+            len(held),
+        ):
+            raise WorkflowError(f"fold {k}'s saved predictions do not match its runs")
+        done.append((held, found))
+    # The shipped model: fitted on every run; its domain every run's inputs (no held-out).
+    model = factory()
+    _refuse_without_coarse(model, snapshots)
+    state = dict(rng.bit_generator.state)
+    began = clock()
+    model.fit(snapshots, rng)
+    fit_seconds = clock() - began
+    if tuple(model.keys) != snapshots.keys:
+        raise WorkflowError("the surrogate answers other keys than it was fitted on")
+    names = _field_names(model, snapshots)
+    pair = None
+    if isinstance(model, CoarseCorrectedSurrogate) and snapshots.coarse_outputs is not None:
+        pair = (snapshots.coarse_outputs, snapshots.coarse_outputs[:, :0])
+    elif isinstance(model, EarlyStartSurrogate):
+        early = early_data(model, snapshots)
+        pair = (early, early[:, :0])  # no held-out runs: the second half is not read
+    # Every input is in sample for the shipped model, so its own residuals would bound the
+    # domain too tightly (a reduced-input model's are only its truncation error): the runs'
+    # out-of-fold residuals floor the bound, as a held-out run's residual does otherwise.
+    floor = max(float(np.max(f.residuals, initial=0.0)) for _, f in done)
+    domain = training_domain(
+        model, snapshots.inputs, {}, coarse=pair, extent=extent,
+        fields=names, field_times=snapshots.field_times if names else (),
+        residual_floor=floor,
+    )  # fmt: skip
+    # Every run's out-of-fold prediction, in the snapshot set's order.
+    predicted = np.zeros((len(snapshots.keys), n))
+    pooled = {name: np.zeros((*snapshots.fields[name].shape[:2], n)) for name in names}
+    per_fold = []
+    for k, (held, found) in enumerate(done):
+        predicted[:, held] = found.predicted
+        for name in names:
+            pooled[name][:, :, held] = found.fields[name]
+        runs = snapshots.columns(held)
+        fold_fields = {name: (np.asarray(found.fields[name]), runs.fields[name]) for name in names}
+        fold_gate = _gate_runs(
+            model, np.ascontiguousarray(found.predicted), runs.outputs, snapshots.keys,
+            runs.run_ids, tolerances=tolerances, variances=variances, kinds=kinds,
+            fields=fold_fields or None, failed=(),
+            # A rank correlation over fewer than 3 runs says nothing (undefined, or +-1).
+            objective=objective if len(held) >= MIN_FOLD_RANK_RUNS else None,
+        )  # fmt: skip
+        per_fold.append(FoldGate(fold=k, runs=sorted(runs.run_ids), gate=fold_gate))
+    predicted = np.ascontiguousarray(predicted)
+    pooled_fields = {name: (pooled[name], snapshots.fields[name]) for name in names}
+    verdict = _gate_runs(
+        model, predicted, snapshots.outputs, snapshots.keys, snapshots.run_ids,
+        tolerances=tolerances, variances=variances, kinds=kinds,
+        fields=pooled_fields or None, failed=failed, objective=objective,
+    )  # fmt: skip
+    validation = FoldValidation(
+        folds=len(split), fold_seed=fold_seed, per_fold=per_fold, note=FOLDS_NOTE
+    )
     logger.info(
-        "surrogate gated",
-        extra={"event": "surrogate_gate", "passed": verdict.passed,
+        "surrogate gated by folds",
+        extra={"event": "surrogate_gate", "passed": verdict.passed, "folds": len(split),
                "failures": verdict.failures()},
     )  # fmt: skip
-    return FitOutcome(model, domain, verdict, predicted, state, fit_seconds, prediction_seconds)
+    prediction_seconds = sum(f.prediction_seconds for _, f in done) / max(n, 1)
+    return FitOutcome(model, domain, verdict, predicted, state, fit_seconds,
+                      prediction_seconds, validation)  # fmt: skip
+
+
+def _fit_fold(
+    factory: Callable[[], SurrogateModel],
+    snapshots: SnapshotSet,
+    held: Sequence[int],
+    rng: np.random.Generator,
+    clock: Callable[[], float],
+) -> FoldPrediction:
+    """Fit a fresh model on the runs not at positions ``held``; predict those runs."""
+    left_out = set(held)
+    training = snapshots.columns([p for p in range(snapshots.n_runs) if p not in left_out])
+    runs = snapshots.columns(list(held))
+    model = factory()
+    _refuse_without_coarse(model, snapshots)
+    began = clock()
+    model.fit(training, rng)
+    fit_seconds = clock() - began
+    if tuple(model.keys) != training.keys:
+        raise WorkflowError("the surrogate answers other keys than it was fitted on")
+    began = clock()
+    pair = _coarse_pair(model, training, runs)
+    predicted, fields = _predict_runs(model, training, runs, pair)
+    seconds = clock() - began
+    _, residuals = model_coordinates(model, runs.inputs, None if pair is None else pair[1])
+    return FoldPrediction(
+        predicted, fields, fit_seconds, seconds, np.ascontiguousarray(residuals, dtype=np.float64)
+    )
+
+
+def _refuse_without_coarse(model: SurrogateModel, snapshots: SnapshotSet) -> None:
+    if isinstance(model, CoarseCorrectedSurrogate) and snapshots.coarse_outputs is None:
+        raise WorkflowError(
+            "a coarse-corrected surrogate needs the runs' coarse outputs: give the build a "
+            "[coarse] stack"
+        )

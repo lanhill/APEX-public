@@ -44,6 +44,7 @@ from apex.domain.surrogate import (
     BuildCost,
     CoarseSection,
     FitRecord,
+    FoldValidation,
     GateResult,
     SnapshotProvenance,
     SnapshotReference,
@@ -186,6 +187,7 @@ def write_surrogate(
     control_box: Mapping[str, tuple[ArrayLike, ArrayLike]] | None = None,
     input_sizes: Mapping[str, int] | None = None,
     control_inputs: Mapping[str, tuple[ArrayLike, ArrayLike]] | None = None,
+    validation: FoldValidation | None = None,
 ) -> StoredSurrogate:
     """Write a fitted surrogate as ``path`` (a ``.json`` manifest) and its ``.npz`` beside it.
 
@@ -196,6 +198,8 @@ def write_surrogate(
     which its checks draw within. ``input_sizes`` and ``control_inputs``:
     its inputs' sizes and the ranges of those that are not realizations (the controls after
     their parameterizations), which a prediction's scenario is checked against (decision 6).
+    ``validation``: a build validated by folds, its folds and each
+    fold's measures; ``gate`` is then the pooled out-of-fold verdict on its procedure.
 
     Raises
     ------
@@ -244,6 +248,7 @@ def write_surrogate(
         if input_sizes is None
         else {str(name): int(size) for name, size in input_sizes.items()},
         control_inputs=_ranges(control_inputs),
+        validation=validation,
     )
     manifest_bytes = _manifest_bytes(manifest)
     path.parent.mkdir(parents=True, exist_ok=True)

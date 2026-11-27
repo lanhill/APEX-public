@@ -19,7 +19,11 @@
       coarse/              the coarse stack's runs ([coarse]; the coarse-only members too),
                            laid out as members/, snapshots.jsonl, simulations/
       model/surrogate.json, model/surrogate.npz   the fitted surrogate (storage/surrogate_files)
-      gate.json            the gate's verdict on the held-out runs
+      gate.json            the gate's verdict on the held-out runs (validated by folds: the
+                           pooled verdict on every run's out-of-fold prediction)
+      folds/fold_<k>.npz   validated by folds: fold k's out-of-fold
+                           predictions, saved as it ends (a resume fits only the others)
+      folds.json           validated by folds: K, the split's seed, each fold's runs and gate
       summary.json         what the build did (the summarizer reads it)
       events.jsonl         structured log
       run.lock             one process per directory
@@ -61,6 +65,10 @@ SUMMARY = "summary.json"
 CHECK = "check.json"
 FIELDS_CONNECTIVITY = "fields_connectivity.npz"
 FAILED_MARKER = "APEX_FAILED"
+#: A build validated by folds: each fold's out-of-fold predictions
+#: (``folds/fold_<k>.npz``, a resume reads them) and the folds' record (``folds.json``).
+FOLDS = "folds"
+FOLDS_RECORD = "folds.json"
 
 #: What ``state.json`` names a build or a check by.
 BUILD_FINGERPRINT = "surrogate_fingerprint"
@@ -352,6 +360,79 @@ class SurrogateDirectory:
             return None
         with np.load(path, allow_pickle=False) as data:
             return np.ascontiguousarray(data["values"], dtype=np.float64), float(data["seconds"])
+
+    # ---------------------------------------------------------------- folds (rev. 6)
+
+    def fold_file(self, fold: int) -> Path:
+        """Return fold ``fold``'s file of out-of-fold predictions."""
+        return self.path / FOLDS / f"fold_{fold}.npz"
+
+    def save_fold(
+        self,
+        fold: int,
+        key: str,
+        predicted: NDArray[np.float64],
+        fields: Mapping[str, NDArray[np.float64]],
+        fit_seconds: float,
+        prediction_seconds: float,
+        residuals: NDArray[np.float64],
+    ) -> None:
+        """Save one fold's out-of-fold predictions atomically, under ``key``.
+
+        ``residuals`` ``(n_fold,)``: the fold's runs' projection residuals under its model.
+
+        ``key`` names what the predictions were made of (the plugin, its options, the
+        snapshots, the fold's runs and generator): :meth:`load_fold` returns them only for
+        the same key, so a changed plugin or split fits the fold again.
+        """
+        arrays: dict[str, NDArray[Any]] = {
+            "key": np.array(key),
+            "predicted": np.ascontiguousarray(predicted, dtype=np.float64),
+            "field_names": np.array(json.dumps(sorted(fields))),
+            "fit_seconds": np.array(fit_seconds),
+            "prediction_seconds": np.array(prediction_seconds),
+            "residuals": np.ascontiguousarray(residuals, dtype=np.float64),
+        }
+        for i, name in enumerate(sorted(fields)):
+            arrays[f"field_{i}"] = np.ascontiguousarray(fields[name], dtype=np.float64)
+        _save_npz(self.fold_file(fold), arrays)
+
+    def load_fold(
+        self, fold: int, key: str
+    ) -> (
+        tuple[
+            NDArray[np.float64], dict[str, NDArray[np.float64]], float, float, NDArray[np.float64]
+        ]
+        | None
+    ):
+        """Return a fold's saved predictions, fields, times and residuals; ``None`` if absent.
+
+        Returns ``None`` too for a fold saved under another ``key`` (:meth:`save_fold`).
+        """
+        path = self.fold_file(fold)
+        if not path.is_file():
+            return None
+        with np.load(path, allow_pickle=False) as data:
+            if str(data["key"]) != key:
+                return None
+            names = json.loads(str(data["field_names"]))
+            return (
+                np.ascontiguousarray(data["predicted"], dtype=np.float64),
+                {n: np.ascontiguousarray(data[f"field_{i}"]) for i, n in enumerate(names)},
+                float(data["fit_seconds"]),
+                float(data["prediction_seconds"]),
+                np.ascontiguousarray(data["residuals"], dtype=np.float64),
+            )
+
+    def prune_folds(self, folds: int) -> None:
+        """Remove the fold files of folds ``folds`` and above (left by a larger K)."""
+        folder = self.path / FOLDS
+        if not folder.is_dir():
+            return
+        for path in folder.glob("fold_*.npz"):
+            number = path.stem.removeprefix("fold_")
+            if number.isdigit() and int(number) >= folds:
+                path.unlink(missing_ok=True)
 
     def record(self, records: Sequence[MemberRecord]) -> None:
         """Append members' outcomes to ``snapshots.jsonl`` (one line each, flushed).

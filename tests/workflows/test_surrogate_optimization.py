@@ -335,6 +335,35 @@ def test_controls_outside_the_domain_stop_or_go_to_the_simulator(tmp_path: Path)
     )
     rows = layout.read_evaluations(run.run_dir)
     assert any(r["source"] == "simulator" for r in rows)
+    assert "extrapolated_evaluations" not in layout.read_result(run.run_dir)["surrogate"]
+
+
+def test_controls_outside_the_domain_extrapolated_by_the_surrogate(tmp_path: Path) -> None:
+    """outside = "surrogate" (the user's explicit choice, 2026-11-27): the surrogate answers the
+    columns outside its domain too; their rows are marked and counted, the simulator makes only
+    the optimum's run."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path, box="[design.box]\ninj = [295.0, 305.0]")
+    run = optimization.optimize(
+        _case(tmp_path, "extra", extra=_with_surrogate(model, outside="surrogate", check_every=0))
+    )
+    rows = layout.read_evaluations(run.run_dir)
+    marked = [r for r in rows if r.get("extrapolated")]
+    assert marked
+    assert all(r["source"] == "surrogate" for r in marked)
+    simulated = [r for r in rows if r["source"] == "simulator"]
+    result = layout.read_result(run.run_dir)
+    assert len(simulated) == len(result["objective_per_realization"])  # the optimum only
+    assert result["surrogate"]["extrapolated_evaluations"] == len(marked)
+    assert result["surrogate"]["simulator_evaluations"] == len(simulated)
+    # With checks: an accepted step outside the domain is checked, the check marked.
+    checked = optimization.optimize(
+        _case(tmp_path, "checked", extra=_with_surrogate(model, outside="surrogate", check_every=1))
+    )
+    checks = json.loads((checked.run_dir / STATE_FILE).read_text())["checks"]
+    assert checks
+    assert all(c.get("skipped") is None for c in checks)
+    assert any(c.get("extrapolated") for c in checks)
 
 
 def test_a_robust_optimization_gives_each_design_member_a_realization(tmp_path: Path) -> None:

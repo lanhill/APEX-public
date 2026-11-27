@@ -236,6 +236,13 @@ export interface SurrogateBuildSummary {
   fit_seconds: number | null;
   prediction_seconds: number | null;
   simulator_median_seconds: number | null;
+  /** A build validated by folds; absent when gated on held-out runs. */
+  validation?: {
+    folds: number;
+    fold_seed: number;
+    per_fold: { fold: number; runs: number[]; gate: { datatypes: SurrogateDatatypeGate[]; passed: boolean } }[];
+    note: string;
+  };
 }
 
 /** A surrogate build's plan (POST /v1/configs:validate): what it will cost, before it runs. */
@@ -245,6 +252,8 @@ export interface SurrogateBuildPlan {
   plan: string;
   training: number;
   held_out: number;
+  /** K of a build validated by folds; null when gated on held-out runs. */
+  folds?: number | null;
   simulator_runs: number;
   coarse_only: number;
   keys: number;

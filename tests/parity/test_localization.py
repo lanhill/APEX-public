@@ -97,9 +97,9 @@ def test_adaptive_localization_matches_pet_fork(
         assert isinstance(local, PriorAdaptiveLocalization)
         # Identical up to rounding: bit-identical on the development machine, but BLAS
         # kernels differ between CPUs (CI runners show 1.8e-15), so compare to 1e-12.
-        assert local.taper_matrix is not None
+        assert local.prepared
         np.testing.assert_allclose(
-            local.taper_matrix, _floats(ref, "out_taper"), rtol=0, atol=1e-12
+            local.dense_taper(), _floats(ref, "out_taper"), rtol=0, atol=1e-12
         )
     np.testing.assert_allclose(step, expected, rtol=0, atol=STEP_RTOL * np.abs(expected).max())
 

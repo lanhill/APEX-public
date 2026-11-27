@@ -184,14 +184,19 @@ def correlation(a: NDArray[np.float64], b: NDArray[np.float64]) -> NDArray[np.fl
     their correlations shrunk by ``std / 1e-6``.
     """
     n = a.shape[-1]
-
-    def normalised(m: NDArray[np.float64]) -> NDArray[np.float64]:
-        std = np.maximum(m.std(axis=-1), 1e-6)
-        result: NDArray[np.float64] = (m - m.mean(axis=-1, keepdims=True)) / std[:, None]
-        return result
-
-    corr: NDArray[np.float64] = normalised(a) @ normalised(b).T / n
+    corr: NDArray[np.float64] = _normalised(a) @ _normalised(b).T / n
     return corr
+
+
+def _normalised(m: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Rows of ``m`` ``(n_rows, n)`` centred and divided by their std floored at 1e-6.
+
+    Row by row: the rows of ``_normalised(m[rows])`` are those of ``_normalised(m)`` (each
+    row's mean and std are reduced along its own contiguous axis).
+    """
+    std = np.maximum(m.std(axis=-1), 1e-6)
+    result: NDArray[np.float64] = (m - m.mean(axis=-1, keepdims=True)) / std[:, None]
+    return result
 
 
 def derangement(rng: np.random.Generator, n: int) -> NDArray[np.int64]:
@@ -272,33 +277,60 @@ def adaptive_taper(
             if corr_shuffled is None:
                 raise ValueError("the universal threshold needs the shuffled correlations")
             noise = np.median(np.abs(corr_shuffled[rows]), axis=0) / 0.6745  # (n_columns,)
-            cutoff = (
-                threshold_scale * math.sqrt(2 * math.log(size)) * noise if size > 1 else noise * 0
-            )
-        # A correlation magnitude never exceeds 1, so a cutoff >= 1 means nothing in the column
-        # is distinguishable from noise. PET-fork's soft taper uses |1 - cutoff| there and
-        # reverses (more noise, less localization); APEX sets such columns to 0.
-        hopeless = cutoff >= 1
-        if np.any(hopeless):
-            logger.warning(
-                "adaptive localization: %d of %d columns have a noise cutoff >= 1 "
-                "(ensemble too small for block of %d); their updates are zeroed",
-                int(hopeless.sum()),
-                hopeless.size,
-                size,
-            )
-        if taper == "hard":
-            result[rows] = (magnitude > cutoff[None, :]).astype(np.float64)
-        elif taper == "soft":
-            result[rows] = gaspari_cohn((1 - magnitude) / (1 - cutoff[None, :]))
-        elif taper == "sigmoid":
-            centre = fixed if fixed is not None else 1 - threshold_scale
-            result[rows] = 1 / (1 + np.exp(-50 * (magnitude - centre)))
-        else:
-            raise ValueError(f"taper must be 'hard', 'soft' or 'sigmoid', got {taper!r}")
+            cutoff = _universal_cutoff(noise, size, threshold_scale)
+        hopeless = _hopeless(cutoff, size)
+        result[rows] = _taper_values(magnitude, cutoff, taper, fixed, threshold_scale)
         result[rows][:, hopeless] = 0.0
         start += size
     return result
+
+
+def _universal_cutoff(
+    noise: NDArray[np.float64], size: int, threshold_scale: float
+) -> NDArray[np.float64]:
+    """Return the universal threshold ``scale sqrt(2 ln n) sigma`` of a block of ``size`` rows."""
+    cutoff: NDArray[np.float64] = (
+        threshold_scale * math.sqrt(2 * math.log(size)) * noise if size > 1 else noise * 0
+    )
+    return cutoff
+
+
+def _hopeless(cutoff: NDArray[np.float64], size: int) -> NDArray[np.bool_]:
+    """Return the columns whose cutoff is 1 or more, with a warning if there are any.
+
+    A correlation magnitude never exceeds 1, so a cutoff >= 1 means nothing in the column is
+    distinguishable from noise. PET-fork's soft taper uses |1 - cutoff| there and reverses
+    (more noise, less localization); APEX sets such columns to 0.
+    """
+    hopeless: NDArray[np.bool_] = cutoff >= 1
+    if np.any(hopeless):
+        logger.warning(
+            "adaptive localization: %d of %d columns have a noise cutoff >= 1 "
+            "(ensemble too small for block of %d); their updates are zeroed",
+            int(hopeless.sum()),
+            hopeless.size,
+            size,
+        )
+    return hopeless
+
+
+def _taper_values(
+    magnitude: NDArray[np.float64],
+    cutoff: NDArray[np.float64],
+    taper: Taper,
+    fixed: float | None,
+    threshold_scale: float,
+) -> NDArray[np.float64]:
+    """Return the taper of correlation magnitudes ``(n_rows, n_columns)`` against ``cutoff``."""
+    if taper == "hard":
+        return (magnitude > cutoff[None, :]).astype(np.float64)
+    if taper == "soft":
+        return gaspari_cohn((1 - magnitude) / (1 - cutoff[None, :]))
+    if taper == "sigmoid":
+        centre = fixed if fixed is not None else 1 - threshold_scale
+        values: NDArray[np.float64] = 1 / (1 + np.exp(-50 * (magnitude - centre)))
+        return values
+    raise ValueError(f"taper must be 'hard', 'soft' or 'sigmoid', got {taper!r}")
 
 
 def pearson_correlation(
@@ -787,7 +819,63 @@ def unpack_taper(arrays: Mapping[str, NDArray[Any]]) -> NDArray[np.float64] | No
 
 
 class _GainTaper(EmitsDiagnostics):
+    """A fixed gain taper ``T`` ``(n_state, n_data)``, applied as ``(T o (dX X)) r``.
+
+    With ``block_rows = 0`` (the subclasses' default unless they say otherwise) the gain
+    ``dX X`` and its product with ``T`` are formed whole: three ``(n_state, n_data)`` arrays
+    at once, 42 GB each for 602,156 unknowns against 8,736 data. With ``block_rows > 0``
+    they are formed for that many state rows at a time, and each block's rows of the step
+    are written as they are done. Row ``i`` of the step depends only on row ``i`` of ``dX``
+    and ``T``, so the blocks compute the same quantity; BLAS may round a product of fewer
+    rows differently, so the step equals the unblocked one up to rounding (about 1e-15
+    relative; ``test_da_localization_memory.py``), not bit for bit. Subclasses keep the
+    taper in ``taper_matrix`` (dense) or override :meth:`_taper_rows` and
+    :meth:`_taper_shape`.
+    """
+
     taper_matrix: NDArray[np.float64] | None = None
+    #: State rows per block of the gain (0: all at once, the original computation).
+    block_rows: int = 0
+
+    def _taper_shape(self) -> tuple[int, int] | None:
+        """Return the taper's shape, or ``None`` before :meth:`prepare`."""
+        return None if self.taper_matrix is None else self.taper_matrix.shape
+
+    def _taper_rows(self, start: int, stop: int) -> NDArray[np.float64]:
+        """Return the taper's rows ``start:stop`` ``(stop - start, n_data)``."""
+        if self.taper_matrix is None:  # pragma: no cover - guarded by _check_shape
+            raise ValueError(f"{type(self).__name__}.prepare() must run before the first update")
+        return self.taper_matrix[start:stop]
+
+    def _add_taper_diagnostic(self) -> None:
+        """Offer the dense taper to the diagnostics (built only if wanted and within size).
+
+        A packed or recomputed taper is built whole only when the diagnostic is due and its
+        size, given up front, is within ``max_mb``: never as a side effect otherwise.
+        """
+        if self.taper_matrix is not None:
+            self._diagnostics.add("localization", "taper", self.taper_matrix)
+            return
+        n_state, n_data = self._prepared_shape()
+        self._diagnostics.add(
+            "localization", "taper", lambda: self._taper_rows(0, n_state),
+            nbytes=n_state * n_data * 8,
+        )  # fmt: skip
+
+    def _prepared_shape(self) -> tuple[int, int]:
+        shape = self._taper_shape()
+        if shape is None:
+            raise ValueError(f"{type(self).__name__}.prepare() must run before the first update")
+        return shape
+
+    def _check_shape(self, n_state: int, n_data: int) -> None:
+        shape = self._prepared_shape()
+        if shape != (n_state, n_data):
+            raise ValueError(f"taper shape {shape} does not match gain {(n_state, n_data)}")
+
+    def _blocks(self, n_state: int) -> Iterable[tuple[int, int]]:
+        size = self.block_rows if self.block_rows > 0 else max(n_state, 1)
+        return ((k, min(k + size, n_state)) for k in range(0, n_state, size))
 
     def localized_step(
         self,
@@ -797,15 +885,18 @@ class _GainTaper(EmitsDiagnostics):
         rng: np.random.Generator | None,
     ) -> NDArray[np.float64]:
         """Return ``(T o (dX X)) r`` with the fixed taper ``T`` ``(n_state, n_data)``."""
-        if self.taper_matrix is None:
-            raise ValueError(f"{type(self).__name__}.prepare() must run before the first update")
-        gain = state_anomalies @ gain_factor  # Kalman-gain-like, (n_state, n_data)
-        if self.taper_matrix.shape != gain.shape:
-            raise ValueError(
-                f"taper shape {self.taper_matrix.shape} does not match gain {gain.shape}"
-            )
-        self._diagnostics.add("localization", "taper", self.taper_matrix)
-        step: NDArray[np.float64] = (self.taper_matrix * gain) @ whitened_innovations
+        n_state, n_data = state_anomalies.shape[0], gain_factor.shape[1]
+        self._check_shape(n_state, n_data)
+        self._add_taper_diagnostic()
+        if self.block_rows <= 0 and self.taper_matrix is not None:
+            # The original computation, whole: kept as written.
+            gain = state_anomalies @ gain_factor  # Kalman-gain-like, (n_state, n_data)
+            whole: NDArray[np.float64] = (self.taper_matrix * gain) @ whitened_innovations
+            return whole
+        step = np.empty((n_state, whitened_innovations.shape[1]))
+        for start, stop in self._blocks(n_state):
+            gain = state_anomalies[start:stop] @ gain_factor  # (rows, n_data)
+            step[start:stop] = (self._taper_rows(start, stop) * gain) @ whitened_innovations
         return step
 
     def localized_member_steps(
@@ -817,24 +908,37 @@ class _GainTaper(EmitsDiagnostics):
     ) -> NDArray[np.float64]:
         """Return column ``j`` as ``(T o (dX G_j)) r_j`` with the fixed taper ``T``.
 
-        One ``(n_state, n_data)`` gain at a time.
+        One ``(n_state, n_data)`` gain at a time; with ``block_rows``, one block of rows of
+        one member's gain at a time. The members' gains ``(n_ensemble, n_data)`` each are then
+        held together (``n_ensemble**2 n_data`` doubles: 0.7 GB for 100 members against 8,736
+        data, 17 GB for 500), so that each block of the taper is built once.
         """
-        if self.taper_matrix is None:
-            raise ValueError(f"{type(self).__name__}.prepare() must run before the first update")
         n_members = whitened_innovations.shape[1]
-        step = np.empty((state_anomalies.shape[0], n_members))
-        given = 0
-        for j, gain_factor in enumerate(member_gains):
-            given += 1
-            gain = state_anomalies @ gain_factor
-            if self.taper_matrix.shape != gain.shape:
-                raise ValueError(
-                    f"taper shape {self.taper_matrix.shape} does not match gain {gain.shape}"
-                )
-            step[:, j] = (self.taper_matrix * gain) @ whitened_innovations[:, j]
-        if given != n_members:
-            raise ValueError(f"{given} member gains for {n_members} members")
-        self._diagnostics.add("localization", "taper", self.taper_matrix)
+        n_state = state_anomalies.shape[0]
+        step = np.empty((n_state, n_members))
+        if self.block_rows <= 0 and self.taper_matrix is not None:
+            given = 0
+            for j, gain_factor in enumerate(member_gains):
+                given += 1
+                self._check_shape(n_state, gain_factor.shape[1])
+                gain = state_anomalies @ gain_factor
+                step[:, j] = (self.taper_matrix * gain) @ whitened_innovations[:, j]
+            if given != n_members:
+                raise ValueError(f"{given} member gains for {n_members} members")
+        else:
+            gains = list(member_gains)
+            if len(gains) != n_members:
+                raise ValueError(f"{len(gains)} member gains for {n_members} members")
+            for gain_factor in gains:
+                self._check_shape(n_state, gain_factor.shape[1])
+            for start, stop in self._blocks(n_state):
+                rows = state_anomalies[start:stop]
+                taper = self._taper_rows(start, stop)
+                for j, gain_factor in enumerate(gains):
+                    step[start:stop, j] = (taper * (rows @ gain_factor)) @ whitened_innovations[
+                        :, j
+                    ]
+        self._add_taper_diagnostic()
         return step
 
     def export_state(self) -> dict[str, NDArray[Any]]:
@@ -846,6 +950,189 @@ class _GainTaper(EmitsDiagnostics):
         taper = unpack_taper(arrays)
         if taper is not None:
             self.taper_matrix = taper
+
+
+#: How :class:`PriorAdaptiveLocalization` keeps its taper between updates.
+TaperStorage = Literal["auto", "dense", "packed", "recompute"]
+
+#: Elements of a correlation block formed at a time when the universal threshold's noise is
+#: estimated (``2**24`` doubles: 134 MB, about three such arrays at once).
+_CORRELATION_ELEMENTS = 2**24
+
+
+class _PackedTaper:
+    """A taper held in :func:`pack_taper`'s encoding, its rows unpacked on request.
+
+    Exactly the doubles :func:`unpack_taper` would give, without the dense array: for a
+    ``hard`` taper one bit per entry (0.66 GB for 602,156 x 8,736 instead of 42 GB).
+    """
+
+    def __init__(self, arrays: Mapping[str, NDArray[Any]]) -> None:
+        self.arrays = dict(arrays)
+        n_state, n_data = (int(n) for n in np.asarray(arrays["taper_shape"]))
+        self.shape = (n_state, n_data)
+        mask = np.asarray(arrays["taper_ones"], dtype=np.uint8)
+        if mask.size != (n_state + 7) // 8:
+            raise ValueError(f"packed taper's row mask has {mask.size} bytes, {n_state} rows "
+                             f"need {(n_state + 7) // 8}")  # fmt: skip
+        self.ones = np.unpackbits(mask, count=n_state).astype(bool)
+        # before[i]: how many rows before row i are stored (not all ones).
+        self.before = np.concatenate([[0], np.cumsum(~self.ones)])
+        n_rows = int(self.before[-1])
+        self.bits = arrays.get("taper_bits")
+        self.values = arrays.get("taper_rows")
+        if self.bits is not None:
+            if self.bits.shape != (n_rows, (n_data + 7) // 8):
+                raise ValueError(
+                    f"packed taper bits {self.bits.shape} do not fit the shape {self.shape}"
+                )
+        elif self.values is None or self.values.shape != (n_rows, n_data):
+            found = None if self.values is None else self.values.shape
+            raise ValueError(f"packed taper rows {found}, expected {(n_rows, n_data)}")
+
+    def rows(self, start: int, stop: int) -> NDArray[np.float64]:
+        """Return the taper's rows ``start:stop``, as :func:`unpack_taper` would."""
+        out = np.ones((stop - start, self.shape[1]))
+        first, last = int(self.before[start]), int(self.before[stop])
+        stored = ~self.ones[start:stop]
+        if self.bits is not None:
+            out[stored] = np.unpackbits(self.bits[first:last], axis=1, count=self.shape[1])
+        else:
+            assert self.values is not None
+            out[stored] = self.values[first:last]
+        return out
+
+
+def _pack_blocks(
+    shape: tuple[int, int], blocks: Iterable[NDArray[np.float64]]
+) -> dict[str, NDArray[Any]]:
+    """Return :func:`pack_taper` of the taper whose consecutive row blocks are ``blocks``.
+
+    The arrays :func:`pack_taper` would give for the concatenated blocks, bit for bit,
+    without forming it: each block is packed as it comes (bits if every block is binary,
+    else doubles).
+    """
+    n_state, n_data = shape
+    ones_parts: list[NDArray[np.bool_]] = []
+    stored: list[tuple[bool, NDArray[Any]]] = []  # (as bits, rows) per block
+    binary = True
+    rows_seen = 0
+    for block in blocks:
+        block = np.ascontiguousarray(block, dtype=np.float64)
+        rows_seen += block.shape[0]
+        ones = np.all(block == 1.0, axis=1)
+        ones_parts.append(ones)
+        kept = block[~ones]
+        block_binary = bool(np.all((kept.view(np.uint64) == 0) | (kept == 1.0)))
+        binary = binary and block_binary
+        stored.append((True, np.packbits(kept == 1.0, axis=1)) if block_binary else (False, kept))
+    if rows_seen != n_state:
+        raise ValueError(f"taper blocks have {rows_seen} rows, expected {n_state}")
+    ones_all = np.concatenate(ones_parts) if ones_parts else np.zeros(0, dtype=bool)
+    packed: dict[str, NDArray[Any]] = {
+        "taper_shape": np.array(shape, dtype=np.int64),
+        "taper_ones": np.packbits(ones_all),
+    }
+    if binary:
+        parts = [rows for _, rows in stored]
+        packed["taper_bits"] = (
+            np.concatenate(parts) if parts else np.zeros((0, (n_data + 7) // 8), dtype=np.uint8)
+        )
+        return packed
+    # Doubles (a soft or sigmoid taper): filled block by block, each block's copy released
+    # as it goes, so that at most one copy of the stored rows exists at a time.
+    rows_out = np.empty((sum(rows.shape[0] for _, rows in stored), n_data))
+    start = 0
+    stored.reverse()
+    while stored:
+        bits, rows = stored.pop()
+        values = np.unpackbits(rows, axis=1, count=n_data) if bits else rows
+        rows_out[start : start + rows.shape[0]] = values
+        start += rows.shape[0]
+        del rows, values
+    packed["taper_rows"] = rows_out
+    return packed
+
+
+class _TaperBuilder:
+    """What :class:`PriorAdaptiveLocalization`'s taper is made of; its rows built on request.
+
+    The prior's state and data rows normalised as :func:`correlation` does (``(n_state,
+    n_ensemble)``, ``(n_data, n_ensemble)``), each state variable's threshold per datum, and
+    the parameter masks. Rows ``start:stop`` of the taper are those of the dense
+    :meth:`PriorAdaptiveLocalization.prepare` up to rounding: the same row-wise
+    normalisation, threshold and taper, and the same products per row, which BLAS may round
+    differently for fewer rows (about 1e-15). A ``hard`` taper's entries are equal unless a
+    correlation lies within that rounding of its threshold.
+
+    Parameters
+    ----------
+    state, data
+        The normalised prior state ``(n_state, n_ensemble)`` and forecast
+        ``(n_data, n_ensemble)``.
+    blocks
+        Per state variable: ``(start, stop, exempt, cutoff)``, ``cutoff`` ``(n_data,)`` (``None``
+        for an unlocalized variable).
+    restrictions
+        ``(start, stop, mask)``: the taper's rows ``start:stop`` are multiplied by ``mask``
+        ``(stop - start, n_data)`` (booleans).
+    """
+
+    def __init__(
+        self,
+        state: NDArray[np.float64],
+        data: NDArray[np.float64],
+        blocks: Sequence[tuple[int, int, bool, NDArray[np.float64] | None]],
+        restrictions: Sequence[tuple[int, int, NDArray[np.bool_]]],
+        taper: Taper,
+        fixed: float | None,
+        threshold_scale: float,
+    ) -> None:
+        self.state, self.data = state, data
+        self.blocks = list(blocks)
+        self.restrictions = list(restrictions)
+        self.taper: Taper = taper
+        self.fixed = fixed
+        self.threshold_scale = threshold_scale
+        self.shape = (state.shape[0], data.shape[0])
+
+    def rows(self, start: int, stop: int) -> NDArray[np.float64]:
+        """Return the taper's rows ``start:stop`` ``(stop - start, n_data)``."""
+        n = self.state.shape[-1]
+        out = np.empty((stop - start, self.shape[1]))
+        for first, last, exempt, cutoff in self.blocks:
+            lo, hi = max(first, start), min(last, stop)
+            if lo >= hi:
+                continue
+            target = out[lo - start : hi - start]
+            if exempt or cutoff is None:
+                target[...] = 1.0
+                continue
+            corr = self.state[lo:hi] @ self.data.T / n
+            target[...] = _taper_values(
+                np.abs(corr), cutoff, self.taper, self.fixed, self.threshold_scale
+            )
+            target[:, cutoff >= 1] = 0.0
+        for first, last, mask in self.restrictions:
+            lo, hi = max(first, start), min(last, stop)
+            if lo < hi:
+                out[lo - start : hi - start] *= mask[lo - first : hi - first]
+        return out
+
+    def export(self) -> dict[str, NDArray[Any]]:
+        """Return the arrays that rebuild this builder exactly (:meth:`restore`)."""
+        cutoffs = [c for _, _, exempt, c in self.blocks if not exempt and c is not None]
+        arrays: dict[str, NDArray[Any]] = {
+            "recompute_state": self.state,
+            "recompute_data": self.data,
+            "recompute_cutoffs": (np.stack(cutoffs) if cutoffs else np.zeros((0, self.shape[1]))),
+            "recompute_restricted": np.array(
+                [(first, last) for first, last, _ in self.restrictions], dtype=np.int64
+            ).reshape(-1, 2),
+        }
+        for k, (_, _, mask) in enumerate(self.restrictions):
+            arrays[f"recompute_mask_{k}"] = np.packbits(mask, axis=1)
+        return arrays
 
 
 @localizations.register("adaptive")
@@ -886,6 +1173,26 @@ class PriorAdaptiveLocalization(_AdaptiveBase, _GainTaper):
         2026-11-07: 0.0025% kept). Default none.
     variable_names
         Names of the state variables (set from the state layout).
+    taper_storage
+        How the taper is kept between updates (memory and time differ; the results agree
+        with ``"dense"`` up to rounding, about 1e-15 relative, since BLAS may round the
+        products of a block of rows differently; a resume in the same mode is exact):
+
+        - ``"dense"``: the whole ``(n_state, n_data)`` doubles, built at once (the original;
+          the build needs about three such arrays);
+        - ``"packed"``: :func:`pack_taper`'s exact encoding, built a block of rows at a time:
+          one bit per entry for a ``hard`` taper, doubles otherwise (so no saving for
+          ``soft`` and ``sigmoid``);
+        - ``"recompute"``: the prior's normalised state and data and each variable's
+          threshold, the taper's rows rebuilt for each block at every update (one more
+          product of the size of the gain per update);
+        - ``"auto"`` (default): ``"packed"`` for a ``hard`` taper, ``"recompute"`` otherwise.
+    block_rows
+        State rows per block when the taper is built and the gain is formed and tapered
+        (default 4096: about 0.3 GB per temporary against 8,736 data); 0 forms each whole,
+        as the original did. Any value works with any storage. The original computation is
+        ``taper_storage = "dense"`` with ``block_rows = 0`` (runs started before these
+        options resume with it: snapshot version 7).
 
     Differences from PET: PET-fork's ``ini_only`` branch multiplies the taper with gain
     built from state anomalies divided by the prior standard deviation and never scales
@@ -897,6 +1204,66 @@ class PriorAdaptiveLocalization(_AdaptiveBase, _GainTaper):
         "taper": "gain taper from the prior, (n_state, n_data); dense"
     }
 
+    def __init__(
+        self,
+        block_sizes: Sequence[int],
+        threshold_scale: float = 1.0,
+        taper: Taper = "hard",
+        threshold: Literal["universal", "fixed"] = "universal",
+        cutoff: float | None = None,
+        unlocalized: TextList = (),
+        variable_names: Sequence[str] | None = None,
+        taper_storage: TaperStorage = "auto",
+        block_rows: int = 4096,
+    ) -> None:
+        super().__init__(
+            block_sizes, threshold_scale, taper, threshold, cutoff, unlocalized, variable_names
+        )
+        if taper_storage not in ("auto", "dense", "packed", "recompute"):
+            raise ValueError(
+                "taper_storage must be 'auto', 'dense', 'packed' or 'recompute', "
+                f"got {taper_storage!r}"
+            )
+        if isinstance(block_rows, bool) or not isinstance(block_rows, int) or block_rows < 0:
+            raise ValueError(f"block_rows must be a whole number >= 0, got {block_rows!r}")
+        self.taper_storage: TaperStorage = taper_storage
+        self.block_rows = block_rows
+        self._stored: _PackedTaper | _TaperBuilder | None = None
+        self._dense: NDArray[np.float64] | None = None
+
+    @property
+    def storage(self) -> Literal["dense", "packed", "recompute"]:
+        """The storage in use: ``taper_storage`` with ``"auto"`` resolved by the taper."""
+        if self.taper_storage == "auto":
+            return "packed" if self.taper == "hard" else "recompute"
+        return self.taper_storage
+
+    def _taper_shape(self) -> tuple[int, int] | None:
+        if self._stored is not None:
+            return self._stored.shape
+        return super()._taper_shape()
+
+    def _taper_rows(self, start: int, stop: int) -> NDArray[np.float64]:
+        if self._stored is not None:
+            return self._stored.rows(start, stop)
+        return super()._taper_rows(start, stop)
+
+    @property
+    def prepared(self) -> bool:
+        """Whether the taper has been built (:meth:`prepare`) or restored."""
+        return self._taper_shape() is not None
+
+    def dense_taper(self) -> NDArray[np.float64]:
+        """Return the whole taper ``(n_state, n_data)`` (built once and kept, if not dense).
+
+        For the local analysis, which selects its groups from the whole taper.
+        """
+        if self.taper_matrix is not None:
+            return self.taper_matrix
+        if self._dense is None:
+            self._dense = self._taper_rows(0, self._prepared_shape()[0])
+        return self._dense
+
     def prepare(
         self,
         prior_state: NDArray[np.float64],
@@ -905,25 +1272,132 @@ class PriorAdaptiveLocalization(_AdaptiveBase, _GainTaper):
         rng: np.random.Generator,
     ) -> None:
         """Build the taper from the prior ensemble and its forecast (and any masks)."""
+        self.taper_matrix, self._stored, self._dense = None, None, None
+        if self.storage != "dense":
+            builder = self._builder(prior_state, prior_predicted, keys, rng)
+            if self.storage == "recompute":
+                self._stored = builder
+            else:
+                spans = self._blocks(builder.shape[0])
+                self._stored = _PackedTaper(
+                    _pack_blocks(builder.shape, (builder.rows(a, b) for a, b in spans))
+                )
+            return
         taper = self._taper(prior_state, prior_predicted, rng)
         for rows, mask in self._restrictions:
             # A model's structural mask: exact zeros where its
             # parameters cannot affect a datum; sample correlations there are noise that a
             # threshold of 3/sqrt(N) still lets through (about 0.3 % of pairs).
-            found = np.asarray(mask(keys))
-            expected = (rows.stop - rows.start, len(keys))
-            if found.dtype != np.bool_ or found.shape != expected:
-                raise ValueError(
-                    f"a parameter mask must be booleans {expected}, got {found.dtype} {found.shape}"
-                )
-            if not found.any():
-                # Every datum masked off: the variable would never be updated, silently.
-                raise ValueError(
-                    f"the parameter mask of state rows {rows.start}..{rows.stop - 1} keeps no "
-                    "assimilated datum: the variable would never be updated"
-                )
-            taper[rows] *= found
+            taper[rows] *= self._mask(rows, mask, keys)
         self.taper_matrix = taper
+
+    def _mask(self, rows: slice, mask: ParameterMask, keys: Sequence[DataKey]) -> NDArray[np.bool_]:
+        """Return ``mask(keys)``, checked (booleans, the rows' shape, some datum kept)."""
+        found = np.asarray(mask(keys))
+        expected = (rows.stop - rows.start, len(keys))
+        if found.dtype != np.bool_ or found.shape != expected:
+            raise ValueError(
+                f"a parameter mask must be booleans {expected}, got {found.dtype} {found.shape}"
+            )
+        if not found.any():
+            # Every datum masked off: the variable would never be updated, silently.
+            raise ValueError(
+                f"the parameter mask of state rows {rows.start}..{rows.stop - 1} keeps no "
+                "assimilated datum: the variable would never be updated"
+            )
+        return found
+
+    def _builder(
+        self,
+        prior_state: NDArray[np.float64],
+        prior_predicted: NDArray[np.float64],
+        keys: Sequence[DataKey],
+        rng: np.random.Generator,
+    ) -> _TaperBuilder:
+        """Return the taper's builder: the dense :meth:`_taper`'s numbers, a block at a time.
+
+        Draws the same shuffle from ``rng`` as :meth:`_taper`. The universal threshold's
+        noise (the median over a variable's rows of its correlations with a shuffled
+        ensemble, per datum) is computed a few columns at a time.
+        """
+        n = prior_state.shape[-1]
+        order = derangement(rng, n)
+        # C order, as a restored builder's (np.load): the same products after a resume.
+        state = np.ascontiguousarray(_normalised(prior_state))
+        data = np.ascontiguousarray(_normalised(prior_predicted))
+        n_data = data.shape[0]
+        fixed = self._fixed_cutoff(n) if self.threshold == "fixed" else None
+        blocks: list[tuple[int, int, bool, NDArray[np.float64] | None]] = []
+        start = 0
+        for index, size in enumerate(self.block_sizes):
+            stop = start + size
+            if self._exempt and self._exempt[index]:
+                blocks.append((start, stop, True, None))
+                start = stop
+                continue
+            if fixed is not None:
+                cutoff = np.full(n_data, float(fixed))
+            else:
+                shuffled = _normalised(prior_state[start:stop][:, order])
+                noise = np.empty(n_data)
+                width = max(1, _CORRELATION_ELEMENTS // size)
+                for c in range(0, n_data, width):
+                    corr = shuffled @ data[c : c + width].T / n
+                    noise[c : c + width] = np.median(np.abs(corr), axis=0)
+                noise /= 0.6745
+                cutoff = _universal_cutoff(noise, size, self.threshold_scale)
+            _hopeless(cutoff, size)
+            blocks.append((start, stop, False, cutoff))
+            start = stop
+        restrictions = [
+            (rows.start, rows.stop, self._mask(rows, mask, keys))
+            for rows, mask in self._restrictions
+        ]
+        return _TaperBuilder(
+            state, data, blocks, restrictions, self.taper, fixed, self.threshold_scale
+        )
+
+    def export_state(self) -> dict[str, NDArray[Any]]:
+        """Return the taper, encoded exactly: packed (:func:`pack_taper`), or its inputs."""
+        if isinstance(self._stored, _PackedTaper):
+            return dict(self._stored.arrays)
+        if isinstance(self._stored, _TaperBuilder):
+            return self._stored.export()
+        return super().export_state()
+
+    def restore_state(self, arrays: Mapping[str, NDArray[Any]]) -> None:
+        """Restore the taper from :meth:`export_state`'s arrays (or an older dense one)."""
+        self.taper_matrix, self._stored, self._dense = None, None, None
+        if "recompute_state" in arrays:
+            self._stored = self._restored_builder(arrays)
+        elif "taper_shape" in arrays and self.storage != "dense":
+            self._stored = _PackedTaper(arrays)
+        else:
+            super().restore_state(arrays)
+
+    def _restored_builder(self, arrays: Mapping[str, NDArray[Any]]) -> _TaperBuilder:
+        state = np.ascontiguousarray(arrays["recompute_state"], dtype=np.float64)
+        data = np.ascontiguousarray(arrays["recompute_data"], dtype=np.float64)
+        cutoffs = iter(np.asarray(arrays["recompute_cutoffs"], dtype=np.float64))
+        n_data = data.shape[0]
+        blocks: list[tuple[int, int, bool, NDArray[np.float64] | None]] = []
+        start = 0
+        for index, size in enumerate(self.block_sizes):
+            exempt = bool(self._exempt and self._exempt[index])
+            blocks.append((start, start + size, exempt, None if exempt else next(cutoffs)))
+            start += size
+        if start != state.shape[0] or next(cutoffs, None) is not None:
+            raise ValueError("the stored taper's inputs do not fit the state's variables")
+        restricted = np.asarray(arrays["recompute_restricted"], dtype=np.int64).reshape(-1, 2)
+        restrictions = [
+            (int(first), int(last),
+             np.unpackbits(arrays[f"recompute_mask_{k}"], axis=1, count=n_data).astype(bool))
+            for k, (first, last) in enumerate(restricted)
+        ]  # fmt: skip
+        fixed = self._fixed_cutoff(state.shape[-1]) if self.threshold == "fixed" else None
+        return _TaperBuilder(
+            state, data, blocks, restrictions, self.taper, fixed, self.threshold_scale
+        )
 
     def restrict(self, rows: slice, mask: ParameterMask) -> None:
         """Multiply the taper's ``rows`` by ``mask(keys)`` when :meth:`prepare` builds it.

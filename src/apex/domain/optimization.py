@@ -172,23 +172,13 @@ class OptimizationSurrogateSection(_Strict):
         "(resumable); or start it again with the `simulator` for every evaluation (the "
         "plain run with the same seed; the evaluations already simulated are reused).",
     )
-    outside: Literal["stop", "simulator"] = Field(
+    outside: Literal["stop", "simulator", "surrogate"] = Field(
         default="stop",
         description="Controls outside the surrogate's validated domain: `stop` the "
-        "optimization, or evaluate them by the `simulator` (recorded as such).",
+        "optimization, evaluate them by the `simulator` (recorded as such), or evaluate them "
+        "by the `surrogate` anyway (an explicit choice to extrapolate: logged at every batch, "
+        "marked in the journal and counted in the result, as in history matching).",
     )
-
-    @field_validator("outside", mode="before")
-    @classmethod
-    def _no_extrapolation(cls, value: object) -> object:
-        # outside = "surrogate" (extrapolation by the user's explicit choice) is a history
-        # match's option only: said so, rather than pydantic's list of the allowed values.
-        if value == "surrogate":
-            raise ValueError(
-                'outside = "surrogate" (extrapolating beyond the validated domain) is offered '
-                'only in history matching; here give "stop" or "simulator"'
-            )
-        return value
 
     relative: dict[QuantityKind, float] = Field(
         default_factory=dict,

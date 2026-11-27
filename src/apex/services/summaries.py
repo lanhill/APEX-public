@@ -459,9 +459,13 @@ class SurrogateSummarizer:
         """
         summary = surrogates.build_summary(path)
         failed = set(summary.failed)
+        folds = summary.validation
         steps = (
             StepSummary(0, summary.training_runs, label="training"),
-            StepSummary(1, summary.held_out_runs, label="held-out"),
+            # Validated by folds: every run is gated out of fold.
+            StepSummary(1, summary.held_out_runs, label="held-out")
+            if folds is None
+            else StepSummary(1, summary.training_runs, label="out-of-fold"),
         )
         rows = [_single("failed_runs", "all", 0, float(len(failed)))]
         notes = []
@@ -492,6 +496,13 @@ class SurrogateSummarizer:
                 rows.append(_single("gate_tolerance", entry.datatype, 1, entry.tolerance))
             rows.append(_single("gate_passed", "all", 1, float(summary.gate.passed)))
             notes += [f"gate failed: {line}" for line in summary.gate.failures()]
+        if folds is not None:
+            rows.append(_single("folds", "all", 1, folds.folds))
+            for fold in folds.per_fold:
+                for entry in fold.gate.datatypes:
+                    error = math.inf if entry.error is None else entry.error
+                    rows.append(_single(f"fold_{fold.fold}_gate_error", entry.datatype, 1, error))
+            notes.append(folds.note)
         if summary.model is not None:
             latest = surrogates.last_check(path / summary.model, summary.identity)
             if latest is not None:

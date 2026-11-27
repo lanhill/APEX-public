@@ -515,7 +515,8 @@ function SurrogatePlanView({ plan: p }: { plan: SurrogateBuildPlan }) {
         </dd>
         <dt>Design</dt>
         <dd>
-          <code>{p.plan}</code>: {p.training} training and {p.held_out} held-out runs
+          <code>{p.plan}</code>:{" "}
+          {p.folds ? `${p.training} training runs, validated by ${p.folds} folds` : `${p.training} training and ${p.held_out} held-out runs`}
           {p.coarse_only > 0 && `, ${p.coarse_only} on the coarse stack only`}
         </dd>
         <dt>Simulator runs</dt>

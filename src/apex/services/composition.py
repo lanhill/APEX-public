@@ -2828,6 +2828,8 @@ def snapshot_config(run_dir: RunDirectory) -> HistoryMatchConfig:
             _migrate_damping_reduction(raw)
         if isinstance(raw, dict) and run_dir.snapshot_version() < 5:
             _migrate_lm_confirmation(raw)
+        if isinstance(raw, dict) and run_dir.snapshot_version() < 7:
+            _migrate_taper_storage(raw)
         return HistoryMatchConfig.model_validate(raw)
     except (OSError, ValueError, ValidationError) as error:
         raise ConfigError(
@@ -2861,6 +2863,51 @@ def _migrate_damping_reduction(raw: dict[str, Any]) -> None:
             "run from before 2026-10-13: its damping is divided by the factor after an "
             "accepted step",
             extra={"event": "snapshot_migrated", "damping_reduction": None},
+        )
+
+
+#: The prior adaptive localization's names (``localizations``), whose taper options changed.
+_PRIOR_ADAPTIVE = ("adaptive", "adaptive_prior")
+
+
+def _migrate_taper_storage(raw: dict[str, Any]) -> None:
+    """Keep the dense, whole taper of a snapshot older than 2026-11-27 (version 7).
+
+    ``adaptive``/``adaptive_prior`` now keep the taper packed or recomputed and form the gain
+    in blocks of state rows by default (``taper_storage``, ``block_rows``), which agrees with
+    the dense computation up to rounding only. Pinning ``taper_storage = "dense"`` and
+    ``block_rows = 0`` keeps a resume identical. Every localization of the method is pinned:
+    ``[method] localization``, a strategy's or CHOP's (any ``localization`` or
+    ``hyper_localization`` table below ``[method]``), unless it gave the options itself.
+    """
+    pinned = 0
+
+    def pin(section: object) -> object:
+        nonlocal pinned
+        if isinstance(section, str) and section in _PRIOR_ADAPTIVE:
+            section = {"name": section}
+        if isinstance(section, dict) and section.get("name") in _PRIOR_ADAPTIVE:
+            options = section.get("options") or {}
+            if isinstance(options, dict):
+                section["options"] = {"taper_storage": "dense", "block_rows": 0, **options}
+                pinned += 1
+        return section
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                if key in ("localization", "hyper_localization"):
+                    node[key] = pin(value)
+                walk(node[key])
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(raw.get("method"))
+    if pinned:
+        logger.debug(
+            "run from before 2026-11-27: its prior adaptive localization keeps the dense taper",
+            extra={"event": "snapshot_migrated", "taper_storage": "dense"},
         )
 
 
