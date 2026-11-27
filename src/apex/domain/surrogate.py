@@ -260,6 +260,10 @@ class SnapshotSet:
         ``keys`` with respect to its inputs, stacked in the layout's order (``n_inputs`` the
         layout's n_state), from simulators with sensitivities, for plugins that learn
         from them (``uses_gradients``, gradient-enhanced kriging, say).
+    fit_only_keys, fit_only_outputs
+        Optional responses every run also returned for the plugin's fit to read (``[case]
+        fit_only``), ``(n_fit_only,)`` and ``(n_fit_only, n_runs)``: not
+        the surrogate's keys, so never predicted nor gated. Distinct from ``keys``.
     """
 
     layout: StateLayout
@@ -278,6 +282,8 @@ class SnapshotSet:
     calibration_outputs: NDArray[np.float64] | None = None
     calibration_ids: tuple[int, ...] = ()
     gradients: NDArray[np.float64] | None = None
+    fit_only_keys: tuple[DataKey, ...] = ()
+    fit_only_outputs: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
         """Check every shape against the layout, the keys and the runs; copy the arrays."""
@@ -348,6 +354,19 @@ class SnapshotSet:
             if gradients.shape != expected:
                 raise ValueError(f"gradients must be {expected}, got {gradients.shape}")
             object.__setattr__(self, "gradients", gradients)
+        if (self.fit_only_outputs is None) != (not self.fit_only_keys):
+            raise ValueError("fit-only keys and outputs come together")
+        if self.fit_only_outputs is not None:
+            fit_only = _array(self.fit_only_outputs, "fit-only outputs", 2)
+            if fit_only.shape != (len(self.fit_only_keys), n_runs):
+                raise ValueError(f"fit-only outputs must be ({len(self.fit_only_keys)}, "
+                                 f"{n_runs}), got {fit_only.shape}")  # fmt: skip
+            if len(set(self.fit_only_keys)) != len(self.fit_only_keys) or (
+                set(self.fit_only_keys) & set(self.keys)
+            ):
+                raise ValueError("fit-only keys must be unique and not the set's keys")
+            object.__setattr__(self, "fit_only_keys", tuple(self.fit_only_keys))
+            object.__setattr__(self, "fit_only_outputs", fit_only)
 
     def _calibration(
         self, n_runs: int
@@ -475,7 +494,10 @@ class SnapshotSet:
             calibration_outputs=self.calibration_outputs,
             calibration_ids=self.calibration_ids,
             gradients=None if self.gradients is None else self.gradients[:, :, index],
-        )
+            fit_only_keys=self.fit_only_keys,
+            fit_only_outputs=None if self.fit_only_outputs is None
+            else self.fit_only_outputs[:, index],
+        )  # fmt: skip
 
     def digest(self) -> str:
         """Return the SHA-256 of the set's content: arrays, keys, ids and provenance.
@@ -528,6 +550,12 @@ class SnapshotSet:
             # Likewise: sets without gradients keep their digests.
             text("gradients")
             array(self.gradients)
+        if self.fit_only_outputs is not None:
+            # Likewise: sets without fit-only responses keep their digests.
+            text("fit_only")
+            for key in self.fit_only_keys:
+                text(repr(key_document(key)))
+            array(self.fit_only_outputs)
         return digest.hexdigest()
 
 
@@ -1137,6 +1165,12 @@ class SurrogateCaseSection(_Frozen):
         "gated against their observation errors; `responses`: an optimization's objective's "
         "response keys, gated by relative errors and by the rank correlation of the "
         "objective; or `{ vectors, times }`, gated by relative errors.",
+    )
+    fit_only: SurrogateSeries | None = Field(
+        default=None,
+        description="Responses every run also returns for the plugin's fit only (e.g. FPR, "
+        "RPR:1): not outputs, so neither predicted nor gated, nor required of observations "
+        ". `{ vectors, times }`.",
     )
     fields: list[str] = Field(
         default_factory=list,

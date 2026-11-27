@@ -71,6 +71,7 @@ from apex.core.errors import (
     WorkflowError,
     validation_problems,
 )
+from apex.core.options import holds_text
 from apex.core.plugins import (
     executors,
     model_error_models,
@@ -95,6 +96,7 @@ from apex.core.surrogates import (
     CoarseCorrectedSurrogate,
     EarlyStartSurrogate,
     FieldSurrogate,
+    RefitOptions,
     SurrogateModel,
     capabilities_of,
     refusal,
@@ -133,7 +135,7 @@ from apex.domain.surrogate import (
 from apex.services import composition
 from apex.services import optimization as optimization_services
 from apex.services.identity import code_version, tree_hash
-from apex.services.plugins import check_options
+from apex.services.plugins import check_options, option_roles
 from apex.simulation.deck import deck_layout, restart_schedule
 from apex.simulation.geophysics import GeophysicsSimulator
 from apex.simulation.model_error import ModelErrorSimulator
@@ -575,6 +577,9 @@ class SurrogateCase:
     #: ``simulator`` is wrapped in :class:`~apex.simulation.sensitivity.SensitivityRun`.
     gradients: bool = False
     run_sections: tuple[str, ...] = ()
+    #: Responses every run also returns for the plugin's fit only (``[case] fit_only``; ADR
+    #: 0073 revision 8): after the keys and the fields in ``run_keys``, never gated.
+    fit_only_keys: tuple[DataKey, ...] = ()
 
     @property
     def optimization(self) -> bool:
@@ -622,10 +627,9 @@ class SurrogateCase:
 
     @property
     def run_keys(self) -> tuple[DataKey, ...]:
-        """The keys each full run answers: the surrogate's, then the fields' (field-major)."""
-        if not self.fields:
-            return self.keys
-        return (*self.keys, *field_keys(self.fields, self.field_times, self.field_cells))
+        """The keys each full run answers: the surrogate's, the fields', the fit-only ones."""
+        fields = field_keys(self.fields, self.field_times, self.field_cells) if self.fields else ()
+        return (*self.keys, *fields, *self.fit_only_keys)
 
 
 def _refuse(case: HistoryMatchConfig) -> None:
@@ -2766,6 +2770,17 @@ def _build_case(
             and (config.case.fields or not _wants_gradients(config)) else None
         ),
     )  # fmt: skip
+    series = config.case.fit_only
+    if series is not None:
+        # Responses for the plugin's fit only, after the keys and fields.
+        extra = tuple(DataKey(t, v) for v in series.vectors for t in series.times)
+        check_key_times(extra)
+        both = sorted({str(k) for k in extra} & {str(k) for k in case.keys})
+        if both:
+            raise ConfigError(f"[case] fit_only lists the surrogate's own outputs: {both[:3]}")
+        if _wants_gradients(config):
+            raise ConfigError("[case] fit_only is not taken with a plugin that uses gradients")
+        case = dataclasses.replace(case, fit_only_keys=extra)
     return _with_gradients(config, case) if _wants_gradients(config) else case
 
 
@@ -2814,11 +2829,16 @@ def _snapshot_set(
         gradients = np.ascontiguousarray(stacked[n_keys:].reshape(n_keys, n_state, len(columns)))
         stacked = stacked[:n_keys]
     values = stacked.reshape(len(case.run_keys), len(columns))
+    n_fit = len(case.fit_only_keys)
+    fit_only = np.ascontiguousarray(values[len(values) - n_fit :]) if n_fit else None
+    values = values[: len(values) - n_fit]
     return SnapshotSet(
         layout=case.input_layout,
         inputs={k: np.ascontiguousarray(v) for k, v in inputs.items()},
         keys=case.keys,
         outputs=np.ascontiguousarray(values[:n_keys]),
+        fit_only_keys=case.fit_only_keys,
+        fit_only_outputs=fit_only,
         fields=split_fields(values[n_keys:], case.fields, case.field_times, case.field_cells)
         if case.fields
         else {},
@@ -4611,9 +4631,12 @@ def surrogate_forecasting(
         else functools.partial(_model_snapshots, Path(section.model_file), manifest)
     )
     # The manifest's file options are relative to the model's folder; a refit reads them
-    # there and records them relative to its own.
+    # there and records them relative to its own. The options the model hands its refits
+    # (``core.surrogates.RefitOptions``) over the configuration's, as an optimization's
+    # refits take them.
+    given = {**manifest.options, **refit_options_of(original.model, manifest.plugin)}
     resolved = options_resolved_in(
-        current_options(manifest.plugin, manifest.options), Path(section.model_file).parent
+        current_options(manifest.plugin, given), Path(section.model_file).parent
     )
     return SurrogateForecasting(
         section,
@@ -5353,6 +5376,52 @@ def optimization_surrogate(
     )
 
 
+#: The option roles a refit may take from a fitted model: none (numbers, flags) or text.
+_REFIT_ROLES = frozenset({"text"})
+
+
+def refit_options_of(model: object, plugin: str) -> dict[str, object]:
+    """Return the options a fitted model hands its refits, checked.
+
+    A model with ``refit_options`` (``core.surrogates.RefitOptions``) gives options of its
+    plugin that name nothing; those the plugin declares as files, code, programs, their
+    arguments, hosts or mappings (``core.options``), or does not have, are refused.
+
+    Raises
+    ------
+    ConfigError
+        If an option is not the plugin's, or names a file, code, a program, arguments, a host
+        or a mapping.
+    """
+    if not isinstance(model, RefitOptions):
+        return {}
+    given = dict(model.refit_options())
+    roles = option_roles("surrogate_models", plugin)
+    unknown = sorted(k for k in given if k not in roles)
+    named = []
+    for key, value in given.items():
+        if key not in roles:
+            continue
+        role = roles[key]
+        if (role is not None and role.kind not in _REFIT_ROLES) or (
+            role is None and holds_text(value)
+        ):
+            named.append(key)
+    named.sort()
+    if unknown or named:
+        raise ConfigError(
+            f"the surrogate plugin {plugin!r} hands its refits options it may not: "
+            + (f"not its options {unknown}" if unknown else "")
+            + ("; " if unknown and named else "")
+            + (
+                f"options naming files, code, programs, arguments, hosts or mappings {named}"
+                if named
+                else ""
+            )
+        )
+    return given
+
+
 def _optimization_refitter(
     loaded: LoadedSurrogate,
     trained: SnapshotSet,
@@ -5373,9 +5442,10 @@ def _optimization_refitter(
         If the model's build runs do not hold the objective's keys.
     """
     manifest = loaded.manifest
-    resolved = options_resolved_in(
-        current_options(manifest.plugin, manifest.options), loaded.path.parent
-    )
+    # The options a fitted model hands its refits (``core.surrogates.RefitOptions``), over the
+    # configuration's, resolved as they are.
+    given = {**manifest.options, **refit_options_of(loaded.model, manifest.plugin)}
+    resolved = options_resolved_in(current_options(manifest.plugin, given), loaded.path.parent)
     index = {key: row for row, key in enumerate(trained.keys)}
     missing = [k for k in simulation.keys if k not in index]
     if missing:

@@ -28,7 +28,7 @@ from typer.testing import CliRunner
 from apex.cli.main import app
 from apex.core.errors import ConfigError, WorkflowError
 from apex.core.plugins import surrogate_models
-from apex.core.surrogates import SurrogateInputs, SurrogateParts
+from apex.core.surrogates import FoldAwareSurrogate, SurrogateInputs, SurrogateParts
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import FOLDS_NOTE, SnapshotSet
 from apex.services import composition, surrogates
@@ -278,6 +278,37 @@ def test_the_shipped_model_is_a_fit_on_every_run(tmp_path: Path) -> None:
     assert stored.manifest.fit.seed == SEED
     # Its domain is every run's inputs (none held out).
     assert stored.manifest.domain.n_points == 12
+
+
+class _FoldAwareMean(_Mean):
+    """``_Mean`` that records the folds it is told (core's ``FoldAwareSurrogate``)."""
+
+    told: ClassVar[list[tuple[int, int | None]]] = []
+
+    def set_validation_fold(self, fold: int | None) -> None:
+        """Record ``(runs fitted so far, fold)``, so the shipped fit's place is known."""
+        _FoldAwareMean.told.append((len(_Mean.fits), fold))
+
+
+def test_a_fold_aware_model_is_told_its_fold_and_the_shipped_one_is_not(tmp_path: Path) -> None:
+    """Each fold's model is told its fold before its fit; the shipped model never is.
+
+    A plugin whose draws come from fixed integers rather than its generator would otherwise
+    fit every fold alike.
+    """
+    cases.write_case(tmp_path)
+    name = "fold_aware_mean"
+    surrogate_models.register(name)(_FoldAwareMean)
+    _FoldAwareMean.told.clear()
+    try:
+        surrogates.build(write_build(tmp_path, plugin=name))
+    finally:
+        surrogate_models.remove(name)
+    assert isinstance(_FoldAwareMean(), FoldAwareSurrogate)
+    # Folds 0..3, each told before its own fit (the k-th told after k fits); 4 + 1 fits.
+    assert _FoldAwareMean.told == [(k, k) for k in range(4)]
+    assert len(_Mean.fits) == 5
+    assert _Mean.fits[-1] == 12  # the shipped fit, untold
 
 
 def test_a_build_stopped_between_folds_resumes_without_refitting_them(tmp_path: Path) -> None:

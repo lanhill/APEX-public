@@ -42,6 +42,7 @@ from apex.core.surrogates import (
     CoarseCorrectedSurrogate,
     EarlyStartSurrogate,
     FieldSurrogate,
+    FoldAwareSurrogate,
     SurrogateModel,
 )
 from apex.domain.observations import DataKey
@@ -708,7 +709,7 @@ def fit_folds_and_gate(
                     extra={"event": "surrogate_folds_stopped", "done": k, "folds": len(split)},
                 )  # fmt: skip
                 return None
-            found = _fit_fold(factory, snapshots, held, fold_rng(k), clock)
+            found = _fit_fold(factory, snapshots, held, fold_rng(k), clock, fold=k)
             if save is not None:
                 save(k, found)
             logger.info(
@@ -788,13 +789,20 @@ def _fit_fold(
     held: Sequence[int],
     rng: np.random.Generator,
     clock: Callable[[], float],
+    *,
+    fold: int,
 ) -> FoldPrediction:
-    """Fit a fresh model on the runs not at positions ``held``; predict those runs."""
+    """Fit a fresh model on the runs not at positions ``held``; predict those runs.
+
+    A model that is :class:`~apex.core.surrogates.FoldAwareSurrogate` is told ``fold``.
+    """
     left_out = set(held)
     training = snapshots.columns([p for p in range(snapshots.n_runs) if p not in left_out])
     runs = snapshots.columns(list(held))
     model = factory()
     _refuse_without_coarse(model, snapshots)
+    if isinstance(model, FoldAwareSurrogate):
+        model.set_validation_fold(fold)
     began = clock()
     model.fit(training, rng)
     fit_seconds = clock() - began

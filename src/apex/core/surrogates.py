@@ -153,6 +153,38 @@ class SurrogateModel(Protocol):
 
 
 @runtime_checkable
+class RefitOptions(Protocol):
+    """A fitted model that hands options to an optimization's refits (optional).
+
+    A refit builds a fresh model of the plugin from the configuration's options. A model with
+    this method returns the options a refit takes from it instead (for instance a value its
+    fit estimated that the configuration asked to keep through the refits). The refitter
+    accepts only options of the plugin that name nothing (numbers, flags, text): an option
+    declared as a file, code, a program, its arguments, a host or a mapping is refused.
+    """
+
+    def refit_options(self) -> Mapping[str, object]:
+        """Return the options a refit of this fitted model takes over the configuration's."""
+        ...
+
+
+@runtime_checkable
+class FoldAwareSurrogate(Protocol):
+    """A model told which fold of a build validated by folds it fits (optional; rev. 6).
+
+    A build validated by folds fits a fresh model per fold, each with a generator of its
+    own. A plugin whose draws come from fixed integers rather than its generator would fit
+    every fold alike; a model with this method is told, before its ``fit``, the fold it fits
+    (``0 .. K-1``). The shipped model, fitted on every run, is never told (it keeps
+    ``None``), so its fit is the one a build validated by held-out runs gives.
+    """
+
+    def set_validation_fold(self, fold: int | None) -> None:
+        """Record the fold this model is fitted for (``None``: not a fold's model)."""
+        ...
+
+
+@runtime_checkable
 class FieldSurrogate(Protocol):
     """A surrogate that also predicts state fields (optional capability)."""
 

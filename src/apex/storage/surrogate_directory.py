@@ -511,6 +511,12 @@ class SurrogateDirectory:
             arrays[f"input_{i}"] = snapshots.inputs[variable.name]
         if snapshots.coarse_outputs is not None:
             arrays["coarse_outputs"] = snapshots.coarse_outputs
+        if snapshots.fit_only_outputs is not None:
+            # Absent without [case] fit_only, as in the digest.
+            arrays["fit_only_keys"] = np.array(
+                json.dumps([key_document(k) for k in snapshots.fit_only_keys])
+            )
+            arrays["fit_only_outputs"] = snapshots.fit_only_outputs
         if snapshots.coarse_only_inputs is not None and snapshots.coarse_only_outputs is not None:
             # Absent without coarse-only members ([design] coarse_only), as in the digest.
             arrays["coarse_only_outputs"] = snapshots.coarse_only_outputs
@@ -562,6 +568,14 @@ def load_snapshots(path: Path) -> SnapshotSet:
                 failed=tuple(int(i) for i in data["failed"]),
                 provenance=SnapshotProvenance.model_validate_json(str(data["provenance"])),
                 coarse_outputs=data["coarse_outputs"] if "coarse_outputs" in data.files else None,
+                fit_only_keys=tuple(
+                    DataKey(t, d, i) for t, d, i in json.loads(str(data["fit_only_keys"]))
+                )
+                if "fit_only_keys" in data.files
+                else (),
+                fit_only_outputs=data["fit_only_outputs"]
+                if "fit_only_outputs" in data.files
+                else None,
                 coarse_only_inputs={
                     v.name: data[f"coarse_only_input_{i}"] for i, v in enumerate(layout.variables)
                 }
