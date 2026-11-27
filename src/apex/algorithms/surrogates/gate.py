@@ -24,7 +24,12 @@ is the largest over the datatype's series and runs. Its tolerance is the kind's
 largest among the series of its vector (every well's ``WOPR``; for pressures, the largest
 change) or field: a shut well's zero rates, a cell whose pressure changes only by solver
 noise. A pressure is judged on its magnitude, a much looser measure, only if no series of its
-vector changes at all, and the result says so (``scale``, ``notes``). The "first value" is the
+vector changes at all, and the result says so (``scale``, ``notes``). A vector whose every
+gated series is zero (a check of one run whose controls shut every injector: its ``FWIT`` is 0
+throughout) has no scale of its own: its floor is then :data:`SCALE_FLOOR` of the vector's
+largest magnitude over the model's training runs (``reference_scales``),
+so its error stays finite; without them a zero error is 0 and any other infinite, as before.
+Where the vector has a scale of its own nothing changes. The "first value" is the
 series' first *gated* time: a pressure series that starts after the first time gated is
 noted, since its change may be up to twice smaller than from the initial value.
 
@@ -144,23 +149,44 @@ def _pool_scale(kind: QuantityKind, pool: Sequence[_Part]) -> Literal["change", 
     return "magnitude"
 
 
-def _relative(parts: Sequence[_Part], pool: Sequence[_Part], scale: str) -> float:
+def _relative(
+    parts: Sequence[_Part], pool: Sequence[_Part], scale: str, fallback: float = 0.0
+) -> float:
     """Return the largest ``error / max(scale, SCALE_FLOOR * the pool's largest scale)``.
 
     Zero error against a zero scale is 0, any other error against it infinite; an error that
-    is not a number (a prediction that is not finite) is infinite.
+    is not a number (a prediction that is not finite) is infinite. ``fallback`` replaces the
+    pool's largest scale only where that is 0 (module docstring: ``reference_scales``).
     """
     if not parts:
         return 0.0
     errors = np.concatenate([p.error for p in parts])
     chosen = [p.change if scale == "change" else p.magnitude for p in parts]
     reference = _largest([p.change if scale == "change" else p.magnitude for p in pool])
+    if reference == 0.0:
+        reference = fallback
     scales = np.maximum(np.concatenate(chosen), SCALE_FLOOR * reference)
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(scales > 0, errors / np.where(scales > 0, scales, 1.0),
                          np.where(errors == 0, 0.0, np.inf))  # fmt: skip
     ratio = np.where(np.isnan(ratio), np.inf, ratio)
     return float(np.max(ratio)) if ratio.size else 0.0
+
+
+def reference_scales(keys: Sequence[DataKey], outputs: NDArray[np.float64]) -> dict[str, float]:
+    """Return each vector's largest magnitude ``{vector: float}`` over runs ``(n_keys, n)``.
+
+    The vector is a datatype's mnemonic before ``:`` (every well's ``WOPR`` one vector), as
+    the gate's floor pools them; for :func:`gate`'s ``reference_scales``.
+    """
+    values = np.abs(np.asarray(outputs, dtype=np.float64))
+    found: dict[str, float] = {}
+    for row, key in enumerate(keys):
+        vector = key.datatype.split(":", 1)[0]
+        largest = float(np.max(values[row])) if values.shape[1] else 0.0
+        if np.isfinite(largest):
+            found[vector] = max(found.get(vector, 0.0), largest)
+    return found
 
 
 def _spearman(a: NDArray[np.float64], b: NDArray[np.float64]) -> float | None:
@@ -228,6 +254,7 @@ def gate(
     objectives: tuple[NDArray[np.float64], NDArray[np.float64]] | None = None,
     fields: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
     failed: Sequence[int] = (),
+    reference_scales: Mapping[str, float] | None = None,
 ) -> GateResult:
     """Gate a surrogate on held-out full runs.
 
@@ -257,6 +284,9 @@ def gate(
         relative errors (each cell a series over time).
     failed
         The design's runs that failed, recorded with the verdict.
+    reference_scales
+        ``{vector: largest magnitude}`` over the model's training runs (:func:`reference_scales`),
+        used only for a vector whose gated series are all zero (module docstring).
 
     Raises
     ------
@@ -337,7 +367,8 @@ def gate(
             scale = _pool_scale(kind, pool)
             if kind == "pressure" and scale == "magnitude":
                 notes = [*notes, "no series of its vector changes: judged on its magnitude"]
-            error = _relative(parts, pool, scale)
+            vector = datatype.split(":", 1)[0]
+            error = _relative(parts, pool, scale, (reference_scales or {}).get(vector, 0.0))
             limit = tolerances.relative[kind]
             entries.append(
                 DatatypeGate(

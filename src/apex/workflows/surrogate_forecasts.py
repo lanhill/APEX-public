@@ -196,6 +196,9 @@ class SurrogateForecasting:
         self.plugin = plugin
         self.stored_options = stored_options
         self.snapshots = snapshots
+        #: The active model's runs' fit-only keys, by its identity (revision 9): read once per
+        #: active model, never at every check, and set from a refit's own snapshot set.
+        self._fit_only: tuple[str, tuple[DataKey, ...]] | None = None
         self.cost = cost
         self.coarse = coarse
         self.stored_coarse = stored_coarse
@@ -285,6 +288,30 @@ class SurrogateForecasting:
             return base, []
         return base, list(gate.held_out)
 
+    def fit_only_keys(self) -> tuple[DataKey, ...]:
+        """Return the active model's runs' fit-only keys, or none.
+
+        A check that may refit also asks the simulator for them, so that the refit's plugin
+        fits on them for the checked runs as it did for the build's. Read once per active
+        model (cached by its identity; a refit sets them from its own snapshot set). A
+        snapshot set that cannot be read gives none, with a warning: the check itself never
+        needs them, and a refit that does reads the set again and says why it cannot.
+        """
+        identity = self.active.identity
+        if self._fit_only is not None and self._fit_only[0] == identity:
+            return self._fit_only[1]
+        keys: tuple[DataKey, ...] = ()
+        try:
+            base, _ = self._base()
+            keys = base.fit_only_keys
+        except (WorkflowError, ConfigError, OSError, ValueError) as error:
+            logger.warning(
+                "surrogate fit-only keys unread",
+                extra={"event": "surrogate_fit_only_unread", "error": str(error)},
+            )
+        self._fit_only = (identity, keys)
+        return keys
+
     def refit(
         self,
         iteration: int,
@@ -294,6 +321,7 @@ class SurrogateForecasting:
         rng: np.random.Generator,
         run_path: Path,
         coarse_outputs: NDArray[np.float64] | None = None,
+        fit_only_outputs: NDArray[np.float64] | None = None,
     ) -> GateResult:
         """Refit with the checked runs added; make the refit the active model if it passes.
 
@@ -309,6 +337,9 @@ class SurrogateForecasting:
             The run's stream ``surrogate``: the split of the new runs, then the fit.
         coarse_outputs
             ``(n_model_keys, n)``: their coarse stack's runs, for a coarse-corrected model.
+        fit_only_outputs
+            ``(n_fit_only, n)``: their runs at :meth:`fit_only_keys` (revision 9); without
+            them the refit's runs carry no fit-only values (logged).
 
         Returns the refit's gate. The refit is written whether or not it passes.
 
@@ -324,6 +355,20 @@ class SurrogateForecasting:
                 "a coarse-corrected surrogate is refitted with the checked members' coarse "
                 "runs, and only such a surrogate"
             )
+        carried_keys: tuple[DataKey, ...] = ()
+        carried = None
+        if base.fit_only_keys and base.fit_only_outputs is not None:
+            if fit_only_outputs is not None and np.shape(fit_only_outputs) == (
+                len(base.fit_only_keys),
+                n,
+            ):
+                carried_keys = base.fit_only_keys
+                carried = np.concatenate([base.fit_only_outputs, fit_only_outputs], axis=1)
+            else:
+                logger.info(
+                    "surrogate refit without fit-only values",
+                    extra={"event": "surrogate_refit_without_fit_only", "iteration": iteration},
+                )
         order = rng.permutation(n)
         n_held = 0 if n < 2 else min(n - 1, max(1, round(self.section.refit_held_out * n)))
         # Past the calibration runs' ids too (none without them: the ids of before).
@@ -351,6 +396,9 @@ class SurrogateForecasting:
             calibration_inputs=base.calibration_inputs,
             calibration_outputs=base.calibration_outputs,
             calibration_ids=base.calibration_ids,
+            # Revision 9: the build's fit-only values and the checked runs', all or none.
+            fit_only_keys=carried_keys,
+            fit_only_outputs=carried,
         )
         held_ids = set(held) | {new_ids[int(j)] for j in order[:n_held]}
         if not held_ids:
@@ -427,6 +475,7 @@ class SurrogateForecasting:
             "identity": stored.identity, "snapshots": combined.digest(),
         })  # fmt: skip
         self.active = self.loader(stored.path, stored.identity)
+        self._fit_only = (stored.identity, combined.fit_only_keys)
         return fitted.gate
 
     # ------------------------------------------------------------------ checkpoints

@@ -43,7 +43,8 @@ class ToyReservoir:
         inj = np.asarray(member.state["inj"])
         perm = float(np.asarray(member.state.get("perm", [1.0]))[0])
         oil, water = 20.0 * perm * np.sum(np.sqrt(inj)), float(np.sum(inj))
-        rate = {"FOPT": oil, "FWIT": water}
+        # FPR: a vector no objective reads (a surrogate build's fit-only one, rev. 9).
+        rate = {"FOPT": oil, "FWIT": water, "FPR": 200.0 - 0.1 * water}
         start = dt.date(2000, 1, 1)
         return np.array([
             (dt.date.fromisoformat(k.time) - start).days if k.datatype == "TIME"
@@ -683,3 +684,35 @@ def test_nsga3_and_moead_resume_through_the_service(tmp_path: Path, name: str) -
     resumed = optimization.resume(first.run_dir)
     assert resumed.finished
     assert layout.read_pareto(resumed.run_dir) == layout.read_pareto(whole.run_dir)
+
+
+def test_fit_only_keys_change_neither_the_values_nor_the_responses(
+    tmp_path: Path, toy: type[ToyReservoir]
+) -> None:
+    """The fit-only vectors are journaled apart; the objective's value,
+    its responses and the evaluation's key are those of a run without them, bit for bit."""
+    from apex.execution.local import SerialExecutor
+
+    def objective(folder: Path) -> SimulatedObjective:
+        folder.mkdir()
+        return SimulatedObjective(
+            NetPresentValue(start="2000-01-01", times=TIMES, wop=1.0, wwi=1.0),
+            ToyReservoir(), SerialExecutor(retries=0), folder, [("inj", slice(0, 2))],
+        )  # fmt: skip
+
+    controls = np.array([[100.0, 80.0, 50.0], [90.0, 100.0, 60.0]])
+    reals = np.zeros(3, dtype=np.int64)
+    plain = objective(tmp_path / "plain")
+    extra = objective(tmp_path / "extra")
+    extra.fit_only_keys = [DataKey(t, "FPR") for t in TIMES[:3]]
+    np.testing.assert_array_equal(extra(controls, reals), plain(controls, reals))
+    rows_plain = layout.read_evaluations(tmp_path / "plain")
+    rows_extra = layout.read_evaluations(tmp_path / "extra")
+    for a, b in zip(rows_plain, rows_extra, strict=True):
+        assert (a["key"], a["value"], a["responses"]) == (b["key"], b["value"], b["responses"])
+        assert "fit_only" not in a
+        water = float(np.sum(b["controls"]))
+        assert b["fit_only"]["values"] == [(200.0 - 0.1 * water) * k for k in (1, 2, 3)]
+    # The objective's own keys are refused as fit-only ones.
+    with pytest.raises(ValueError, match="objective's"):
+        extra.fit_only_keys = [DataKey(TIMES[0], "FOPT")]

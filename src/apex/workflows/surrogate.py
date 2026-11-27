@@ -34,7 +34,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from apex.algorithms.surrogates.domain import model_coordinates, training_domain
-from apex.algorithms.surrogates.gate import gate
+from apex.algorithms.surrogates.gate import gate, reference_scales
 from apex.core.errors import SimulationError, WorkflowError
 from apex.core.progress import GuardedProgress, NullProgress, ProgressReporter
 from apex.core.simulation import Executor, MemberFailure, MemberInput, Simulator
@@ -471,6 +471,7 @@ def fit_and_gate(
         model, predicted, held_out.outputs, training.keys, held_out.run_ids,
         tolerances=tolerances, variances=variances, kinds=kinds, fields=fields,
         failed=failed, objective=objective,
+        scales=reference_scales(training.keys, training.outputs),
     )  # fmt: skip
     logger.info(
         "surrogate gated",
@@ -559,11 +560,13 @@ def _gate_runs(
     fields: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None,
     failed: Sequence[int],
     objective: Callable[[NDArray[np.float64]], NDArray[np.float64]] | None,
+    scales: Mapping[str, float] | None = None,
 ) -> GateResult:
     """Gate predictions ``(n_keys, n)`` of runs against their simulator values ``reference``.
 
     The rows :func:`gated_rows` names (an early-start model's later keys), and the runs'
-    objectives by rank when ``objective`` is given.
+    objectives by rank when ``objective`` is given. ``scales``: each vector's largest
+    magnitude over the training runs, the floor of a vector the gated runs hold only zeros of.
     """
     objectives = None
     if objective is not None:
@@ -583,6 +586,7 @@ def _gate_runs(
         fields=fields,
         failed=failed,
         objectives=objectives,
+        reference_scales=scales,
     )
 
 
@@ -749,18 +753,23 @@ def fit_folds_and_gate(
     predicted = np.zeros((len(snapshots.keys), n))
     pooled = {name: np.zeros((*snapshots.fields[name].shape[:2], n)) for name in names}
     per_fold = []
+    all_scales = reference_scales(snapshots.keys, snapshots.outputs)
     for k, (held, found) in enumerate(done):
         predicted[:, held] = found.predicted
         for name in names:
             pooled[name][:, :, held] = found.fields[name]
         runs = snapshots.columns(held)
         fold_fields = {name: (np.asarray(found.fields[name]), runs.fields[name]) for name in names}
+        # Revision 9: the floor's scale from the fold's own training runs, as a held-out
+        # build's gate takes it from its training runs.
+        trained_in = [p for p in range(snapshots.n_runs) if p not in set(held)]
         fold_gate = _gate_runs(
             model, np.ascontiguousarray(found.predicted), runs.outputs, snapshots.keys,
             runs.run_ids, tolerances=tolerances, variances=variances, kinds=kinds,
             fields=fold_fields or None, failed=(),
             # A rank correlation over fewer than 3 runs says nothing (undefined, or +-1).
             objective=objective if len(held) >= MIN_FOLD_RANK_RUNS else None,
+            scales=reference_scales(snapshots.keys, snapshots.outputs[:, trained_in]),
         )  # fmt: skip
         per_fold.append(FoldGate(fold=k, runs=sorted(runs.run_ids), gate=fold_gate))
     predicted = np.ascontiguousarray(predicted)
@@ -769,6 +778,7 @@ def fit_folds_and_gate(
         model, predicted, snapshots.outputs, snapshots.keys, snapshots.run_ids,
         tolerances=tolerances, variances=variances, kinds=kinds,
         fields=pooled_fields or None, failed=failed, objective=objective,
+        scales=all_scales,
     )  # fmt: skip
     validation = FoldValidation(
         folds=len(split), fold_seed=fold_seed, per_fold=per_fold, note=FOLDS_NOTE

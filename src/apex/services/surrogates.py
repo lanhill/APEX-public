@@ -61,7 +61,7 @@ from apex.algorithms.surrogates.domain import (
     refuse_keys_outside,
     refuse_outside,
 )
-from apex.algorithms.surrogates.gate import gate
+from apex.algorithms.surrogates.gate import gate, reference_scales
 from apex.core.case_state import CaseStateReaderFactory, StateWriter
 from apex.core.errors import (
     ApexError,
@@ -4099,9 +4099,13 @@ def check_surrogate(
                       tuple(case.keys[r] for r in rows),
                       None if case.variances is None else case.variances[rows])
             )  # fmt: skip
+            # a vector the checked runs hold only zeros of is judged
+            # against the model's own runs' scale of it (the build's gate does the same).
             verdict = gate(scored[0], scored[1], scored[2], gated.run_ids, fields=fields,
                            tolerances=tolerances, variances=scored[3], kinds=kinds,
-                           failed=sorted(failed_ids), objectives=objectives)  # fmt: skip
+                           failed=sorted(failed_ids), objectives=objectives,
+                           reference_scales=reference_scales(trained.keys, trained.outputs),
+                           )  # fmt: skip
         else:
             verdict = GateResult(held_out=[], failed=sorted(failed_ids), datatypes=[],
                                  tolerances=tolerances, passed=False)  # fmt: skip
@@ -5228,6 +5232,7 @@ def optimization_surrogate(
             f"optimization gives its simulations {list(inputs.names)} (controls, "
             "parameterizations and [model] arrays must be the build's)"
         )
+    trained_rows = {key: row for row, key in enumerate(trained.keys)}
     outside = check_request(loaded.domain, simulation.keys)
     if not outside.inside:
         raise ConfigError(
@@ -5353,6 +5358,10 @@ def optimization_surrogate(
                 _digest({"plain": simulation.context, "surrogate": found.identity}),
             ),
         )  # fmt: skip
+        if trained.fit_only_keys:
+            # The simulator's rows also return the build's fit-only
+            # vectors, journaled apart, so that a refit's plugin can fit on them too.
+            simulation.fit_only_keys = list(trained.fit_only_keys)
 
     assert simulation.run_dir is not None
     return SurrogateObjective(
@@ -5373,6 +5382,12 @@ def optimization_surrogate(
         simulate_every=section.simulate_every,
         refitter=refitter,
         refit_rows=section.refit_rows,
+        # a checked vector that is zero throughout is judged against
+        # the build's runs' scale of it, so its error stays finite.
+        reference_scales=reference_scales(
+            tuple(k for k in simulation.keys if k in trained_rows),
+            trained.outputs[[trained_rows[k] for k in simulation.keys if k in trained_rows]],
+        ),
     )
 
 
@@ -5462,6 +5477,10 @@ def _optimization_refitter(
         outputs=np.ascontiguousarray(trained.outputs[rows]),
         run_ids=trained.run_ids,
         provenance=trained.provenance,
+        # the build's fit-only values go with its runs into every refit,
+        # and the journal's simulated rows carry their own (SimulatedObjective.fit_only_keys).
+        fit_only_keys=trained.fit_only_keys,
+        fit_only_outputs=trained.fit_only_outputs,
     )
 
     def write(

@@ -13,7 +13,7 @@ import datetime as dt
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, ClassVar, Self, cast
 
 import numpy as np
 import pytest
@@ -26,7 +26,7 @@ from apex.core.plugins import simulators, surrogate_models
 from apex.core.simulation import MemberInput
 from apex.core.surrogates import SurrogateCapabilities, SurrogateInputs, SurrogateParts
 from apex.domain.observations import DataKey
-from apex.domain.surrogate import SnapshotSet
+from apex.domain.surrogate import GateResult, SnapshotSet
 from apex.services import optimization, surrogates
 from apex.storage import optimization_directory as layout
 from apex.workflows.simulated_objective import evaluation_key
@@ -44,7 +44,12 @@ class ToyReservoir:
         type(self).runs += 1
         inj = np.asarray(member.state["inj"], dtype=float)
         perm = float(np.asarray(member.state.get("perm", [1.0]))[0])
-        totals = {"FOPT": 20.0 * perm * float(np.sum(np.sqrt(inj))), "FWIT": float(np.sum(inj))}
+        totals = {
+            "FOPT": 20.0 * perm * float(np.sum(np.sqrt(inj))),
+            "FWIT": float(np.sum(inj)),
+            # A vector no objective reads: a build's fit-only response.
+            "FPR": 200.0 - 0.1 * float(np.sum(inj)),
+        }
         start = dt.date(2000, 1, 1)
         return np.array([
             (dt.date.fromisoformat(k.time) - start).days if k.datatype == "TIME"
@@ -1118,3 +1123,158 @@ def test_a_failed_check_of_a_refit_restarts_with_the_configured_models_files(
     history = layout.read_history(run_dir)
     assert not any("surrogate_refit" in r for r in history)  # the restarted run's rows
     assert optimization.resume(run_dir).finished
+
+
+# ------------------------------------------- fit-only vectors in the journal (revision 9)
+
+
+class _FitOnlySeen(_Features):
+    """``_Features`` that records the fit-only values each fit is given (test only)."""
+
+    seen: ClassVar[list[NDArray[np.float64] | None]] = []
+
+    def fit(self, snapshots: SnapshotSet, rng: np.random.Generator) -> None:
+        type(self).seen.append(
+            None if snapshots.fit_only_outputs is None else snapshots.fit_only_outputs.copy()
+        )
+        super().fit(snapshots, rng)
+
+
+FIT_ONLY_BUILD = """
+[surrogate]
+name = "toy_fit_only"
+model = "test_toy_fit_only"
+options = {{ bias = 0.0 }}
+seed = 3
+
+[case]
+config_file = "case.toml"
+outputs = "responses"
+fit_only = {{ vectors = ["FPR"], times = {times} }}
+
+[design]
+plan = "lhs"
+training = 10
+held_out = 5
+"""
+
+
+@pytest.fixture
+def fit_only_model(tmp_path: Path) -> Iterator[Path]:
+    """Build the toy case's surrogate with ``FPR`` for the fit only; return its manifest."""
+    surrogate_models.register("test_toy_fit_only")(_FitOnlySeen)
+    _FitOnlySeen.seen = []
+    try:
+        _case(tmp_path, "case")
+        path = tmp_path / "build_fit_only.toml"
+        path.write_text(FIT_ONLY_BUILD.format(times=json.dumps(TIMES)), encoding="utf-8")
+        result = surrogates.build(path)
+        assert result.summary.status == "complete"
+        yield result.path / "model" / "surrogate.json"
+    finally:
+        surrogate_models.remove("test_toy_fit_only")
+
+
+def _fpr(row: Mapping[str, Any]) -> list[float]:
+    """The toy reservoir's FPR at the four times for a journal row's controls (times k)."""
+    value = 200.0 - 0.1 * float(np.sum(row["controls"]))
+    return [value * (k + 1) for k in range(len(TIMES))]
+
+
+def test_simulator_rows_carry_the_builds_fit_only_vectors_into_every_refit(
+    tmp_path: Path, fit_only_model: Path
+) -> None:
+    extra = _with_surrogate(
+        fit_only_model, check_every=1, simulate_every=2, refit=True, outside="simulator"
+    )
+    _FitOnlySeen.seen = []
+    whole = optimization.optimize(_case(tmp_path, "whole", extra=extra))
+    rows = layout.read_evaluations(whole.run_dir)
+    simulator = [r for r in rows if r["source"] == "simulator" and r.get("value") is not None]
+    assert simulator
+    surrogate_rows = [r for r in rows if r["source"] == "surrogate"]
+    assert surrogate_rows
+    for row in simulator:
+        # Journaled apart from the responses, which stay the objective's (as the surrogate's).
+        assert row["fit_only"]["values"] == pytest.approx(_fpr(row), rel=1e-12)
+        assert len(row["responses"]) == len(surrogate_rows[0]["responses"])
+    for row in surrogate_rows:
+        assert "fit_only" not in row
+    history = layout.read_history(whole.run_dir)
+    refits = [r["surrogate_refit"] for r in history if "surrogate_refit" in r]
+    assert len(refits) >= 2
+    # Every refit's fit had fit-only values for every run: the build's, then the journal's.
+    assert len(_FitOnlySeen.seen) == len(refits)
+    for seen, record in zip(_FitOnlySeen.seen, refits, strict=True):
+        assert seen is not None
+        assert seen.shape == (len(TIMES), record["runs"])
+        loaded = surrogates.load_surrogate(whole.run_dir / record["path"])
+        snapshots = surrogates._model_snapshots(whole.run_dir / record["path"], loaded.manifest)
+        assert snapshots.fit_only_keys == tuple(DataKey(t, "FPR") for t in TIMES)
+        np.testing.assert_array_equal(snapshots.fit_only_outputs, seen)
+    # Resumed at a step boundary: the same run, rows and fit-only values included.
+    part = optimization.optimize(_case(tmp_path, "part", extra=extra), max_iterations=2)
+    surrogates.fitted_model.cache_clear()
+    optimization.resume(part.run_dir)
+    assert layout.read_history(part.run_dir) == history
+    assert [(r["key"], r.get("fit_only")) for r in layout.read_evaluations(part.run_dir)] == [
+        (r["key"], r.get("fit_only")) for r in rows
+    ]
+
+
+@pytest.mark.parametrize("damage", ["absent", "other_keys", "other_count"])
+def test_journal_rows_without_fit_only_values_leave_them_out_of_the_refit(
+    tmp_path: Path, fit_only_model: Path, damage: str
+) -> None:
+    """Rows journaled before revision 9 (``absent``), under other fit-only keys (another
+    digest) or with another number of values: the refit fits without them, recorded."""
+    extra = _with_surrogate(
+        fit_only_model, check_every=1, simulate_every=2, refit=True, outside="simulator"
+    )
+    part = optimization.optimize(_case(tmp_path, "old", extra=extra), max_iterations=2)
+    path = part.run_dir / "evaluations.jsonl"
+    lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for row in lines:
+        if "fit_only" not in row:
+            continue
+        if damage == "absent":
+            row.pop("fit_only")
+        elif damage == "other_keys":
+            row["fit_only"]["keys"] = "0" * 16
+        else:
+            row["fit_only"]["values"] = row["fit_only"]["values"][:-1]
+    path.write_text("".join(json.dumps(r) + "\n" for r in lines), encoding="utf-8")
+    _FitOnlySeen.seen = []
+    surrogates.fitted_model.cache_clear()
+    optimization.resume(part.run_dir)
+    history = layout.read_history(part.run_dir)
+    later = [r["surrogate_refit"] for r in history if "surrogate_refit" in r][1:]
+    assert later
+    # The resumed run's refits include old rows: all or none, so none, and recorded.
+    assert _FitOnlySeen.seen
+    assert all(seen is None for seen in _FitOnlySeen.seen)
+    assert all(not r["fit_only"] and r["lacking"] > 0 for r in later)
+
+
+def test_a_standalone_check_floors_a_zero_vector_by_the_models_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``apex surrogate check`` passes the model's own runs' scales to the gate (rev. 9)."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path, box="[design.box]\ninj = [295.0, 305.0]")
+    given: list[Mapping[str, float] | None] = []
+    from apex.algorithms.surrogates.gate import gate as real
+
+    def spy(*args: object, **kwargs: object) -> GateResult:
+        scales = kwargs.get("reference_scales")
+        given.append(cast("Mapping[str, float] | None", scales))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(surrogates, "gate", spy)
+    checked = surrogates.check_surrogate(model, tmp_path / "case.toml", runs=4, seed=3)
+    assert checked.summary.passed
+    [scales] = given
+    assert scales is not None
+    trained = surrogates._model_snapshots(model, surrogates.load_surrogate(model).manifest)
+    fwit = [r for r, k in enumerate(trained.keys) if k.datatype == "FWIT"]
+    assert scales["FWIT"] == float(np.max(np.abs(trained.outputs[fwit])))

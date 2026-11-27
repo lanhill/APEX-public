@@ -103,7 +103,7 @@ from apex.domain.surrogate import (
 )
 from apex.storage.optimization_directory import read_evaluations
 from apex.workflows.optimization import RestartFromStart
-from apex.workflows.simulated_objective import SimulatedObjective
+from apex.workflows.simulated_objective import SimulatedObjective, fit_only_digest
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,9 @@ class SurrogateObjective:
     refit_rows
         ``all`` (the build's runs and every simulator row so far) or ``latest`` (the rows
         since the last refit).
+    reference_scales
+        ``{vector: largest magnitude}`` over the model's training runs, the checks' floor for
+        a vector whose checked series are all zero (``gate.reference_scales``; revision 9).
     """
 
     def __init__(
@@ -259,6 +262,7 @@ class SurrogateObjective:
         simulate_every: int = 0,
         refitter: SurrogateRefitter | None = None,
         refit_rows: Literal["all", "latest"] = "all",
+        reference_scales: Mapping[str, float] | None = None,
     ) -> None:
         if simulate_every < 0:
             raise ValueError("simulate_every must be >= 0")
@@ -292,6 +296,7 @@ class SurrogateObjective:
         self.on_check_failure = on_check_failure
         self.tolerances = tolerances or GateTolerances()
         self.kinds = dict(kinds or {})
+        self.reference_scales = dict(reference_scales or {})
         self.max_evaluations = max_evaluations
         self.n_realizations = simulator.n_realizations
         self.vector = simulator.vector
@@ -654,6 +659,7 @@ class SurrogateObjective:
             [int(r) for r in reals],
             tolerances=self.tolerances,
             kinds=self.kinds,
+            reference_scales=self.reference_scales,
         )
 
     # ---------------------------------------------- schedule and refits (revision 4)
@@ -770,6 +776,7 @@ class SurrogateObjective:
         )
         base = refitter.base
         use_base = self.refit_rows == "all"
+        fit_only, lacking = self._fit_only_rows(base, keys, use_base, index)
         first = 1 + max(base.run_ids, default=-1)
         # A stream of its own per refit, from the run's seed: nothing to checkpoint, and the
         # optimizer's stream (the seed's first child) is never drawn from.
@@ -792,6 +799,8 @@ class SurrogateObjective:
                 outputs=np.concatenate([base.outputs, outputs], axis=1) if use_base else outputs,
                 run_ids=(*(base.run_ids if use_base else ()), *range(first, first + len(keys))),
                 provenance=base.provenance,
+                fit_only_keys=base.fit_only_keys if fit_only is not None else (),
+                fit_only_outputs=fit_only,
             )
             model.fit(snapshots, rng)
             if tuple(model.keys) != snapshots.keys:
@@ -819,6 +828,9 @@ class SurrogateObjective:
             "rows": len(keys),
             "runs": snapshots.n_runs,
             "rows_digest": _keys_digest(keys),
+            # Revision 9: whether the refit's runs carried the build's fit-only values.
+            "fit_only": fit_only is not None,
+            "lacking": lacking,
         }
         self._refits.append(record)
         logger.info(
@@ -826,6 +838,53 @@ class SurrogateObjective:
             extra={"index": index, "iteration": optimizer.iteration, "runs": snapshots.n_runs},
         )
         return dict(record)
+
+    def _fit_only_rows(
+        self, base: SnapshotSet, keys: Sequence[str], use_base: bool, index: int
+    ) -> tuple[FloatArray | None, int]:
+        """Return a refit's fit-only values ``(n_fit_only, n_runs)`` and its rows lacking them.
+
+        ``None`` when they are left out (revision 9). The build's runs' (with ``refit_rows =
+        "all"``) and each journal row's, in the snapshot set's order. All or none: a row
+        journaled without them (before revision 9), under other fit-only keys (another
+        digest) or with another number of values leaves them out of the refit, with a
+        warning, and the plugin then fits without them as it would on rows that never had
+        them.
+        """
+        if not base.fit_only_keys or base.fit_only_outputs is None:
+            return None, 0
+        journal = self.simulator.journal
+        n = len(base.fit_only_keys)
+        wanted = fit_only_digest(base.fit_only_keys)
+        found = [journal.fit_only.get(k) for k in keys]
+        lacking = sum(1 for f in found if f is None or f[0] != wanted or len(f[1]) != n)
+        if lacking:
+            logger.warning(
+                "surrogate_refit_without_fit_only",
+                extra={
+                    "event": "surrogate_refit_without_fit_only",
+                    "index": index,
+                    "rows": len(keys),
+                    "lacking": lacking,
+                    "note": (
+                        "the run's simulator rows journaled without them stay among every "
+                        "later refit's rows (refit_rows = 'all'): start the optimization "
+                        "again to have them"
+                        if use_base
+                        else "the refits after the rows without them have them again"
+                    ),
+                },
+            )
+            return None, lacking
+        rows = np.array([f[1] for f in found if f is not None], dtype=np.float64).T
+        rows = rows.reshape(n, len(keys))
+        logger.info("surrogate_refit_fit_only", extra={"index": index, "rows": len(keys)})
+        if use_base:
+            return (
+                np.ascontiguousarray(np.concatenate([base.fit_only_outputs, rows], axis=1)),
+                0,
+            )
+        return np.ascontiguousarray(rows), 0
 
     def _activate(self, active: ActiveSurrogate) -> None:
         """Evaluate with ``active`` from now on (its journal context too)."""

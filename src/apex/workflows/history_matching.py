@@ -1216,7 +1216,10 @@ class HistoryMatchingWorkflow:
         if surrogate.section.on_check_failure != "refit":
             return keys
         known = set(keys)
-        return keys + tuple(k for k in surrogate.active.model.keys if k not in known)
+        keys = keys + tuple(k for k in surrogate.active.model.keys if k not in known)
+        # and the build's fit-only vectors, for the refit's plugin.
+        known = set(keys)
+        return keys + tuple(k for k in surrogate.fit_only_keys() if k not in known)
 
     def _gate_roles(
         self,
@@ -1384,6 +1387,12 @@ class HistoryMatchingWorkflow:
                 coarse_checked = np.ascontiguousarray(
                     np.column_stack([_values(coarse[m]) for m in checked_ids])
                 )
+            fit_only_keys = surrogate.fit_only_keys()
+            fit_only_checked = (
+                keep(full[[index[key] for key in fit_only_keys]])
+                if fit_only_keys and all(key in index for key in fit_only_keys)
+                else None
+            )
             surrogate.refit(
                 iteration,
                 self._surrogate_inputs(keep(state[:, [j for j, _ in good]])),
@@ -1392,6 +1401,7 @@ class HistoryMatchingWorkflow:
                 self.streams["surrogate"],
                 self.run_dir.path,
                 coarse_outputs=coarse_checked,
+                fit_only_outputs=fit_only_checked,
             )
             # The iteration's forecast again, with the refit (not checked again: the checked
             # runs are now its training and held-out runs). Members the simulator ran

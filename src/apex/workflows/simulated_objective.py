@@ -47,6 +47,7 @@ from apex.algorithms.optimization.protocols import FloatArray, IntArray, Respons
 from apex.core.errors import WorkflowError
 from apex.core.progress import ProgressReporter
 from apex.core.simulation import Executor, MemberFailure, MemberInput, Simulator
+from apex.domain.observations import DataKey
 from apex.storage import optimization_directory as layout
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,17 @@ SimulatorFor = Callable[[Mapping[int, int]], Simulator]
 
 class BrokenStackError(WorkflowError):
     """A stack whose failures are tolerated failed every new simulation of a batch."""
+
+
+def fit_only_digest(keys: Sequence[DataKey]) -> str:
+    """Return the digest a journal row's fit-only values are recorded under.
+
+    So that a row's values are read only against the keys they were simulated at.
+    """
+    digest = hashlib.sha256()
+    for key in keys:
+        digest.update(f"{key.time}\x00{key.datatype}\x00{key.index}\x01".encode())
+    return digest.hexdigest()[:16]
 
 
 def evaluation_key(controls: FloatArray, realization: int, context: str = "") -> str:
@@ -112,6 +124,9 @@ class EvaluationJournal:
         #: Each successful row's controls ``(n_x,)`` and realization, by key (rows written
         #: have no controls and are absent).
         self.inputs: dict[str, tuple[list[float], int]] = {}
+        #: Each successful row's fit-only values by key, with their keys' digest (rows
+        #: written before, or without fit-only keys, are absent).
+        self.fit_only: dict[str, tuple[str, list[float]]] = {}
         self.next_member = 0
 
     @property
@@ -170,8 +185,13 @@ class EvaluationJournal:
         layout.append_evaluations(self.run_dir, list(rows))
 
     def _remember(self, row: Mapping[str, object]) -> None:
-        """Keep a successful row's controls and realization, if it records them."""
+        """Keep a successful row's controls and realization (and fit-only values), if any."""
         key = str(row["key"])
+        fit_only = row.get("fit_only")
+        if isinstance(fit_only, Mapping) and key not in self.fit_only:
+            values = fit_only.get("values")
+            if isinstance(values, list):
+                self.fit_only[key] = (str(fit_only.get("keys")), [float(v) for v in values])
         controls = row.get("controls")
         if isinstance(controls, list) and key not in self.inputs:
             realization = row.get("realization", 0)
@@ -272,6 +292,26 @@ class SimulatedObjective:
         self.broken_stack = broken_stack
         #: Simulations run by this process (the journal's replays are not counted).
         self.simulated = 0
+        self._fit_only_keys: list[DataKey] = []
+
+    @property
+    def fit_only_keys(self) -> list[DataKey]:
+        """Keys every new simulation also returns, for a surrogate's refits (revision 9).
+
+        Journaled apart from the responses (``fit_only``), all of them, under their digest;
+        never the objective's, and never part of an evaluation's key: a row's value does not
+        depend on them.
+        """
+        return list(self._fit_only_keys)
+
+    @fit_only_keys.setter
+    def fit_only_keys(self, keys: Sequence[DataKey]) -> None:
+        overlap = sorted({str(k) for k in keys if k in set(self.keys)})
+        if overlap:
+            raise ValueError(f"fit-only keys may not be the objective's: {overlap}")
+        if len(set(keys)) != len(keys):
+            raise ValueError("fit-only keys repeat")
+        self._fit_only_keys = list(keys)
 
     def __call__(
         self,
@@ -422,7 +462,11 @@ class SimulatedObjective:
                 {m.member_id: j for m, j in zip(members, pending.values(), strict=True)}
             )
         )
-        results = self.executor.run_all(simulator, members, self.keys, on_result=callback)
+        extra = list(self._fit_only_keys)
+        n_keys = len(self.keys)
+        results = self.executor.run_all(
+            simulator, members, [*self.keys, *extra], on_result=callback
+        )
         self.simulated += len(members)
         failures = [r for r in results if isinstance(r, MemberFailure)]
         if self.progress is not None:
@@ -440,6 +484,8 @@ class SimulatedObjective:
                              "error": result.message,
                              "controls": _column(controls, pending[key])})  # fmt: skip
                 continue
+            full = np.asarray(result)
+            result = full[:n_keys]
             # One column at a time: a reduction over a batch may round in another order
             # than over one column, and a value must not depend on its batch (a resume
             # evaluates other batches than an uninterrupted run).
@@ -463,6 +509,18 @@ class SimulatedObjective:
                     "controls": _column(controls, pending[key]),
                     # which source made it (absent in a plain run's rows).
                     **({} if self.source is None else {"source": self.source}),
+                    # values for a surrogate's refits, never the
+                    # objective's; absent without fit-only keys (every row as before).
+                    **(
+                        {
+                            "fit_only": {
+                                "keys": fit_only_digest(extra),
+                                "values": [float(v) for v in full[n_keys:]],
+                            }
+                        }
+                        if extra
+                        else {}
+                    ),
                     **(row_extra or {}),
                 }
             )

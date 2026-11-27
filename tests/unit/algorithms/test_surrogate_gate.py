@@ -9,7 +9,7 @@ reference's change (pressure) or magnitude (others), and Spearman's rho from its
 import numpy as np
 import pytest
 
-from apex.algorithms.surrogates.gate import gate, quantity_kind
+from apex.algorithms.surrogates.gate import gate, quantity_kind, reference_scales
 from apex.domain.observations import DataKey
 from apex.domain.surrogate import DatatypeGate, GateResult, GateTolerances
 
@@ -308,3 +308,42 @@ def test_several_objectives_are_gated_on_their_lowest_rank_correlation() -> None
     assert not flat.passed
     with pytest.raises(ValueError, match="objectives must be"):
         gate(empty, empty, [], range(5), objectives=(simulator, simulator[:, :4]))
+
+
+def test_a_vector_zero_in_every_checked_run_is_judged_against_the_training_scale() -> None:
+    """A check of one run whose controls shut every injector (its FWIT 0
+    throughout) gave a relative error that was not finite; against the training runs' scale
+    of FWIT it is finite, and nothing changes where a vector has a scale of its own."""
+    times = ("2001-01-01", "2002-01-01", "2003-01-01")
+    keys = [DataKey(t, d) for d in ("FWIT", "FOPT") for t in times]
+    simulator = np.array([[0.0], [0.0], [0.0], [10.0], [20.0], [30.0]])
+    surrogate = np.array([[0.5], [0.0], [0.25], [10.5], [19.0], [30.0]])
+    plain = gate(surrogate, simulator, keys, [0])
+    fwit = {d.datatype: d for d in plain.datatypes}["FWIT"]
+    assert fwit.error is None  # infinite: no scale at all
+    assert not fwit.passed
+    scales = reference_scales(keys, np.array([[100.0, 400.0]] * 3 + [[5.0, 50.0]] * 3))
+    assert scales == {"FWIT": 400.0, "FOPT": 50.0}
+    floored = gate(surrogate, simulator, keys, [0], reference_scales=scales)
+    by = {d.datatype: d for d in floored.datatypes}
+    # 0.5 against the floor 1e-3 * 400 = 0.4.
+    assert by["FWIT"].error == pytest.approx(0.5 / 0.4, rel=1e-15)
+    # FOPT has a scale of its own: bit for bit the same with and without the training's.
+    assert by["FOPT"].error == {d.datatype: d for d in plain.datatypes}["FOPT"].error
+    # A zero error against a zero vector stays 0.
+    exact = gate(simulator.copy(), simulator, keys, [0], reference_scales=scales)
+    assert {d.datatype: d for d in exact.datatypes}["FWIT"].error == 0.0
+
+
+def test_a_zero_vector_with_a_large_prediction_fails_and_round_off_passes() -> None:
+    """Revision 9: the training-scale floor keeps a zero vector's gate meaningful: a
+    surrogate predicting injection where the simulator has none fails, round-off passes."""
+    times = ("2001-01-01", "2002-01-01")
+    keys = [DataKey(t, "FWIT") for t in times]
+    simulator = np.zeros((2, 1))
+    scales = {"FWIT": 400.0}
+    large = gate(np.array([[50.0], [80.0]]), simulator, keys, [0], reference_scales=scales)
+    assert not large.passed
+    assert large.datatypes[0].error == pytest.approx(80.0 / 0.4)
+    tiny = gate(np.array([[1e-12], [0.0]]), simulator, keys, [0], reference_scales=scales)
+    assert tiny.passed

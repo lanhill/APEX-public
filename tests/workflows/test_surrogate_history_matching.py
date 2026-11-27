@@ -1594,3 +1594,105 @@ def test_early_runs_need_an_executor_that_carries_the_stop_date_and_a_report_dat
     with pytest.raises(ConfigError, match="cannot stop at a report date"):
         refuse_early_runs(model, "2022-02-01", SimpleNamespace(), cast(Any, SimpleNamespace()),
                           "ssh")  # fmt: skip
+
+
+#: The linear case's unobserved vector, for a build's fit only.
+FPR_ROWS = np.array([[0.5, -0.25, 1.0]] * len(cases.TIMES)) * np.arange(1, 5)[:, None]
+
+
+def _with_fpr(config: Path) -> Path:
+    """Give the linear case an unobserved output ``FPR`` at its times (rows of ``G``)."""
+    folder = config.parent
+    forward = np.load(folder / "forward.npz")["matrix"]
+    if forward.shape[0] == len(cases.keys_in_order()):
+        np.savez(folder / "forward.npz", matrix=np.vstack([forward, FPR_ROWS]))
+    text = config.read_text()
+    extra = ", ".join(f'["{t}", "FPR"]' for t in cases.TIMES)
+    text = text.replace('"]]\n\n[execution]', f'"], {extra}]\n\n[execution]', 1)
+    assert '"FPR"' in text
+    config.write_text(text)
+    return config
+
+
+def test_a_checks_refit_carries_the_builds_fit_only_vectors(tmp_path: Path) -> None:
+    """Revision 9: a check that may refit also runs the build's fit-only vectors, and the
+    refit's runs carry them, the checked members' after the build's."""
+    _with_fpr(cases.write_case(tmp_path, name="base"))
+    build = cases.write_build(tmp_path, PLUGIN, case="base.toml")
+    times = json.dumps(list(cases.TIMES))
+    build.write_text(build.read_text().replace(
+        'config_file = "base.toml"',
+        f'config_file = "base.toml"\nfit_only = {{ vectors = ["FPR"], times = {times} }}',
+    ))  # fmt: skip
+    result = surrogates.build(build)
+    assert result.summary.gate is not None
+    assert result.summary.gate.passed
+    model = tmp_path / "runs" / "lin" / "model" / "surrogate.json"
+    biased = _biased(model)
+    config = _with_fpr(cases.write_case(
+        tmp_path, name="hm",
+        surrogate=_section(biased, check_every=1, check_members=6, on_check_failure="refit"),
+    ))  # fmt: skip
+    composition.start(config)
+    run = _run(tmp_path, "hm")
+    [refit] = _named(run, "surrogate_refit")
+    assert refit["iteration"] == 1
+    snapshots = load_snapshots(run / "surrogates" / "refit_1" / "snapshots.npz")
+    assert snapshots.n_runs == 40 + 6
+    assert snapshots.fit_only_keys == tuple(DataKey(t, "FPR") for t in cases.TIMES)
+    assert snapshots.fit_only_outputs is not None
+    # The checked members' FPR is G_FPR x of their states, as the simulator gives it.
+    checked = snapshots.inputs["x"][:, -6:]
+    np.testing.assert_allclose(
+        snapshots.fit_only_outputs[:, -6:], FPR_ROWS @ checked, rtol=1e-12, atol=1e-12
+    )
+
+
+def test_a_passing_check_needs_no_snapshot_set_even_when_it_may_refit(
+    tmp_path: Path, built: Path
+) -> None:
+    """Revision 9's review: the fit-only keys are read once per model, and a snapshot set
+    that cannot be read gives none: a check that passes runs without it."""
+    (built.parent.parent / "snapshots.npz").unlink()
+    config = cases.write_case(
+        tmp_path, name="hm",
+        surrogate=_section(built, check_every=1, check_members=4, on_check_failure="refit"),
+    )  # fmt: skip
+    composition.start(config)
+    report = json.loads((_run(tmp_path, "hm") / "summary.json").read_text())["surrogate"]
+    assert report["checks"]
+    assert all(c["passed"] for c in report["checks"])
+    assert report["refits"] == []
+
+
+def test_the_extra_fit_only_keys_change_no_check_score_or_metric(tmp_path: Path) -> None:
+    """Revision 9: a check that also runs the build's fit-only vectors stores, scores and
+    records the same as one that does not (the Affine plugin ignores them)."""
+    found = {}
+    for name, fit_only in (("plain", False), ("extra", True)):
+        folder = tmp_path / name
+        _with_fpr(cases.write_case(folder, name="base"))
+        build = cases.write_build(folder, PLUGIN, case="base.toml")
+        if fit_only:
+            times = json.dumps(list(cases.TIMES))
+            build.write_text(build.read_text().replace(
+                'config_file = "base.toml"',
+                f'config_file = "base.toml"\nfit_only = {{ vectors = ["FPR"], times = {times} }}',
+            ))  # fmt: skip
+        surrogates.build(build)
+        biased = _biased(folder / "runs" / "lin" / "model" / "surrogate.json")
+        config = _with_fpr(cases.write_case(
+            folder, name="hm",
+            surrogate=_section(biased, check_every=1, check_members=6, on_check_failure="refit"),
+        ))  # fmt: skip
+        composition.start(config)
+        run = _run(folder, "hm")
+        found[name] = (
+            dict(np.load(run / "checkpoints" / "check_1.npz")),
+            json.loads((run / "summary.json").read_text()),
+        )
+    (plain, plain_summary), (extra, extra_summary) = found["plain"], found["extra"]
+    for key in ("member_ids", "state", "simulator_predicted", "surrogate_predicted", "failed"):
+        np.testing.assert_array_equal(plain[key], extra[key])
+    for key in ("final_data_mismatch_mean", "prior_data_mismatch_mean", "final_metrics"):
+        assert plain_summary[key] == extra_summary[key]
