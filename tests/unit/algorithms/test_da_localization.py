@@ -1,3 +1,6 @@
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -16,6 +19,8 @@ from apex.algorithms.data_assimilation.localization import (
     correlation,
     derangement,
     gaspari_cohn,
+    pack_taper,
+    unpack_taper,
 )
 from apex.domain import DataKey
 
@@ -170,7 +175,104 @@ def test_prior_taper_round_trips_through_export_and_restore() -> None:
     restored.restore_state(original.export_state())
 
     assert restored.taper_matrix is not None
-    np.testing.assert_array_equal(restored.taper_matrix, original.export_state()["taper"])
+    assert original.taper_matrix is not None
+    assert restored.taper_matrix.tobytes() == original.taper_matrix.tobytes()
+    assert "taper_rows" in original.export_state()  # a soft taper is stored as doubles
+
+
+def _same_bits(a: np.ndarray, b: np.ndarray) -> bool:
+    return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+
+
+def test_a_hard_taper_with_unlocalized_rows_is_stored_as_bits_and_restored_bit_for_bit() -> None:
+    """Regression (Norne, 2026-11-26): the dense taper of 418,539 unknowns x 7,260 data was
+    a 24 GB checkpoint. Unlocalized rows (all ones) are a bitmask; a hard taper's other rows
+    packed bits; the restored taper has the same bits, so a resume stays exact."""
+    rng = np.random.default_rng(5)
+    original = PriorAdaptiveLocalization(
+        [7, 6], taper="hard", unlocalized=["nn_params"], variable_names=["perm", "nn_params"]
+    )
+    original.prepare(rng.standard_normal((13, 30)), rng.standard_normal((11, 30)), [], rng)
+    assert original.taper_matrix is not None
+    state = original.export_state()
+    assert "taper" not in state
+    assert "taper_rows" not in state
+    assert state["taper_bits"].dtype == np.uint8
+    assert state["taper_bits"].shape == (7, 2)  # 7 localized rows, 11 data in 2 bytes each
+    restored = PriorAdaptiveLocalization(
+        [7, 6], taper="hard", unlocalized=["nn_params"], variable_names=["perm", "nn_params"]
+    )
+    restored.restore_state(state)
+    assert restored.taper_matrix is not None
+    assert _same_bits(restored.taper_matrix, original.taper_matrix)
+    assert np.all(restored.taper_matrix[7:] == 1.0)
+
+
+@pytest.mark.parametrize(
+    "taper",
+    [
+        np.zeros((0, 4)),
+        np.ones((3, 5)),
+        np.zeros((3, 5)),
+        np.array([[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [0.0, 0.0, 1.0]]),
+        np.array([[-0.0, 1.0], [0.0, 1.0]]),  # -0.0 is not binary: kept as doubles
+        np.array([[0.25, 1.0], [1.0, 1.0]]),
+    ],
+)
+def test_pack_and_unpack_taper_are_exact(taper: np.ndarray) -> None:
+    packed = pack_taper(taper)
+    assert _same_bits(unpack_taper(packed), np.ascontiguousarray(taper))  # type: ignore[arg-type]
+
+
+def test_pack_and_unpack_taper_through_an_npz_file_are_exact(tmp_path: Path) -> None:
+    """NaN (with a payload), infinities, a subnormal, 1 + eps, -0.0 and a Fortran-ordered,
+    strided input survive the file round trip with their bits, C-contiguous."""
+    special = np.array([np.nan, np.inf, -np.inf, 5e-324, 1.0000000000000002, -0.0, 0.0, 1.0])
+    payload = np.array([0x7FF8000000000123], dtype=np.uint64).view(np.float64)
+    taper = np.ones((6, 11))
+    taper[0, :8] = special
+    taper[1, 3] = payload[0]
+    taper[3] = np.linspace(0, 1, 11)
+    fortran = np.asfortranarray(taper)
+    strided = np.ones((12, 11))
+    strided[::2] = taper
+    for given in (taper, fortran, strided[::2]):
+        # Typed as Any: numpy's stubs confuse **arrays with the allow_pickle keyword.
+        packed: dict[str, Any] = pack_taper(given)
+        np.savez(tmp_path / "t.npz", **packed)
+        with np.load(tmp_path / "t.npz") as stored:
+            back = unpack_taper({k: stored[k] for k in stored.files})
+        assert back is not None
+        assert back.flags.c_contiguous
+        assert _same_bits(back, np.ascontiguousarray(taper))
+
+
+def test_unpack_taper_refuses_a_row_mask_of_another_size() -> None:
+    packed = pack_taper(np.array([[0.0, 1.0]] * 9))
+    packed["taper_ones"] = packed["taper_ones"][:1]
+    with pytest.raises(ValueError, match="row mask"):
+        unpack_taper(packed)
+
+
+def test_pack_taper_chunks_rows_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    import apex.algorithms.data_assimilation.localization as module
+
+    monkeypatch.setattr(module, "_TAPER_CHUNK", 3)  # several chunks, one partial
+    taper = (np.random.default_rng(6).random((11, 13)) > 0.5).astype(np.float64)
+    taper[[2, 7]] = 1.0
+    packed = pack_taper(taper)
+    assert packed["taper_bits"].shape == (9, 2)
+    assert _same_bits(unpack_taper(packed), taper)  # type: ignore[arg-type]
+
+
+def test_unpack_taper_reads_an_older_dense_taper_and_refuses_a_misfit() -> None:
+    dense = np.array([[0.0, 0.5], [1.0, 1.0]])
+    assert _same_bits(unpack_taper({"taper": dense}), dense)  # type: ignore[arg-type]
+    assert unpack_taper({}) is None
+    packed = pack_taper(np.array([[0.0, 1.0], [1.0, 0.0]]))
+    packed["taper_shape"] = np.array([2, 20])
+    with pytest.raises(ValueError, match="do not fit"):
+        unpack_taper(packed)
 
 
 def test_localizations_are_registered() -> None:

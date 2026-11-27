@@ -181,6 +181,16 @@ class OptimizerBase(ABC):
     multi_objective: ClassVar[bool] = False
     #: What one iteration evaluates at most, in words, for :meth:`max_evaluations_basis`.
     iteration_evaluations: ClassVar[str] = ""
+    #: Whether a workflow may change the objective between iterations
+    #: (a surrogate's schedule of simulator iterations, and its refits). True only where the
+    #: iterate's objective ``fk`` is the only objective value the optimizer carries from one
+    #: iteration to the next (each iteration evaluates its own ensemble and trial points),
+    #: so that :meth:`reevaluate_iterate` after the change makes every comparison of the
+    #: next iteration one of values from the same objective. Quantities derived from earlier
+    #: gradients (momentum, an adaptive step's moments, a covariance updated from the
+    #: ensemble Hessian) do carry over, mixing the objectives' gradients: no comparison uses
+    #: them. Read from the class's own attributes: a subclass declares it again.
+    scheduled_ensembles: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -500,6 +510,24 @@ class OptimizerBase(ABC):
         if self.epf_iteration <= 1 or self.iteration != 0:
             return
         self.fk = self.fun(self.xk)
+
+    def reevaluate_iterate(self) -> None:
+        """Evaluate the objective at the iterate again, after the objective itself changed.
+
+        As a new EPF penalty factor does (:meth:`_refresh_epf_function_value`): a workflow
+        that replaces the objective between iterations (a refitted surrogate) calls
+        it, so that the next step is compared with the iterate's value
+        under the same objective. Counted in ``nfev``.
+        """
+        self.fk = self._objective_value(self.xk)
+
+    @property
+    def inner_loop_done(self) -> bool:
+        """Whether the current EPF iteration's inner loop has ended (converged, or at maxiter).
+
+        Read by a workflow after an accepted step: no further step of this loop follows.
+        """
+        return self._inner_done
 
     # ------------------------------------------------------------------ results and logs
 

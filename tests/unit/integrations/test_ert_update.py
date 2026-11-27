@@ -109,7 +109,8 @@ def test_a_prior_localization_keeps_the_first_updates_taper(tmp_path: Path) -> N
     with_first, _ = apex_update(moved, config, seed=7, prepared=prepared)
     with_own, _ = apex_update(moved, config, seed=7)
 
-    assert set(prepared) == {"taper"}
+    # The taper, packed exactly (localization.pack_taper).
+    assert set(prepared) == {"taper_shape", "taper_ones", "taper_bits"}
     assert not np.array_equal(with_first["PERMX"], with_own["PERMX"])  # the taper is kept
     assert all(np.isfinite(v).all() for v in with_first.values())
 

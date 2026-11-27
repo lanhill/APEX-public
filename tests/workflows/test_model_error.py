@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from apex.algorithms.data_assimilation.localization import LocalizedMethod
+from apex.algorithms.data_assimilation.localization import LocalizedMethod, unpack_taper
 from apex.core.errors import ConfigError, SimulationError
 from apex.core.options import InputFile
 from apex.core.plugins import model_error_models, simulators
@@ -584,6 +584,14 @@ def _halves_case(directory: Path, localization: str | None) -> Path:
     return config
 
 
+def _saved_taper(state: "np.lib.npyio.NpzFile") -> np.ndarray:
+    """The taper a checkpoint holds (packed since 2026-11-26, localization.unpack_taper)."""
+    prefix = "method_state:"
+    taper = unpack_taper({k[len(prefix) :]: state[k] for k in state.files if k.startswith(prefix)})
+    assert taper is not None
+    return taper
+
+
 def test_a_models_parameter_mask_reaches_the_runs_taper_and_resumes_bit_identically(
     tmp_path: Path,
 ) -> None:
@@ -599,7 +607,7 @@ def test_a_models_parameter_mask_reaches_the_runs_taper_and_resumes_bit_identica
         whole = composition.start(_halves_case(tmp_path / "whole", localization), max_steps=4)
         checkpoints = tmp_path / "whole" / "runs" / "run" / "checkpoints"
         state = np.load(sorted(checkpoints.glob("algorithm_state_*.npz"))[-1])
-        matrix = state["method_state:taper"]
+        matrix = _saved_taper(state)
         early = np.arange(N_DATA) < N_DATA // 2
         np.testing.assert_array_equal(matrix[N_STATE:], np.vstack([early, ~early]).astype(float))
         parts = _halves_case(tmp_path / "parts", localization)
@@ -653,7 +661,7 @@ def test_a_parameter_mask_with_local_analysis_and_held_out_data(tmp_path: Path) 
         composition.start(held, max_steps=2)
         checkpoints = tmp_path / "held" / "runs" / "run" / "checkpoints"
         state = np.load(sorted(checkpoints.glob("algorithm_state_*.npz"))[-1])
-        matrix = state["method_state:taper"]
+        matrix = _saved_taper(state)
         assert matrix.shape == (N_STATE + 2, N_DATA - 2)
         early = np.arange(N_DATA - 2) < N_DATA // 2
         np.testing.assert_array_equal(matrix[N_STATE:], np.vstack([early, ~early]).astype(float))

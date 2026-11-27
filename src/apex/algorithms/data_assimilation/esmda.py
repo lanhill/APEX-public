@@ -242,12 +242,12 @@ class ESMDA(EmitsDiagnostics):
         if localization is not None:
             localization.prepare(prior_state, prior_predicted, keys, rng)
 
-    def export_prepared(self) -> dict[str, NDArray[np.float64]]:
+    def export_prepared(self) -> dict[str, NDArray[Any]]:
         """Return the localization's prepared arrays (empty without localization)."""
         localization = self._localization()
         return {} if localization is None else localization.export_state()
 
-    def restore_prepared(self, arrays: Mapping[str, NDArray[np.float64]]) -> None:
+    def restore_prepared(self, arrays: Mapping[str, NDArray[Any]]) -> None:
         """Restore the localization's prepared arrays on resume."""
         localization = self._localization()
         if localization is not None:

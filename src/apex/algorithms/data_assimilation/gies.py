@@ -602,7 +602,7 @@ class GIES(EmitsDiagnostics):
         if self.requires_prior_state:
             self.strategy.prepare(prior_state)  # type: ignore[attr-defined]
 
-    def export_prepared(self) -> dict[str, NDArray[np.float64]]:
+    def export_prepared(self) -> dict[str, NDArray[Any]]:
         """Return the localization's and the strategy's prepared arrays (may be empty)."""
         localization = self._localization()
         arrays = {} if localization is None else dict(localization.export_state())
@@ -611,7 +611,7 @@ class GIES(EmitsDiagnostics):
             arrays.update({f"strategy:{k}": v for k, v in prepared.items()})
         return arrays
 
-    def restore_prepared(self, arrays: Mapping[str, NDArray[np.float64]]) -> None:
+    def restore_prepared(self, arrays: Mapping[str, NDArray[Any]]) -> None:
         """Restore the localization's and the strategy's prepared arrays on resume."""
         own = {k[len("strategy:") :]: v for k, v in arrays.items() if k.startswith("strategy:")}
         localization = self._localization()

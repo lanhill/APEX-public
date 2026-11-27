@@ -13,7 +13,7 @@ import datetime as dt
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import numpy as np
 import pytest
@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from typer.testing import CliRunner
 
 from apex.cli.main import app
-from apex.core.errors import ConfigError, SurrogateDomainError
+from apex.core.errors import ConfigError, SurrogateDomainError, WorkflowError
 from apex.core.plugins import simulators, surrogate_models
 from apex.core.simulation import MemberInput
 from apex.core.surrogates import SurrogateCapabilities, SurrogateInputs, SurrogateParts
@@ -803,3 +803,289 @@ def test_a_manifest_without_a_control_box_keeps_its_bytes(tmp_path: Path) -> Non
     # The same model with its box recorded is another file, so another identity.
     assert "control_box" in model.read_text()
     assert loaded.identity != without.identity
+
+
+# ------------------------------------------------ schedule and refits
+
+
+def _strip_controls(run_dir: Path) -> None:
+    """Rewrite a run's journal as written before controls were journaled."""
+    path = run_dir / layout.EVALUATIONS
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for row in rows:
+        row.pop("controls", None)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def test_the_journal_records_each_evaluations_controls(tmp_path: Path) -> None:
+    """Each row's controls give its key again."""
+    config_path = _case(tmp_path, "plain", maxiter=3)
+    run = optimization.optimize(config_path)
+    context = optimization.evaluation_context(optimization.load_optimization_config(config_path))
+    rows = layout.read_evaluations(run.run_dir)
+    assert rows
+    for row in rows:
+        controls = np.asarray(row["controls"], dtype=np.float64)
+        assert evaluation_key(controls, row["realization"], context) == row["key"]
+
+
+def test_a_journal_without_controls_replays_and_resumes_bit_identically(tmp_path: Path) -> None:
+    whole = optimization.optimize(_case(tmp_path, "whole"))
+    part = optimization.optimize(_case(tmp_path, "part"), max_iterations=3)
+    _strip_controls(part.run_dir)
+    before = len(layout.read_evaluations(part.run_dir))
+    runs = ToyReservoir.runs
+    resumed = optimization.resume(part.run_dir)
+    assert layout.read_history(resumed.run_dir) == layout.read_history(whole.run_dir)
+    np.testing.assert_array_equal(resumed.result.x, whole.result.x)
+    rows = layout.read_evaluations(resumed.run_dir)
+    # The stripped rows were replayed by their keys: only the new ones were simulated.
+    assert ToyReservoir.runs - runs == len(rows) - before
+    assert [r["key"] for r in rows] == [r["key"] for r in layout.read_evaluations(whole.run_dir)]
+
+
+def test_default_options_keep_a_surrogate_runs_files(tmp_path: Path) -> None:
+    """Without simulate_every and refit nothing of revision 4 is written (today's files)."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    run = optimization.optimize(_case(tmp_path, "fast", extra=_with_surrogate(model)))
+    config = layout.read_config(run.run_dir)
+    assert not {"simulate_every", "refit", "refit_rows"} & set(config["surrogate"])
+    checkpoint = json.loads((run.run_dir / layout.CHECKPOINT_VALUES).read_text())
+    assert "hooks" not in checkpoint["values"]
+    history = layout.read_history(run.run_dir)
+    new_columns = {"iteration_source", "surrogate_refit", "iterate_reevaluated"}
+    assert not any(new_columns & set(r) for r in history)
+    assert not any(r.get("scheduled") for r in layout.read_evaluations(run.run_dir))
+    result = layout.read_result(run.run_dir)
+    assert "refits" not in result["surrogate"]
+    assert not (run.run_dir / "surrogates").exists()
+    # The same run as one stating the defaults.
+    stated = optimization.optimize(
+        _case(tmp_path, "stated", extra=_with_surrogate(model, simulate_every=0, refit=False))
+    )
+    assert layout.read_history(stated.run_dir) == history
+
+
+def _scheduled_count(history: Sequence[Mapping[str, Any]], every: int, n_r: int = 1) -> int:
+    """Return the evaluations the schedule gives the simulator, from the history's counters.
+
+    The start's evaluation serves iteration 1; in step ``i`` the members and the trial
+    points serve ``i``, and an iterate evaluated again serves ``i + 1``.
+    """
+
+    def scheduled(i: int) -> bool:
+        return (i - 1) % every == 0
+
+    previous = history[0]
+    count = n_r * int(previous["nfev"])
+    for row in history[1:]:
+        i = int(row["iteration"])
+        members = int(row["member_evaluations"]) - int(previous["member_evaluations"])
+        points = int(row["nfev"]) - int(previous["nfev"])
+        again = 1 if "iterate_reevaluated" in row else 0
+        if scheduled(i):
+            count += members + n_r * (points - again)
+        if again and scheduled(i + 1):
+            count += n_r
+        previous = row
+    return count
+
+
+def test_a_schedule_gives_the_simulator_its_iterations(tmp_path: Path) -> None:
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    config_path = _case(
+        tmp_path,
+        "scheduled",
+        extra=_with_surrogate(model, check_every=0, simulate_every=2, outside="simulator"),
+    )
+    built = ToyReservoir.runs
+    run = optimization.optimize(config_path)
+    history = layout.read_history(run.run_dir)
+    steps = [r for r in history if r["kind"] == "step"]
+    assert len(steps) >= 3
+    assert [r["iteration_source"] for r in steps] == [
+        "simulator" if (r["iteration"] - 1) % 2 == 0 else "surrogate" for r in steps
+    ]
+    rows = layout.read_evaluations(run.run_dir)
+    scheduled = [r for r in rows if r.get("scheduled")]
+    simulator = [r for r in rows if r["source"] == "simulator"]
+    # Every simulator run is the schedule's, or the optimum's (if not in the journal yet).
+    assert ToyReservoir.runs - built == len(simulator)
+    assert len(simulator) - len(scheduled) <= 1
+    assert len(scheduled) == _scheduled_count(history, 2)
+    # Each change of source evaluated the iterate again, by the next iteration's source.
+    for row in steps[:-1]:
+        here = (row["iteration"] - 1) % 2 == 0
+        following = row["iteration"] % 2 == 0
+        assert ("iterate_reevaluated" in row) == (following != here)
+        if "iterate_reevaluated" in row:
+            source = "simulator" if following else "surrogate"
+            assert row["iterate_reevaluated"]["source"] == source
+    result = layout.read_result(run.run_dir)
+    assert result["surrogate"]["scheduled_simulator_evaluations"] == len(scheduled)
+    assert result["surrogate"]["refits"] == 0
+    plan = optimization.plan_optimization(optimization.load_optimization_config(config_path))
+    assert plan.max_simulator_runs is not None
+    assert len(simulator) <= plan.max_simulator_runs
+
+
+def test_refits_resume_bit_identically_after_an_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    extra = _with_surrogate(model, check_every=1, simulate_every=2, refit=True, outside="simulator")
+    whole = optimization.optimize(_case(tmp_path, "whole", extra=extra))
+    history = layout.read_history(whole.run_dir)
+    refits = [r["surrogate_refit"] for r in history if "surrogate_refit" in r]
+    assert [r["iteration"] for r in refits] == [
+        r["iteration"] for r in history if r["kind"] == "step" and (r["iteration"] - 1) % 2 == 0
+    ]
+    assert len(refits) >= 2
+    # "all": each refit has the build's 15 runs and every simulator row so far.
+    assert all(r["runs"] == 15 + r["rows"] for r in refits)
+    assert [r["rows"] for r in refits] == sorted(r["rows"] for r in refits)
+    for n, record in enumerate(refits, start=1):
+        manifest = whole.run_dir / record["path"]
+        assert record["path"] == f"surrogates/refit_{n}/model/surrogate.json"
+        assert json.loads(manifest.read_text())["provenance"]["plan"] == "refit"
+        # A refit is a model of its own: loaded, and its snapshot set found, from its files.
+        loaded = surrogates.load_surrogate(manifest, identity=record["identity"])
+        snapshots = surrogates._model_snapshots(manifest, loaded.manifest)
+        assert snapshots.n_runs == record["runs"]
+    rows = layout.read_evaluations(whole.run_dir)
+    assert {r["source"] for r in rows} == {"surrogate", "simulator"}
+    result = layout.read_result(whole.run_dir)
+    assert result["surrogate"]["refits"] == len(refits)
+    assert result["surrogate"]["active_identity"] == refits[-1]["identity"]
+    checks = [r["surrogate_check"] for r in history if "surrogate_check" in r]
+    assert checks
+    assert all(c["passed"] for c in checks)
+
+    # Killed after the second refit, before its step's checkpoint.
+    saved = layout.save_checkpoint
+    calls = {"n": 0}
+
+    def ends_at_the_third_step(run_dir: Path, state: Mapping[str, object]) -> None:
+        calls["n"] += 1
+        if calls["n"] == 4:  # the start, steps 1 and 2, then step 3 after its refit
+            raise RuntimeError("the process ended here")
+        saved(run_dir, state)
+
+    monkeypatch.setattr(layout, "save_checkpoint", ends_at_the_third_step)
+    with pytest.raises(RuntimeError, match="ended here"):
+        optimization.optimize(_case(tmp_path, "cut", extra=extra))
+    monkeypatch.undo()
+    cut = tmp_path / "runs" / "cut"
+    assert (cut / "surrogates" / "refit_2").is_dir()
+    resumed = optimization.resume(cut)
+    assert layout.read_history(cut) == history
+    np.testing.assert_array_equal(resumed.result.x, whole.result.x)
+    assert layout.read_result(cut)["objective"] == result["objective"]
+    # The same evaluations, from the same sources, with the same ids.
+    assert [(r["key"], r["member_id"], r["source"]) for r in layout.read_evaluations(cut)] == [
+        (r["key"], r["member_id"], r["source"]) for r in rows
+    ]
+
+    # Stopped at a step boundary and resumed with the models loaded afresh: the same run.
+    part = optimization.optimize(_case(tmp_path, "part", extra=extra), max_iterations=2)
+    surrogates.fitted_model.cache_clear()
+    optimization.resume(part.run_dir)
+    assert layout.read_history(part.run_dir) == history
+
+
+def test_latest_refits_on_the_rows_since_the_last(tmp_path: Path) -> None:
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    extra = _with_surrogate(
+        model, check_every=1, simulate_every=2, refit=True, refit_rows="latest",
+        outside="simulator",
+    )  # fmt: skip
+    run = optimization.optimize(_case(tmp_path, "latest", extra=extra))
+    history = layout.read_history(run.run_dir)
+    refits = [r["surrogate_refit"] for r in history if "surrogate_refit" in r]
+    assert refits
+    assert all(r["runs"] == r["rows"] for r in refits)
+
+
+def test_a_refit_refuses_rows_without_controls(tmp_path: Path) -> None:
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    extra = _with_surrogate(model, check_every=1, simulate_every=2, refit=True, outside="simulator")
+    part = optimization.optimize(_case(tmp_path, "old", extra=extra), max_iterations=1)
+    _strip_controls(part.run_dir)
+    with pytest.raises(WorkflowError, match="record no controls"):
+        optimization.resume(part.run_dir)
+
+
+def test_what_a_schedule_refuses(tmp_path: Path) -> None:
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    with pytest.raises(ConfigError, match="simulate_every >= 1"):
+        optimization.load_optimization_config(
+            _case(tmp_path, "a", extra=_with_surrogate(model, refit=True))
+        )
+    with pytest.raises(ConfigError, match="1 <= check_every"):
+        optimization.load_optimization_config(
+            _case(
+                tmp_path,
+                "b",
+                extra=_with_surrogate(model, refit=True, simulate_every=2, check_every=0),
+            )
+        )
+    path = _case(tmp_path, "c", extra=_with_surrogate(model, simulate_every=2, outside="simulator"))
+    text = path.read_text()
+    enopt = 'name = "enopt"\noptions = { ne = 6, maxiter = 6, alpha = 0.1, resample = 1 }'
+    assert enopt in text
+    path.write_text(text.replace(enopt, 'name = "smcopt"\noptions = { ne = 6, maxiter = 6 }'))
+    with pytest.raises(ConfigError, match="carries objective values"):
+        optimization.build(optimization.load_optimization_config(path))
+    # A refit must be checked on a step it took: a check among iterations s + 1 ... s + j - 1.
+    for every, check in ((2, 2), (1, 1), (3, 3)):
+        with pytest.raises(ConfigError, match="1 <= check_every"):
+            optimization.load_optimization_config(
+                _case(tmp_path, f"d{every}{check}", extra=_with_surrogate(
+                    model, refit=True, simulate_every=every, check_every=check,
+                    outside="simulator",
+                ))
+            )  # fmt: skip
+    # A simulated step may leave the domain: "stop" would stop there on every resume.
+    with pytest.raises(ConfigError, match='outside = "simulator"'):
+        optimization.load_optimization_config(
+            _case(tmp_path, "e", extra=_with_surrogate(model, simulate_every=2))
+        )
+
+
+def test_a_failed_check_of_a_refit_restarts_with_the_configured_models_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refit that fails its check switches to the simulator; the restart is the plain run."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    run_dir = tmp_path / "runs" / "switch"
+    original = _Features.predict
+
+    def wrong_after_two_refits(
+        self: _Features, inputs: SurrogateInputs, keys: Sequence[DataKey]
+    ) -> np.ndarray:
+        # A stand-in for a refit that is wrong where the optimizer goes (in memory only).
+        self.bias = 0.2 if (run_dir / "surrogates" / "refit_2").exists() else 0.0
+        return original(self, inputs, keys)
+
+    monkeypatch.setattr(_Features, "predict", wrong_after_two_refits)
+    surrogates.fitted_model.cache_clear()
+    extra = _with_surrogate(
+        model, check_every=1, simulate_every=2, refit=True, outside="simulator",
+        on_check_failure="simulator",
+    )  # fmt: skip
+    run = optimization.optimize(_case(tmp_path, "switch", extra=extra))
+    state = json.loads((run_dir / STATE_FILE).read_text())
+    assert state["switched"]
+    assert [c["passed"] for c in state["checks"]][-1] is False
+    plain = optimization.optimize(_case(tmp_path, "plain"))
+    np.testing.assert_array_equal(run.result.x, plain.result.x)
+    history = layout.read_history(run_dir)
+    assert not any("surrogate_refit" in r for r in history)  # the restarted run's rows
+    assert optimization.resume(run_dir).finished

@@ -176,8 +176,8 @@ def apex_update(
     update: ErtUpdateInput,
     config: UpdateConfig,
     seed: int,
-    prepared: Mapping[str, NDArray[np.float64]] | None = None,
-) -> tuple[dict[str, NDArray[np.float64]], dict[str, NDArray[np.float64]]]:
+    prepared: Mapping[str, NDArray[Any]] | None = None,
+) -> tuple[dict[str, NDArray[np.float64]], dict[str, NDArray[Any]]]:
     """Run APEX's analysis step on one ERT update's arrays.
 
     Parameters

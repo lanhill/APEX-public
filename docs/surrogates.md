@@ -419,6 +419,11 @@ runs/<name>/
    # relative = { rate = 0.02 }   # the checks' tolerances: may only tighten the model's gate
    # workers = 4              # local processes for the surrogate's evaluations
    # max_evaluations = 50000  # the run's bound on surrogate evaluations
+   # simulate_every = 3       # iterations 1, 4, 7, ... wholly by the simulator (0: none)
+   #                          # (with outside = "simulator")
+   # refit = true             # refit after each of them, from the journal's simulator rows
+   #                          # (with check_every <= simulate_every - 1)
+   # refit_rows = "all"       # "all": the build's runs and every simulator row; "latest"
    ```
 
 3. Validate it: `uv run apex validate OPT.toml`. The plan gives the surrogate's evaluations apart from the simulator's runs; only the simulator's runs count towards approval. The run is refused when the model's plugin does not take the controls, the model did not pass its gate or its last check failed, was built for another simulator stack, or on other inputs (controls, parameterizations, `[model]` arrays), or does not answer the objective's keys.
@@ -435,6 +440,18 @@ What happens during the run:
 - **Resume** is bit-identical to an uninterrupted run, checks included.
 - **Checking the model later:** `uv run apex surrogate check MODEL --against OPT.toml --runs N` draws `N` controls by a Latin hypercube within the box the build's design spanned, which the model's manifest records. With `extent = "hull"` or `"mahalanobis"` the domain is narrower than that box, the more so the more controls: runs outside it are simulated but not gated, the check warns, and its summary says how many; too few inside (`--min-inside`) fail the check, which makes the model unusable until rebuilt. Prefer the box extent for optimizations with many controls.
 - **In a study's comparison**, `objective:final`, `front_size:final` and `hypervolume:final` are the simulator's; `objective:best` comes from the history, which holds the surrogate's values.
+
+### Simulated iterations and refits
+
+A model built once on a design over the whole box may be coarse where the optimizer goes. Two options keep it close to the simulator along the optimizer's path (EnOpt only: the optimizers whose only value carried from one iteration to the next is the iterate's objective):
+
+- **`simulate_every = j`** (needs `outside = "simulator"`: a simulated step may leave the model's domain, and the iterate is then evaluated by the simulator): iterations 1, 1 + j, 1 + 2j, ... are evaluated wholly by the simulator (their perturbation ensemble, their trial points and the iterate's value they start from), the surrogate the others. Whenever the next iteration's source differs, the iterate's value is evaluated again by that source after the accepted step, so every comparison within an iteration is between values of one source. The simulator's rows of these iterations record `scheduled = true`; each history row records its `iteration_source`, and `iterate_reevaluated` when the iterate was evaluated again (`objective_before` the value it replaced; the row's `objective` is the new one). With an EPF loop, each loop's first iteration is the simulator's.
+- **`refit = true`** (needs `1 <= check_every <= simulate_every - 1`, so that a check of a step the refit took gates it; the check at a simulated step tests the model the refit replaces): after each simulated iteration's accepted step (and its check), the model is fitted again through its own plugin and options, on the build's runs and every simulator row the run has used so far (`refit_rows = "all"`), or only on the rows since the last refit (`"latest"`, a local model). The rows' inputs are the controls the journal records (a journal without them is refused), never the surrogate's own rows. A refit has no held-out runs: the checks of accepted steps are its gate, so keep them frequent. It draws from a stream of its own, spawned from the optimization's seed and the refit's number, and is written to `surrogates/refit_<n>/` in the run directory (the model, its snapshot set and its rows' keys); its domain is the box (or hull) of its runs. The surrogate's evaluations after a refit are journalled under the refit's identity. The history row of the step records `surrogate_refit`, and `result.json`'s `surrogate` section `refits`, `active_identity` and `scheduled_simulator_evaluations`.
+- **Resume** stays bit-identical: the checkpoint holds the refits made and the simulator rows used since the last, so a resumed run loads the same model and refits on the same rows (bit for bit when the plugin's fit is deterministic given its generator).
+- **The plan** counts each simulated iteration at the optimizer's bound of one iteration's evaluations, plus the iterate's value, in the simulator runs that approval uses.
+- Not offered for coarse-corrected surrogates. With `extent = "hull"` or `"mahalanobis"` and `refit_rows = "latest"`, a refit needs more rows than varying coordinates, or it stops the run: prefer the box extent there.
+- **The history's `objective`** of a step that changed source is the next source's value at the iterate (`iterate_reevaluated.objective_before` the step's own), so `objective:best` in a study mixes the two sources.
+- **Measuring the saving.** Run the optimization three ways on the same seed: without `[surrogate]`, with `simulate_every` and `refit`, and with the surrogate alone; compare `result.json`'s simulator `objective` and the simulator rows in `evaluations.jsonl` (`source = "simulator"`, or every row of the plain run).
 
 ### A coarse stack in an optimization
 

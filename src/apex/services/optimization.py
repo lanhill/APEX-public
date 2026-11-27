@@ -225,6 +225,18 @@ def _surrogate_simulator_runs(
     checks = steps // section.check_every if section.check_every else 0
     final = int(getattr(optimizer, "pop_size", 1)) if optimizer.multi_objective else 1
     runs = n_r * (checks + final)
+    if section.simulate_every:
+        # Per EPF loop, iterations 1, 1 + j, ... are the simulator's
+        # (at most an iteration's evaluations each), and the iterate's value it starts from.
+        maxiter = int(getattr(optimizer, "maxiter", 0))
+        loops = int(getattr(optimizer, "epf_maxiter", 1))
+        scheduled = loops * -(-maxiter // section.simulate_every)
+        per_iteration = optimizer.evaluations_per_iteration(n_r)
+        if per_iteration is None:
+            return None
+        # The iterate's value evaluated again before each surrogate iteration after a
+        # simulated one may lie outside the domain, and then goes to the simulator too.
+        runs += scheduled * (per_iteration + 2 * n_r)
     objective = problem.objective
     if isinstance(objective, SurrogateObjective) and objective.coarse is not None:
         capped = min(
@@ -803,6 +815,10 @@ def resume(
     )
 
 
+#: ``[surrogate]`` options at their defaults (today's behaviour).
+_SCHEDULE_DEFAULTS: dict[str, object] = {"simulate_every": 0, "refit": False, "refit_rows": "all"}
+
+
 def _run(
     config: OptimizationConfig,
     *,
@@ -824,6 +840,12 @@ def _run(
         # Absent before the phase 4: a plain run's config.json keeps its bytes, and
         # frozen copies of older code still resume it.
         serialised.pop("surrogate", None)
+    else:
+        # The options, left out at their defaults: such a run's config.json
+        # keeps the bytes it had before them, and older frozen copies still resume it.
+        for name, default in _SCHEDULE_DEFAULTS.items():
+            if serialised["surrogate"].get(name) == default:
+                serialised["surrogate"].pop(name, None)
     hooks = problem.objective if isinstance(problem.objective, SurrogateObjective) else None
     try:
         return run_optimization(

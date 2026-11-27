@@ -207,6 +207,53 @@ class OptimizationSurrogateSection(_Strict):
         description="The run's bound on surrogate evaluations (one per control vector and "
         "realization).",
     )
+    simulate_every: int = Field(
+        default=0,
+        ge=0,
+        description="Iterations evaluated wholly by the simulator: the "
+        "first and every j-th after it (j = simulate_every: iterations 1, 1 + j, 1 + 2j, ...), "
+        "their perturbation ensemble, trial points and the iterate's value; the surrogate "
+        "answers in between. 0: the surrogate answers every iteration. Needs `outside = "
+        '"simulator"`. Optimizers whose only objective value carried between iterations is '
+        "the iterate's (EnOpt).",
+    )
+    refit: bool = Field(
+        default=False,
+        description="Refit the surrogate after each simulated iteration's accepted step, "
+        "through its plugin, from the simulator's rows of the run's journal (never the "
+        "surrogate's own), as `refit_rows` says; the refit has no held-out runs, the checks "
+        "of the steps it takes gate it: needs 1 <= `check_every` <= `simulate_every` - 1.",
+    )
+    refit_rows: Literal["all", "latest"] = Field(
+        default="all",
+        description="What a refit is fitted on: `all`, the model's own build runs and every "
+        "simulator row of the run so far; `latest`, only the simulator rows since the "
+        "previous refit (a local model around the iterate).",
+    )
+
+    @model_validator(mode="after")
+    def _refit_needs_a_schedule(self) -> Self:
+        if self.refit and self.simulate_every < 1:
+            raise ValueError(
+                "refit = true refits from the simulated iterations' rows: give simulate_every >= 1"
+            )
+        if self.refit and not 1 <= self.check_every <= self.simulate_every - 1:
+            # A refit serves iterations s + 1 ... s + j - 1 (j = simulate_every): only a
+            # check among them gates it (the check at s tests the model it replaces).
+            raise ValueError(
+                "refit = true needs 1 <= check_every <= simulate_every - 1: a refit has no "
+                "held-out runs, and a check of a step it took is its gate"
+            )
+        if self.simulate_every and self.outside != "simulator":
+            # A simulated iteration's accepted step may leave the surrogate's domain: with
+            # "stop" the run would stop there again on every resume.
+            raise ValueError(
+                'simulate_every needs outside = "simulator": the simulated iterations go '
+                "where the surrogate's domain may not reach"
+            )
+        if self.refit_rows != "all" and not self.refit:
+            raise ValueError("refit_rows applies with refit = true only")
+        return self
 
 
 class ObjectiveEntry(PluginSection):

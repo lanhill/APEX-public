@@ -45,12 +45,37 @@ failure is remembered, so a resume makes the same choice. The coarse runs are bo
 the coarse objective of its controls (a diagnostic, from the journal). A batch whose new
 coarse runs (of two or more distinct controls) all fail stops the run instead (a broken
 coarse deck); those failures are retried on resume.
+
+**A schedule of simulated iterations, and refits**. With
+``simulate_every = j`` the simulator evaluates whole iterations, the first and every j-th
+after it (iterations ``1, 1 + j, 1 + 2j, ...``): their ensemble, their trial points and
+the iterate's value they start from; the surrogate evaluates the others. So that every
+comparison within an iteration is between values of one source, the iterate's value is
+evaluated again (:meth:`~apex.algorithms.optimization.OptimizerBase.reevaluate_iterate`)
+after an accepted step whenever the next iteration's source differs, or the model changed;
+only optimizers that carry no other objective value between iterations take a schedule
+(``scheduled_ensembles``). The start (and an EPF loop's start) serves iteration 1, so it is
+the simulator's. Simulated rows of the schedule record ``scheduled``.
+
+With ``refit``, after each simulated iteration's accepted step (after its check, if due)
+the surrogate is fitted again through its plugin
+(:class:`SurrogateRefitter`), on the model's own build runs and every simulator row the run
+has used so far (``refit_rows = "all"``), or on the rows since the last refit (``"latest"``):
+the schedule's, the checks', the optimum's not yet; never the surrogate's own. Each row's
+controls come from the journal. The refit draws from a stream of its
+own, spawned from the run's seed and the refit's number, and is written to
+``surrogates/refit_<n>/`` with its snapshot set and its rows' keys; it has no held-out runs,
+so the checks of accepted steps gate it. The refits made, and the simulator rows gathered
+since the last, are in the checkpoint, so a resume loads the same model and refits the same
+way: bit-identical to an uninterrupted run.
 """
 
+import hashlib
 import json
 import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -61,10 +86,19 @@ from apex.algorithms.optimization import OptimizationResult, OptimizerBase
 from apex.algorithms.optimization.multiobjective import hypervolume, non_dominated, representative
 from apex.algorithms.optimization.protocols import FloatArray, IntArray
 from apex.algorithms.optimization.statistics import reduce_realizations
+from apex.algorithms.surrogates.domain import training_domain
 from apex.algorithms.surrogates.gate import gate
 from apex.core.errors import SurrogateDomainError, WorkflowError
 from apex.core.simulation import Simulator
-from apex.domain.surrogate import GateResult, GateTolerances, QuantityKind
+from apex.core.surrogates import SurrogateInputs, SurrogateModel
+from apex.domain.surrogate import (
+    DomainExtent,
+    GateResult,
+    GateTolerances,
+    QuantityKind,
+    SnapshotSet,
+    TrainingDomain,
+)
 from apex.storage.optimization_directory import read_evaluations
 from apex.workflows.optimization import RestartFromStart
 from apex.workflows.simulated_objective import SimulatedObjective
@@ -86,9 +120,78 @@ WithCoarse = Callable[[Mapping[int, NDArray[np.float64]]], Simulator]
 #: The rows the simulator evaluates in place of a column whose coarse run failed record this.
 STANDS_IN = "stands_in_for"
 
+#: The simulator's rows of a scheduled iteration record this.
+SCHEDULED = "scheduled"
+
+#: The refits' folders in the run directory: ``surrogates/refit_<n>/``.
+REFITS = "surrogates"
+
+#: The refit's own random stream: spawned from the run's seed with the key
+#: ``(REFIT_STREAM, n)`` for refit ``n`` (the optimizer's stream is the seed's first child,
+#: key ``(0,)``, which this never meets).
+REFIT_STREAM = 1
+
 
 class SurrogateCheckFailed(WorkflowError):
     """A check of the surrogate against the simulator failed, and the run stops."""
+
+
+@dataclass(frozen=True)
+class ActiveSurrogate:
+    """A fitted model the objective evaluates with: the configured one or a refit.
+
+    Attributes
+    ----------
+    identity
+        The model files' identity.
+    simulator
+        The surrogate's simulator (parameterized as the optimization's simulations are).
+    inside
+        Which columns lie inside its domain.
+    context
+        Its journal context: the plain context with this identity.
+    """
+
+    identity: str
+    simulator: Simulator
+    inside: "InsideCheck"
+    context: str
+
+
+@dataclass(frozen=True)
+class SurrogateRefitter:
+    """What a refit needs from the composition.
+
+    Attributes
+    ----------
+    fresh_model
+        A new, unfitted instance of the model's plugin with its options.
+    base
+        The model's own build runs at the objective's keys (``refit_rows = "all"``); its
+        layout and provenance are every refit's.
+    to_inputs
+        Maps controls ``(n_x, n)`` and realizations ``(n,)`` to the model's inputs
+        ``{variable: (size, n)}`` (the optimization's parameterizations and model arrays).
+    write
+        Writes a refit to a folder: ``(folder, model, domain, snapshots, stream_state) ->
+        (manifest path, identity)``.
+    activate
+        Loads a written refit: ``(manifest path, identity) -> ActiveSurrogate``.
+    extent
+        The domain's shape beyond its box (the configured model's).
+    seed
+        The run's seed, which the refits' streams are spawned from.
+    """
+
+    fresh_model: Callable[[], SurrogateModel]
+    base: SnapshotSet
+    to_inputs: Callable[[FloatArray, IntArray], SurrogateInputs]
+    write: Callable[
+        [Path, SurrogateModel, TrainingDomain, SnapshotSet, Mapping[str, Any]], tuple[Path, str]
+    ]
+    activate: Callable[[Path, str], ActiveSurrogate]
+    extent: DomainExtent
+    seed: int
 
 
 class SurrogateObjective:
@@ -122,6 +225,14 @@ class SurrogateObjective:
         For each of the model's keys, its row among the coarse stack's response keys.
     with_coarse
         Makes the surrogate's simulator given its members' coarse forecasts.
+    simulate_every
+        Iterations evaluated wholly by the simulator: ``1, 1 + j, 1 + 2j, ...`` (0: none).
+        Takes effect once an optimizer is bound (:meth:`bind`).
+    refitter
+        Refits the model after each simulated iteration's accepted step; ``None``: no refits.
+    refit_rows
+        ``all`` (the build's runs and every simulator row so far) or ``latest`` (the rows
+        since the last refit).
     """
 
     def __init__(
@@ -141,7 +252,18 @@ class SurrogateObjective:
         coarse: SimulatedObjective | None = None,
         coarse_rows: Sequence[int] = (),
         with_coarse: WithCoarse | None = None,
+        simulate_every: int = 0,
+        refitter: SurrogateRefitter | None = None,
+        refit_rows: Literal["all", "latest"] = "all",
     ) -> None:
+        if simulate_every < 0:
+            raise ValueError("simulate_every must be >= 0")
+        if refitter is not None and simulate_every < 1:
+            raise ValueError("refits follow the simulated iterations: give simulate_every >= 1")
+        if simulate_every and coarse is not None:
+            raise ValueError(
+                "a coarse-corrected surrogate takes no schedule of simulated iterations"
+            )
         if surrogate.journal is not simulator.journal:
             raise ValueError("the surrogate and the simulator must share one journal")
         if coarse is not None:
@@ -183,6 +305,22 @@ class SurrogateObjective:
         #: Whether the run's state file exists (written at the first evaluation, not when
         #: the objective is built: `apex validate` builds it too, and writes nothing).
         self._recorded = bool(state)
+        # the schedule and the refits.
+        self.simulate_every = simulate_every
+        self.refitter = refitter
+        self.refit_rows = refit_rows
+        self._original = ActiveSurrogate(identity, surrogate.simulator, inside, surrogate.context)
+        #: The model evaluating now (the configured one, or the latest refit).
+        self.active = self._original
+        self._optimizer: OptimizerBase | None = None
+        #: The iteration an evaluation serves, while the iterate is evaluated again.
+        self._serving: int | None = None
+        #: Loop state, checkpointed: the refits made, and the simulator rows' keys used
+        #: since the last (in the order asked for).
+        self._refits: list[dict[str, Any]] = []
+        self._fresh: list[str] = []
+        #: The active refit's rows' keys (none for the configured model).
+        self._training: list[str] = []
 
     # ---------------------------------------------------------------- evaluation
 
@@ -209,6 +347,9 @@ class SurrogateObjective:
             self._recorded = True
         if self.switched:
             return self.simulator(controls, reals)
+        if self.simulates_now():
+            # A scheduled iteration is the simulator's throughout.
+            return self._by_simulator(controls, reals, row_extra={SCHEDULED: True})
         lost = np.zeros(n, dtype=bool)
         coarse = None
         if self.coarse is not None:
@@ -252,7 +393,7 @@ class SurrogateObjective:
             logger.info(
                 "surrogate_outside_simulated", extra={"columns": int(np.count_nonzero(outside))}
             )
-            values[..., outside] = self.simulator(controls[:, outside], reals[outside])
+            values[..., outside] = self._by_simulator(controls[:, outside], reals[outside])
         if np.any(lost):
             # A failed coarse run leaves the
             # surrogate nothing to correct; the simulator evaluates the column.
@@ -371,9 +512,13 @@ class SurrogateObjective:
     # -------------------------------------------------------------------- checks
 
     def after_step(self, optimizer: OptimizerBase, x: FloatArray) -> dict[str, Any]:
-        """Check an accepted step's controls ``x`` ``(n_x,)`` if it is a check step.
+        """Check an accepted step's controls ``x`` ``(n_x,)``; then refit and re-evaluate.
 
-        Returns the history row's ``surrogate_check`` (empty if no check was due).
+        The check if it is a check step; with a schedule, the refit after a simulated
+        iteration, and the iterate's value evaluated again when the next iteration's source
+        differs or the model changed (see the module docstring). Returns the history row's
+        additions: ``surrogate_check`` (if a check was due), and with a schedule
+        ``iteration_source``, ``surrogate_refit`` and ``iterate_reevaluated``.
 
         Raises
         ------
@@ -381,9 +526,18 @@ class SurrogateObjective:
             If the check fails and ``on_check_failure`` is ``stop``.
         RestartFromStart
             If it fails and ``on_check_failure`` is ``simulator`` (the switch is recorded).
+        WorkflowError
+            If a refit fails (the run stops at its last checkpoint).
         """
         if self.switched:
             return {}
+        extra = self._check_step(optimizer, x)
+        if not self.simulate_every or self.switched:
+            return extra
+        return {**extra, **self._after_scheduled(optimizer)}
+
+    def _check_step(self, optimizer: OptimizerBase, x: FloatArray) -> dict[str, Any]:
+        """Check an accepted step's controls ``x`` ``(n_x,)`` if it is a check step."""
         x = np.asarray(x, dtype=np.float64)
         due = bool(self.check_every) and optimizer.iteration % self.check_every == 0
         reals = np.arange(self.n_realizations, dtype=np.int64)
@@ -451,6 +605,7 @@ class SurrogateObjective:
         reals = np.arange(self.n_realizations, dtype=np.int64)
         controls = np.ascontiguousarray(np.repeat(x.reshape(-1, 1), reals.size, axis=1))
         simulated = self.simulator.responses(controls, reals)
+        self._used(controls, reals)
         hook = None
         if self.coarse is not None:
             coarse, lost = self._coarse_forecasts(controls, reals, run=True)
@@ -466,6 +621,221 @@ class SurrogateObjective:
             tolerances=self.tolerances,
             kinds=self.kinds,
         )
+
+    # ---------------------------------------------- schedule and refits (revision 4)
+
+    def bind(self, optimizer: OptimizerBase) -> None:
+        """Follow ``optimizer``'s iterations (the schedule needs them; called by the workflow)."""
+        self._optimizer = optimizer
+
+    def _scheduled(self, iteration: int) -> bool:
+        """Whether iteration ``iteration`` (1, 2, ...) is the simulator's."""
+        every = self.simulate_every
+        return every > 0 and (iteration - 1) % every == 0
+
+    def simulates_now(self) -> bool:
+        """Whether the evaluation asked for now serves an iteration the simulator evaluates.
+
+        During iteration ``i`` (the optimizer's counter, incremented before its step) the
+        evaluations serve ``i``; the start and an EPF loop's start (counter 0) serve the
+        first iteration, whose baseline they are; the iterate evaluated again after a step
+        serves the next (:meth:`_after_scheduled`).
+        """
+        if not self.simulate_every or self._optimizer is None:
+            return False
+        serving = self._serving
+        if serving is None:
+            serving = max(int(self._optimizer.iteration), 1)
+        return self._scheduled(serving)
+
+    def _by_simulator(
+        self,
+        controls: FloatArray,
+        reals: IntArray,
+        *,
+        row_extra: Mapping[str, object] | None = None,
+    ) -> FloatArray:
+        """Evaluate columns by the simulator, remembering their keys for the next refit."""
+        values = self.simulator(controls, reals, row_extra=row_extra)
+        self._used(controls, reals)
+        return values
+
+    def _used(self, controls: FloatArray, reals: IntArray) -> None:
+        """Remember the simulator's keys of columns the run used (with refits only)."""
+        if self.refitter is not None:
+            self._fresh.extend(self.simulator.keys_of(controls, reals))
+
+    def _after_scheduled(self, optimizer: OptimizerBase) -> dict[str, Any]:
+        """Refit after a simulated iteration, and evaluate the iterate again if needed.
+
+        Every comparison of an iteration is then between values of one source and one
+        model: the iterate's value is the next iteration's source's, of its model.
+        """
+        iteration = int(optimizer.iteration)
+        here = self._scheduled(iteration)
+        extra: dict[str, Any] = {"iteration_source": "simulator" if here else "surrogate"}
+        refitted = False
+        if self.refitter is not None and here:
+            extra["surrogate_refit"] = self._refit(optimizer)
+            refitted = True
+        if optimizer.inner_loop_done:
+            # No further step of this loop: an EPF loop's start evaluates the iterate again
+            # itself (serving iteration 1), and a finished run needs nothing more.
+            return extra
+        following = self._scheduled(iteration + 1)
+        if following != here or (refitted and not following):
+            before = float(np.mean(np.asarray(optimizer.fk, dtype=np.float64)))
+            self._serving = iteration + 1
+            try:
+                optimizer.reevaluate_iterate()
+            finally:
+                self._serving = None
+            extra["iterate_reevaluated"] = {
+                "source": "simulator" if following else "surrogate",
+                "identity": None if following else self.active.identity,
+                "objective_before": before,
+            }
+        return extra
+
+    def _refit(self, optimizer: OptimizerBase) -> dict[str, Any]:
+        """Fit the model again on the simulator's rows (see the module docstring).
+
+        Raises
+        ------
+        WorkflowError
+            If a row has no controls (a journal written), or the
+            plugin cannot fit the rows.
+        """
+        refitter = self.refitter
+        assert refitter is not None
+        index = len(self._refits) + 1
+        journal = self.simulator.journal
+        known = set(self._training) if self.refit_rows == "all" else set()
+        fresh: list[str] = []
+        for key in self._fresh:
+            if key not in known:
+                known.add(key)
+                fresh.append(key)
+        keys = [*self._training, *fresh] if self.refit_rows == "all" else fresh
+        missing = [k for k in keys if k not in journal.inputs or k not in journal.responses]
+        if missing:
+            raise WorkflowError(
+                f"refit {index}: {len(missing)} of the journal's simulator rows record no "
+                "controls or responses (written before controls were journaled): the "
+                "optimization cannot refit from them; start it again without refit"
+            )
+        if not keys:
+            raise WorkflowError(f"refit {index}: no simulator rows to refit on")
+        controls = np.ascontiguousarray(
+            np.array([journal.inputs[k][0] for k in keys], dtype=np.float64).T
+        )
+        reals = np.array([journal.inputs[k][1] for k in keys], dtype=np.int64)
+        inputs = refitter.to_inputs(controls, reals)
+        outputs = np.ascontiguousarray(
+            np.array([journal.responses[k] for k in keys], dtype=np.float64).T
+        )
+        base = refitter.base
+        use_base = self.refit_rows == "all"
+        first = 1 + max(base.run_ids, default=-1)
+        # A stream of its own per refit, from the run's seed: nothing to checkpoint, and the
+        # optimizer's stream (the seed's first child) is never drawn from.
+        rng = np.random.default_rng(
+            np.random.SeedSequence(refitter.seed, spawn_key=(REFIT_STREAM, index))
+        )
+        stream_state = dict(rng.bit_generator.state)
+        model = refitter.fresh_model()
+        n_runs = len(keys) + (len(base.run_ids) if use_base else 0)
+        try:
+            snapshots = SnapshotSet(
+                layout=base.layout,
+                inputs={
+                    name: np.concatenate([base.inputs[name], np.asarray(inputs[name])], axis=1)
+                    if use_base
+                    else np.asarray(inputs[name])
+                    for name in base.layout.names
+                },
+                keys=base.keys,
+                outputs=np.concatenate([base.outputs, outputs], axis=1) if use_base else outputs,
+                run_ids=(*(base.run_ids if use_base else ()), *range(first, first + len(keys))),
+                provenance=base.provenance,
+            )
+            model.fit(snapshots, rng)
+            if tuple(model.keys) != snapshots.keys:
+                raise ValueError("the refit answers other keys than it was fitted on")
+            domain = training_domain(model, snapshots.inputs, {}, extent=refitter.extent)
+        except (TypeError, ValueError, ArithmeticError, LookupError) as error:
+            raise WorkflowError(
+                f"refit {index} at step {optimizer.iteration}: the surrogate cannot be "
+                f"refitted on {n_runs} runs: {type(error).__name__}: {error}"
+            ) from error
+        folder = self.run_dir / REFITS / f"refit_{index}"
+        folder.mkdir(parents=True, exist_ok=True)
+        # The rows' keys first: the manifest, written last, names a complete refit.
+        (folder / "training.json").write_text(json.dumps(keys), encoding="utf-8")
+        path, identity = refitter.write(folder, model, domain, snapshots, stream_state)
+        self._activate(refitter.activate(path, identity))
+        self._training = keys
+        self._fresh = []
+        record: dict[str, Any] = {
+            "index": index,
+            "epf_iteration": int(optimizer.epf_iteration),
+            "iteration": int(optimizer.iteration),
+            "path": path.relative_to(self.run_dir).as_posix(),
+            "identity": identity,
+            "rows": len(keys),
+            "runs": snapshots.n_runs,
+            "rows_digest": _keys_digest(keys),
+        }
+        self._refits.append(record)
+        logger.info(
+            "surrogate_refit",
+            extra={"index": index, "iteration": optimizer.iteration, "runs": snapshots.n_runs},
+        )
+        return dict(record)
+
+    def _activate(self, active: ActiveSurrogate) -> None:
+        """Evaluate with ``active`` from now on (its journal context too)."""
+        self.active = active
+        self.surrogate.simulator = active.simulator
+        self.surrogate.context = active.context
+        self.inside = active.inside
+
+    def checkpoint_state(self) -> str | None:
+        """Return the schedule's loop state for the checkpoint (``None`` without a schedule).
+
+        The refits made and the simulator rows used since the last, so a resume continues
+        with the same model and refits on the same rows.
+        """
+        if not self.simulate_every:
+            return None
+        return json.dumps({"refits": self._refits, "fresh": self._fresh}, sort_keys=True)
+
+    def restore_checkpoint(self, saved: str | None) -> None:
+        """Continue from :meth:`checkpoint_state` (``None``: a start, with the configured model).
+
+        Raises
+        ------
+        WorkflowError
+            If a refit's files are not those the checkpoint records.
+        """
+        if not self.simulate_every:
+            return
+        data = json.loads(saved) if saved else {}
+        self._refits = [dict(r) for r in data.get("refits", [])]
+        self._fresh = [str(k) for k in data.get("fresh", [])]
+        if not self._refits:
+            self._training = []
+            self._activate(self._original)
+            return
+        latest = self._refits[-1]
+        assert self.refitter is not None
+        path = self.run_dir / str(latest["path"])
+        folder = self.run_dir / REFITS / f"refit_{latest['index']}"
+        keys = json.loads((folder / "training.json").read_text(encoding="utf-8"))
+        if _keys_digest(keys) != latest["rows_digest"]:
+            raise WorkflowError(f"{folder} is not the refit the checkpoint records")
+        self._training = [str(k) for k in keys]
+        self._activate(self.refitter.activate(path, str(latest["identity"])))
 
     # -------------------------------------------------------------------- result
 
@@ -523,6 +893,15 @@ class SurrogateObjective:
             "switched_to_simulator": self.switched,
             "objective_source": "simulator",
         }
+        if self.simulate_every:
+            updated["surrogate"] |= {
+                "simulate_every": self.simulate_every,
+                "scheduled_simulator_evaluations": sum(
+                    1 for row in read_evaluations(self.run_dir) if row.get(SCHEDULED)
+                ),
+                "refits": len(self._refits),
+                "active_identity": self.active.identity,
+            }
         if self.coarse is not None:
             journal = self.coarse.journal
             made = journal.by_source.get("coarse", 0)
@@ -635,3 +1014,8 @@ def checks_of(run_dir: Path) -> Sequence[Mapping[str, Any]]:
         return []
     checks = data.get("checks", []) if isinstance(data, dict) else []
     return [c for c in checks if isinstance(c, dict)]
+
+
+def _keys_digest(keys: Sequence[str]) -> str:
+    """Return a digest of a refit's rows' keys, in order."""
+    return hashlib.sha256(json.dumps(list(keys)).encode()).hexdigest()

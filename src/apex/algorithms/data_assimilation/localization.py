@@ -47,7 +47,7 @@ then are read with ``"adaptive_per_update"`` (``services.composition.snapshot_co
 import logging
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, ClassVar, Literal, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -685,6 +685,107 @@ class AdaptiveLocalization(_AdaptiveBase):
         """No state to restore."""
 
 
+#: Rows of a taper packed or unpacked at a time (bounds the temporaries).
+_TAPER_CHUNK = 4096
+
+
+def pack_taper(taper: NDArray[np.float64]) -> dict[str, NDArray[Any]]:
+    """Return a fixed gain taper ``(n_state, n_data)`` encoded exactly for a checkpoint.
+
+    A dense taper is ``n_state x n_data`` doubles: 24 GB for 418,539 unknowns (a model-error
+    network's weights among them) against 7,260 data (Norne, 2026-11-26), written at every
+    checkpoint. Two exact savings:
+
+    - rows that are all exactly ``1.0`` (unlocalized variables, :func:`_unlocalized_blocks`)
+      are recorded as a bitmask (``taper_ones``) and rebuilt;
+    - when every other entry is exactly ``+0.0`` or ``1.0`` (the ``hard`` adaptive taper, the
+      default), those rows are stored as bits, each row packed to whole bytes
+      (``taper_bits``), else as doubles (``taper_rows``; ``soft``, ``sigmoid`` and distance
+      tapers).
+
+    ``-0.0`` is not binary here (its bits differ from ``+0.0``), so :func:`unpack_taper`
+    returns the same bits and a resume stays bit-identical. The masks and bits are computed in
+    chunks of :data:`_TAPER_CHUNK` rows (no full-size temporaries); the doubles path copies the
+    localized rows, an array of the size it stores.
+
+    Parameters
+    ----------
+    taper
+        The taper, ``(n_state, n_data)``.
+
+    Returns
+    -------
+    dict
+        ``taper_shape`` ``(2,)`` int64, ``taper_ones`` packed ``(n_state,)`` bits, and
+        ``taper_bits`` ``(n_rows, ceil(n_data / 8))`` uint8 or ``taper_rows``
+        ``(n_rows, n_data)`` float64, ``n_rows`` the rows not all ones.
+    """
+    if taper.ndim != 2:
+        raise ValueError(f"a taper is (n_state, n_data), got shape {taper.shape}")
+    taper = np.ascontiguousarray(taper, dtype=np.float64)
+    n_state = taper.shape[0]
+    chunks = range(0, n_state, _TAPER_CHUNK)
+    ones = np.concatenate(
+        [np.all(taper[k : k + _TAPER_CHUNK] == 1.0, axis=1) for k in chunks]
+    ) if n_state else np.zeros(0, dtype=bool)  # fmt: skip
+    # Exactly +0.0 (all bits zero) or 1.0: then the bits rebuild the same doubles.
+    binary = all(
+        bool(np.all((block.view(np.uint64) == 0) | (block == 1.0)))
+        for block in (taper[k : k + _TAPER_CHUNK] for k in chunks)
+    )
+    packed: dict[str, NDArray[Any]] = {
+        "taper_shape": np.array(taper.shape, dtype=np.int64),
+        "taper_ones": np.packbits(ones),
+    }
+    rows = np.flatnonzero(~ones)
+    if binary:
+        packed["taper_bits"] = np.concatenate(
+            [np.packbits(taper[rows[k : k + _TAPER_CHUNK]] == 1.0, axis=1)
+             for k in range(0, rows.size, _TAPER_CHUNK)]
+        ) if rows.size else np.zeros((0, (taper.shape[1] + 7) // 8), dtype=np.uint8)  # fmt: skip
+    else:
+        packed["taper_rows"] = np.ascontiguousarray(taper[rows])
+    return packed
+
+
+def unpack_taper(arrays: Mapping[str, NDArray[Any]]) -> NDArray[np.float64] | None:
+    """Return the taper of :func:`pack_taper`'s arrays, an older dense ``taper``, or ``None``.
+
+    Raises
+    ------
+    ValueError
+        If the packed arrays do not fit their shape.
+    """
+    if "taper" in arrays:  # a checkpoint written before the taper was packed (2026-11-26)
+        return np.ascontiguousarray(arrays["taper"], dtype=np.float64)
+    if "taper_shape" not in arrays:
+        return None
+    n_state, n_data = (int(n) for n in np.asarray(arrays["taper_shape"]))
+    mask = np.asarray(arrays["taper_ones"], dtype=np.uint8)
+    if mask.size != (n_state + 7) // 8:
+        raise ValueError(f"packed taper's row mask has {mask.size} bytes, {n_state} rows need "
+                         f"{(n_state + 7) // 8}")  # fmt: skip
+    ones = np.unpackbits(mask, count=n_state)
+    rows = np.flatnonzero(ones == 0)
+    taper = np.ones((n_state, n_data))
+    if "taper_bits" in arrays:
+        bits = np.asarray(arrays["taper_bits"], dtype=np.uint8)
+        if bits.shape != (rows.size, (n_data + 7) // 8):
+            raise ValueError(
+                f"packed taper bits {bits.shape} do not fit the shape {(n_state, n_data)}"
+            )
+        for k in range(0, rows.size, _TAPER_CHUNK):
+            taper[rows[k : k + _TAPER_CHUNK]] = np.unpackbits(
+                bits[k : k + _TAPER_CHUNK], axis=1, count=n_data
+            )
+    else:
+        values = np.asarray(arrays["taper_rows"], dtype=np.float64)
+        if values.shape != (rows.size, n_data):
+            raise ValueError(f"packed taper rows {values.shape}, expected {(rows.size, n_data)}")
+        taper[rows] = values
+    return taper
+
+
 class _GainTaper(EmitsDiagnostics):
     taper_matrix: NDArray[np.float64] | None = None
 
@@ -736,14 +837,15 @@ class _GainTaper(EmitsDiagnostics):
         self._diagnostics.add("localization", "taper", self.taper_matrix)
         return step
 
-    def export_state(self) -> dict[str, NDArray[np.float64]]:
-        """Return the fixed taper matrix."""
-        return {} if self.taper_matrix is None else {"taper": self.taper_matrix}
+    def export_state(self) -> dict[str, NDArray[Any]]:
+        """Return the fixed taper matrix, encoded exactly (:func:`pack_taper`)."""
+        return {} if self.taper_matrix is None else pack_taper(self.taper_matrix)
 
-    def restore_state(self, arrays: Mapping[str, NDArray[np.float64]]) -> None:
-        """Restore the fixed taper matrix."""
-        if "taper" in arrays:
-            self.taper_matrix = np.asarray(arrays["taper"], dtype=np.float64)
+    def restore_state(self, arrays: Mapping[str, NDArray[Any]]) -> None:
+        """Restore the fixed taper matrix (packed, or a dense ``taper`` of older runs)."""
+        taper = unpack_taper(arrays)
+        if taper is not None:
+            self.taper_matrix = taper
 
 
 @localizations.register("adaptive")

@@ -243,6 +243,39 @@ def test_localized_gies_runs_and_resumes_identically(
     assert resumed.history == reference.history
 
 
+@pytest.mark.parametrize("taper", ["hard", "soft"])
+def test_a_checkpoint_with_a_dense_taper_resumes_identically(
+    linear_case: CaseFactory, taper: str
+) -> None:
+    """Checkpoints written before the taper was packed (a dense
+    ``method_state:taper``) resume as before, bit for bit."""
+    from apex.algorithms.data_assimilation.localization import unpack_taper
+
+    method = (
+        'name = "esmda"\noptions = { inflation = [2, 2] }\n'
+        'strategy = { name = "approx", options = { energy = 1.0 } }\n'
+        f'localization = {{ name = "adaptive_prior", options = {{ taper = "{taper}" }} }}'
+    )
+    whole = linear_case(name="whole", ensemble_size=30, method=method)
+    parts = linear_case(name="parts", ensemble_size=30, method=method)
+    reference = composition.start(whole.config)
+    composition.start(parts.config, max_steps=1)
+    [state_file] = (parts.directory / "runs" / "parts" / "checkpoints").glob(
+        "algorithm_state_*.npz"
+    )
+    with np.load(state_file) as saved:
+        arrays = {k: saved[k] for k in saved.files}
+    prefix = "method_state:"
+    dense = unpack_taper({k[len(prefix) :]: v for k, v in arrays.items() if k.startswith(prefix)})
+    assert dense is not None
+    old = {k: v for k, v in arrays.items() if not k.startswith(prefix + "taper_")}
+    old[prefix + "taper"] = dense
+    np.savez(state_file, **old)  # the layout an older APEX wrote
+
+    resumed = composition.resume(parts.directory / "runs" / "parts")
+    np.testing.assert_array_equal(resumed.posterior, reference.posterior)
+
+
 @pytest.mark.parametrize("localization", ["adaptive_per_update", "adaptive", "adaptive_prior"])
 def test_localized_esmda_runs_and_resumes_identically(
     linear_case: CaseFactory, localization: str
@@ -267,7 +300,8 @@ def test_localized_esmda_runs_and_resumes_identically(
     )
     saved = np.load(state_file)
     # "adaptive" is the prior-only method (2026-09-28), as its alias "adaptive_prior".
-    assert ("method_state:taper" in saved) == (localization != "adaptive_per_update")
+    # Packed exactly since 2026-11-26 (localization.pack_taper): the shape and the bits or rows.
+    assert ("method_state:taper_shape" in saved) == (localization != "adaptive_per_update")
 
 
 @pytest.mark.parametrize(

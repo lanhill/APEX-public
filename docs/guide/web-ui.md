@@ -48,7 +48,7 @@ items:
 
 By the end of this lesson you will know what each page of the APEX web UI shows, how to move between the pages, and how to follow a piece of work from an example configuration to its results.
 
-Two pages matter from the first minute: `editor`, where you open, edit, validate, save and submit a configuration, and `agents`, which lists APEX's public agents and how to run each from the web UI.
+Two pages matter from the first minute. The `editor` page is where you open, edit, validate, save and submit a configuration. The `agents` page lists APEX's public agents and how to run each from the web UI.
 
 ## Prerequisites
 
@@ -224,7 +224,7 @@ This example takes you from the catalogue to the charts of a history-matching ru
 - **Pages that need an item.** `job`, `run` and `optimization` describe a single item, so open them from their list page instead of typing a route by hand.
 - **Wrong example type.** The worked example follows a history-matching run. A prediction or study example gives another kind of job.
 - **Wrong folder or command in the terminal.** Type `uv run apex ...` from the APEX folder.
-- **Saving without validating.** Validate before you submit anything, so mistakes show up early.
+- **Saving without validating.** Validate in the `editor` before you submit anything, so mistakes show up early.
 - **Guessing option names.** Check `plugins` for the exact names, types and defaults.
 - **A strategy that does not fit the method.** `full` is refused by `esmda`; use it with `gies`, `lm_enrml` or `gn_enrml`.
 - **Examples are copies.** `examples` copies a configuration into your workspace folder. Edit your copy, not the catalogue.

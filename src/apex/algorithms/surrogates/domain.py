@@ -320,11 +320,14 @@ def training_domain(
 
     ``training`` and ``held_out`` are ``{variable: (size, n_runs)}``; the keys are the
     model's own (:attr:`SurrogateModel.keys`). ``coarse``: the two sets' coarse forecasts,
-    for a coarse-corrected model (:func:`model_coordinates`).
+    for a coarse-corrected model (:func:`model_coordinates`). An empty ``held_out`` mapping:
+    no held-out runs (a refit gated by later checks instead).
     """
     coordinates, residuals = [], []
     pairs = coarse if coarse is not None else (None, None)
     for inputs, forecast in zip((training, held_out), pairs, strict=True):
+        if not inputs:
+            continue
         found, residual = model_coordinates(model, inputs, forecast)
         coordinates.append(found)
         residuals.append(residual)

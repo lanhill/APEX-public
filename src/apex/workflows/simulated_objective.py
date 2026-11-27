@@ -15,7 +15,11 @@ resumed optimization restarts the iteration it was in from its checkpoint, draws
 controls (the random stream is restored), and finds them in the journal. The same holds for
 repeated controls within a run, such as the iterate the loop evaluates again. A crash mid-batch
 loses only that batch's simulations. Member ids count the journal's evaluations, so they, and
-the simulations' folders, are the same in a resumed run as in an uninterrupted one.
+the simulations' folders, are the same in a resumed run as in an uninterrupted one. Each row
+also records its ``controls``, the column as the optimizer proposed it (before any
+parameterization), so that the journal's simulator rows are pairs of controls and responses
+a surrogate can be fitted on; rows written before have none and replay
+as before (the key alone decides a replay).
 
 **Two sources, one journal**. An optimization with a surrogate evaluates by
 the surrogate and checks by the simulator: two objectives sharing one
@@ -105,6 +109,9 @@ class EvaluationJournal:
         #: run them again; any other runs them again under a new id, as before). Rows marked
         #: ``retry`` (a stack that failed a whole batch) are left out: run again on resume.
         self.failed: set[str] = set()
+        #: Each successful row's controls ``(n_x,)`` and realization, by key (rows written
+        #: have no controls and are absent).
+        self.inputs: dict[str, tuple[list[float], int]] = {}
         self.next_member = 0
 
     @property
@@ -127,6 +134,7 @@ class EvaluationJournal:
                     continue
                 if row.get("responses") is not None:
                     self.responses[row["key"]] = [float(v) for v in row["responses"]]
+                self._remember(row)
                 self.by_source[source] = self.by_source.get(source, 0) + 1
             self.failed -= set(values)
             self._values = values
@@ -156,9 +164,21 @@ class EvaluationJournal:
             responses = row.get("responses")
             if responses is not None:
                 self.responses[key] = [float(v) for v in responses]  # type: ignore[attr-defined]
+            self._remember(row)
             self.by_source[source] = self.by_source.get(source, 0) + 1
         self.next_member += n_members
         layout.append_evaluations(self.run_dir, list(rows))
+
+    def _remember(self, row: Mapping[str, object]) -> None:
+        """Keep a successful row's controls and realization, if it records them."""
+        key = str(row["key"])
+        controls = row.get("controls")
+        if isinstance(controls, list) and key not in self.inputs:
+            realization = row.get("realization", 0)
+            self.inputs[key] = (
+                [float(v) for v in controls],
+                int(realization) if isinstance(realization, int | float) else 0,
+            )
 
 
 class SimulatedObjective:
@@ -417,7 +437,8 @@ class SimulatedObjective:
             if isinstance(result, MemberFailure):
                 bad.append(f"member {member.member_id}: {result.message}")
                 rows.append({"key": key, "member_id": member.member_id, "value": None,
-                             "error": result.message})  # fmt: skip
+                             "error": result.message,
+                             "controls": _column(controls, pending[key])})  # fmt: skip
                 continue
             # One column at a time: a reduction over a batch may round in another order
             # than over one column, and a value must not depend on its batch (a resume
@@ -427,7 +448,8 @@ class SimulatedObjective:
             if not all(np.isfinite(values)):
                 bad.append(f"member {member.member_id}: the objective is {values}")
                 rows.append({"key": key, "member_id": member.member_id, "value": None,
-                             "error": f"objective {values}"})  # fmt: skip
+                             "error": f"objective {values}",
+                             "controls": _column(controls, pending[key])})  # fmt: skip
                 continue
             rows.append(
                 {
@@ -437,6 +459,8 @@ class SimulatedObjective:
                     # One objective: "value" (as before); several: "values".
                     **({"values": values} if self.vector else {"value": values[0]}),
                     "responses": [float(v) for v in result],
+                    # the controls as proposed, a surrogate's inputs.
+                    "controls": _column(controls, pending[key]),
                     # which source made it (absent in a plain run's rows).
                     **({} if self.source is None else {"source": self.source}),
                     **(row_extra or {}),
@@ -497,3 +521,12 @@ class SimulatedObjective:
             )
             if not keep:
                 shutil.rmtree(member.work_dir, ignore_errors=True)
+
+
+def _column(controls: FloatArray, column: int) -> list[float]:
+    """Return one column of ``controls`` ``(n_x, n)`` as the journal records it.
+
+    Python's JSON floats round-trip exactly: read back, they are the same float64 values, so
+    the column's journal key can be computed again from the row.
+    """
+    return [float(v) for v in controls[:, column]]

@@ -36,6 +36,13 @@ class OptimizationHooks(Protocol):
     and may raise :class:`RestartFromStart` (the run then starts again from its start, its
     journal kept) or another error (the run stops at its last checkpoint). ``finish``
     returns the finished run's ``result.json``.
+
+    Optional, read with ``getattr``: ``bind(optimizer)``, called
+    before the loop, for hooks that follow the optimizer's iterations;
+    ``checkpoint_state() -> str | None``, loop state saved in every checkpoint under
+    :data:`HOOK_STATE` (``None``: nothing saved, the checkpoint's bytes unchanged); and
+    ``restore_checkpoint(saved: str | None)``, called with it before the loop (``None``
+    on a start, and on a restart from the start).
     """
 
     def after_step(self, optimizer: OptimizerBase, x: FloatArray) -> Mapping[str, Any]:
@@ -67,6 +74,8 @@ class RestartFromStart(WorkflowError):
 
 #: The checkpoint key holding how many history rows belong to it.
 HISTORY_ROWS = "history_rows"
+#: The checkpoint key holding the hooks' own loop state.
+HOOK_STATE = "hooks"
 #: The file a stop request writes in the run directory (as for history-matching runs).
 STOP_FILE = "stop_requested"
 
@@ -193,6 +202,9 @@ def run_optimization(
             rows += 1
             checkpoint: dict[str, object] = dict(opt.export_state())
             checkpoint[HISTORY_ROWS] = rows
+            hook_state = _hook_state(hooks)
+            if hook_state is not None:
+                checkpoint[HOOK_STATE] = hook_state
             layout.save_checkpoint(run_dir, checkpoint)
             saved_accepted = accepted
             front = getattr(opt, "front", None)
@@ -204,6 +216,10 @@ def run_optimization(
             return not (max_iterations is not None and accepted >= max_iterations)
 
         optimizer.stop_check = lambda: (run_dir / STOP_FILE).exists()
+        bind = getattr(hooks, "bind", None)
+        if callable(bind):
+            bind(optimizer)
+        _restore_hooks(hooks, state)
         while True:
             try:
                 result = optimizer.minimize(
@@ -230,6 +246,7 @@ def run_optimization(
                 if hooks is not None:
                     hooks.restarted()
                 state, rows, accepted, saved_accepted = None, 0, 0, 0
+                _restore_hooks(hooks, None)
         finished = not optimizer.stopped
         summary = result_summary(result, problem)
         if finished and hooks is not None:
@@ -249,6 +266,24 @@ def run_optimization(
             },
         )
         return OptimizationRun(run_dir, result, finished)
+
+
+def _hook_state(hooks: OptimizationHooks | None) -> str | None:
+    """Return the hooks' loop state for a checkpoint, if they keep one."""
+    state_of = getattr(hooks, "checkpoint_state", None)
+    if not callable(state_of):
+        return None
+    state = state_of()
+    return None if state is None else str(state)
+
+
+def _restore_hooks(hooks: OptimizationHooks | None, state: Mapping[str, object] | None) -> None:
+    """Give the hooks their loop state from a checkpoint (``None``: a start)."""
+    restore = getattr(hooks, "restore_checkpoint", None)
+    if not callable(restore):
+        return
+    saved = None if state is None else state.get(HOOK_STATE)
+    restore(None if saved is None else str(saved))
 
 
 def _reset(run_dir: Path) -> None:

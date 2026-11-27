@@ -45,6 +45,7 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import ValidationError
 
+from apex.algorithms.optimization import optimizers
 from apex.algorithms.optimization.protocols import ResponseObjective
 from apex.algorithms.surrogates.designs import (
     BUILTIN_PLANS,
@@ -181,7 +182,12 @@ from apex.workflows.surrogate import (
     run_members,
 )
 from apex.workflows.surrogate_forecasts import ActiveModel, SurrogateForecasting
-from apex.workflows.surrogate_optimization import SurrogateObjective
+from apex.workflows.surrogate_optimization import (
+    ActiveSurrogate,
+    InsideCheck,
+    SurrogateObjective,
+    SurrogateRefitter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -5006,6 +5012,23 @@ def optimization_surrogate(
     model = dict(simulation.model)
     provenance_ = stack_provenance(config, raw)
     corrects = isinstance(loaded.model, CoarseCorrectedSurrogate)
+    if section.simulate_every:
+        # Only an optimizer whose sole carried objective value is the
+        # iterate's may have the objective change between its iterations.
+        optimizer_class = optimizers.factory(config.optimizer.name)
+        # Declared by the class itself: a subclass may carry more between its iterations
+        # than the class it extends (it says so by declaring the flag again).
+        if not vars(optimizer_class).get("scheduled_ensembles", False):
+            raise ConfigError(
+                f"[surrogate] simulate_every: the optimizer {config.optimizer.name!r} carries "
+                "objective values between its iterations (or drives its own loop), which a "
+                "change of source would leave stale: use enopt, or simulate_every = 0"
+            )
+        if corrects:
+            raise ConfigError(
+                f"[surrogate] simulate_every: the surrogate {path} corrects a coarse "
+                "simulation; a schedule of simulated iterations is not offered for it"
+            )
     coarse_built = None
     if corrects:
         # The coarse stack the model was built with, run on the
@@ -5047,16 +5070,21 @@ def optimization_surrogate(
         else manifest.gate.tolerances
     )
     kinds = {d.datatype: d.kind for d in manifest.gate.datatypes if d.kind is not None}
-    plain_surrogate = SurrogateSimulator(
-        loaded.model,
-        loaded.domain,
-        identity=loaded.identity,
-        loader=functools.partial(fitted_model, str(path.resolve()), loaded.identity),
-        guard=refuse_outside,
-    )
-    surrogate_simulator: Simulator = plain_surrogate
-    if not properties.identity:
-        surrogate_simulator = parameterized(surrogate_simulator, properties)
+
+    def surrogate_of(found: LoadedSurrogate) -> SurrogateSimulator:
+        return SurrogateSimulator(
+            found.model,
+            found.domain,
+            identity=found.identity,
+            loader=functools.partial(fitted_model, str(found.path.resolve()), found.identity),
+            guard=refuse_outside,
+        )
+
+    def mapped(simulator: Simulator) -> Simulator:
+        return simulator if properties.identity else parameterized(simulator, properties)
+
+    plain_surrogate = surrogate_of(loaded)
+    surrogate_simulator = mapped(plain_surrogate)
     workers = section.workers
     executor = (
         executors.create("serial")
@@ -5119,18 +5147,40 @@ def optimization_surrogate(
         corrected: Simulator = plain_surrogate.with_coarse(forecasts)
         return corrected if properties.identity else parameterized(corrected, properties)
 
-    def inside(
-        controls: NDArray[np.float64],
-        reals: NDArray[np.int64],
-        forecasts: NDArray[np.float64] | None = None,
-    ) -> NDArray[np.bool_]:
+    def to_inputs(
+        controls: NDArray[np.float64], reals: NDArray[np.int64]
+    ) -> dict[str, NDArray[np.float64]]:
+        """Return the model's inputs of columns of controls (what their simulations get)."""
         state = {name: np.ascontiguousarray(controls[part]) for name, part in blocks}
         state.update({n: np.ascontiguousarray(a[:, reals]) for n, a in model.items()})
-        mapped = properties.ensemble(state)
-        ids = list(range(controls.shape[1]))
-        found = check_members(loaded.domain, loaded.model, mapped, ids, coarse=forecasts)
-        flagged = set(found.members)
-        return np.array([j not in flagged for j in ids], dtype=bool)
+        return dict(properties.ensemble(state))
+
+    def inside_of(found: LoadedSurrogate) -> InsideCheck:
+        def inside(
+            controls: NDArray[np.float64],
+            reals: NDArray[np.int64],
+            forecasts: NDArray[np.float64] | None = None,
+        ) -> NDArray[np.bool_]:
+            ids = list(range(controls.shape[1]))
+            outside = check_members(
+                found.domain, found.model, to_inputs(controls, reals), ids, coarse=forecasts
+            )
+            flagged = set(outside.members)
+            return np.array([j not in flagged for j in ids], dtype=bool)
+
+        return inside
+
+    inside = inside_of(loaded)
+    refitter = None
+    if section.refit:
+        # Each refit evaluates under a context of its own identity.
+        refitter = _optimization_refitter(
+            loaded, trained, simulation, to_inputs, config.optimization.seed,
+            lambda found: ActiveSurrogate(
+                found.identity, mapped(surrogate_of(found)), inside_of(found),
+                _digest({"plain": simulation.context, "surrogate": found.identity}),
+            ),
+        )  # fmt: skip
 
     assert simulation.run_dir is not None
     return SurrogateObjective(
@@ -5148,4 +5198,83 @@ def optimization_surrogate(
         coarse=coarse,
         coarse_rows=coarse_rows,
         with_coarse=None if coarse is None else with_coarse,
+        simulate_every=section.simulate_every,
+        refitter=refitter,
+        refit_rows=section.refit_rows,
+    )
+
+
+def _optimization_refitter(
+    loaded: LoadedSurrogate,
+    trained: SnapshotSet,
+    simulation: SimulatedObjective,
+    to_inputs: Callable[[NDArray[np.float64], NDArray[np.int64]], dict[str, NDArray[np.float64]]],
+    seed: int,
+    activate: Callable[[LoadedSurrogate], ActiveSurrogate],
+) -> SurrogateRefitter:
+    """Return what an optimization's refits need.
+
+    The model's plugin with its options (file options resolved in its folder, and recorded
+    relative to each refit's), its build runs at the objective's keys, and how a refit is
+    written to the run directory and loaded.
+
+    Raises
+    ------
+    ConfigError
+        If the model's build runs do not hold the objective's keys.
+    """
+    manifest = loaded.manifest
+    resolved = options_resolved_in(
+        current_options(manifest.plugin, manifest.options), loaded.path.parent
+    )
+    index = {key: row for row, key in enumerate(trained.keys)}
+    missing = [k for k in simulation.keys if k not in index]
+    if missing:
+        raise ConfigError(
+            f"the surrogate {loaded.path} was built on runs without {len(missing)} of the "
+            f"objective's keys (e.g. {missing[0]}): it cannot be refitted on the journal's "
+            'rows; build it with outputs = "responses"'
+        )
+    rows = [index[k] for k in simulation.keys]
+    base = SnapshotSet(
+        layout=trained.layout,
+        inputs=trained.inputs,
+        keys=tuple(simulation.keys),
+        outputs=np.ascontiguousarray(trained.outputs[rows]),
+        run_ids=trained.run_ids,
+        provenance=trained.provenance,
+    )
+
+    def write(
+        folder: Path,
+        model: SurrogateModel,
+        domain: TrainingDomain,
+        snapshots: SnapshotSet,
+        stream_state: Mapping[str, object],
+    ) -> tuple[Path, str]:
+        SurrogateDirectory(folder).save_snapshots(snapshots)
+        model_file = folder / MODEL
+        stored = write_surrogate(
+            model_file,
+            plugin=manifest.plugin,
+            model=model,
+            domain=domain,
+            provenance=snapshots.provenance.model_copy(
+                update={"plan": "refit", "source": "optimization"}
+            ),
+            options=options_relative_to(resolved, model_file.parent),
+            snapshots=SnapshotReference(path=f"../{SNAPSHOTS}", digest=snapshots.digest()),
+            fit=FitRecord(stream_state=dict(stream_state)),  # type: ignore[arg-type]
+            apex_commit=manifest.apex_commit,
+        )
+        return stored.path, stored.identity
+
+    return SurrogateRefitter(
+        fresh_model=functools.partial(surrogate_models.create, manifest.plugin, **resolved),
+        base=base,
+        to_inputs=to_inputs,
+        write=write,
+        activate=lambda path, identity: activate(load_surrogate(path, identity=identity)),
+        extent=loaded.domain.extent,
+        seed=seed,
     )

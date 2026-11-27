@@ -114,6 +114,9 @@ class EnOpt(OptimizerBase):
     status: ClassVar[Status] = "parity"
     label: ClassVar[str] = "EnOpt"
     needs_covariance: ClassVar[bool] = True
+    # fk is the only objective value carried between iterations: the ensemble, its gradient
+    # and the trial points are each iteration's own (OptimizerBase.scheduled_ensembles).
+    scheduled_ensembles: ClassVar[bool] = True
 
     def __init__(
         self,
