@@ -440,7 +440,10 @@ runs/<name>/
    ```toml
    [surrogate]
    model_file = "runs/opt_surrogate/model/surrogate.json"
-   check_every = 3            # accepted steps 3, 6, 9, ... are checked by the simulator (0: none)
+   # check_every = 3          # also check accepted steps 3, 6, 9, ... (default 0: none,
+   #                          # the run is validated at its end, below)
+   # final_ensemble_check = true  # at the end, the last step's ensemble by the simulator too
+   # optimum_tolerance = 0.02 # judge the final check (default: report only)
    on_check_failure = "stop"  # "stop" | "simulator"
    outside = "stop"           # controls outside the model's domain: "stop" | "simulator" | "surrogate"
    # relative = { rate = 0.02 }   # the checks' tolerances: may only tighten the model's gate
@@ -449,7 +452,7 @@ runs/<name>/
    # simulate_every = 3       # iterations 1, 4, 7, ... wholly by the simulator (0: none)
    #                          # (with outside = "simulator")
    # refit = true             # refit after each of them, from the journal's simulator rows
-   #                          # (with check_every <= simulate_every - 1)
+   #                          # (needs 1 <= check_every <= simulate_every - 1)
    # refit_rows = "all"       # "all": the build's runs and every simulator row; "latest"
    ```
 
@@ -460,10 +463,22 @@ What happens during the run:
 
 - **Every evaluation the optimizer asks for is the surrogate's**, journalled in `evaluations.jsonl` with `source = "surrogate"` under a key that includes the model's identity. A run without the surrogate, or with another model, never reuses them. The simulator's evaluations (`source = "simulator"`) are journalled under the plain run's keys, so within the run directory they are reused as a plain run's would be.
 - **Controls outside the domain** stop the run at its last checkpoint (`outside = "stop"`), are evaluated by the simulator (`outside = "simulator"`), or, as an explicit choice to extrapolate, by the surrogate anyway (`outside = "surrogate"`): each batch is logged as a warning, the journal's rows are marked `extrapolated`, and the result's `surrogate.extrapolated_evaluations` counts them. An accepted step outside the domain is still checked (when a check is due), the check marked `extrapolated`. The reported optimum is still evaluated by the simulator.
+- **No step checks by default:** with a surrogate, the run is validated at its end (below), not at every few steps. `check_every = k` adds checks of accepted steps (a refit needs them).
 - **Checks:** every `check_every` accepted steps, the accepted controls are evaluated by the simulator at every realization and gated against the surrogate's values by relative errors, before the step's checkpoint. The history row records the check (`surrogate_check`), and `surrogate_state.json` keeps every check. A check that fails:
   - `stop` (default): the run stops at its last checkpoint. Set `on_check_failure = "simulator"` in the run's `config.json` and resume. A rebuilt model is another model: a run refuses to resume with it, so start a new optimization.
   - `simulator`: the optimization starts again from its start with the simulator for every evaluation, as the plain run with the same seed; the evaluations the simulator made already are reused from the journal. A resume keeps the switch.
 - **The optimum is the simulator's:** the result's controls are evaluated by the simulator at every realization; `result.json`'s `objective` is the simulator's, `surrogate_objective` the surrogate's, and its `surrogate` section counts the evaluations of each source, the checks and whether the run switched. A multi-objective run's whole front is evaluated again, and `pareto.json` holds the simulator's objectives (and hypervolume) with the surrogate's beside them.
+- **The final check** (`result.json`'s `surrogate.optimum_check`, logged and shown by `apex summary`) compares the surrogate with the simulator the configuration names (`simulator_name`), through the run's own simulator stack and executor. Values are reported first in the objective's own units and sign (`value`: objective × `obj_scaling`, an NPV objective's NPV), and as the minimised objective; external penalties (EPF) are not included.
+  - **The optimum** (the mean control): each objective's value by the surrogate, evaluated by the active model itself (never by the run's schedule or its `outside = "simulator"` routing), and by the simulator; their difference and its relative size.
+  - **The final ensemble** (`final_ensemble_check = true`, the default) is the ensemble around the final optimum:
+    - EnOpt: if the last iteration failed, its ensemble, already drawn around the final optimum (only when its centre is the final iterate: under Nesterov momentum it was drawn elsewhere and a new one is drawn; a reused ensemble may carry a covariance shrunk by EnOpt's resampling). If the run ended on an accepted step, an ensemble drawn around the final optimum with EnOpt's current covariance, by EnOpt's own sampling (re-centred, clipped to the bounds), from a stream of its own spawned from the run's seed, drawn once at the end: the optimizer's results are untouched, and a resume draws the same.
+    - Members are paired with the models as EnOpt pairs them: member i on model i // (ne / n_r), with ne a multiple of n_r. With one model, every member is on it; with as many members as models, member i is on model i. The record lists `member_realizations`.
+    - SmcOpt: its particles, on its one model. A population optimizer: its final population on every realization. GenOpt, the line-search and trust-region optimizers, and ropt's backends have none (`ensemble.skipped` says so), as do vector objectives.
+    - Both sides give `n`, `mean`, `std` (sample), `min`, `max`, `median`, `p10` and `p90` of the value (p10 is the 10th percentile of the NPV, not of the minimised quantity) and of the minimised objective. The paired differences (surrogate − simulator, in the value's units) give their mean, std and worst. Members outside the surrogate's domain are the surrogate's only with `outside = "surrogate"`; otherwise they are left out of the comparison and counted (`not_answered`, `members_compared`).
+    - Members a simulated iteration already ran come from the journal; each other member costs one simulator run (`new_simulator_runs`), which the plan and `apex validate` count. `simulator_evaluations` counts them too.
+  - **`optimum_tolerance`** (relative, none by default) judges the optimum's relative difference and the ensemble mean's: `passed` only if both are within it (the paired std and worst are reported, not judged). Beyond it: a warning and `passed = false`. The reported optimum stays the simulator's either way.
+  - A failure of the surrogate's side at the end (its domain, `max_evaluations`) is recorded under `optimum_check.error`; `result.json` is always written.
+  - `result.json`'s `final_ensemble` holds the simulator's ensemble record. A run that switched to the simulator records it by the simulator. A run without a surrogate records the same `final_ensemble` on request (`[optimization] final_ensemble = true`; off by default, since it costs up to one run per member, which the plan then counts), so plain and surrogate runs compare in `apex summary` (metric `final_ensemble`, label `value`). A failure while evaluating it is recorded (`final_ensemble.error`) and the result still written. A run started before this (its `config.json` without these options) resumes without them.
 - **Resume** is bit-identical to an uninterrupted run, checks included.
 - **Checking the model later:** `uv run apex surrogate check MODEL --against OPT.toml --runs N` draws `N` controls by a Latin hypercube within the box the build's design spanned, which the model's manifest records. With `extent = "hull"` or `"mahalanobis"` the domain is narrower than that box, the more so the more controls: runs outside it are simulated but not gated, the check warns, and its summary says how many; too few inside (`--min-inside`) fail the check, which makes the model unusable until rebuilt. Prefer the box extent for optimizations with many controls.
 - **In a study's comparison**, `objective:final`, `front_size:final` and `hypervolume:final` are the simulator's; `objective:best` comes from the history, which holds the surrogate's values.

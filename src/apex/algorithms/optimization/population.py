@@ -46,6 +46,7 @@ from apex.algorithms.optimization.protocols import (
     Draws,
     FloatArray,
     GeneratorDraws,
+    IntArray,
     OptimizerState,
     Problem,
     StateValue,
@@ -207,6 +208,19 @@ class PopulationOptimizer(OptimizerBase):
         self.best_rank: tuple[float, float] | None = None
 
     # ------------------------------------------------------------------ evaluation
+
+    def final_ensemble(self, draws: Draws | None) -> tuple[FloatArray, IntArray] | None:
+        """Return the final population on every realization, member-major, as evaluated."""
+        if self.X.shape[1] == 0:
+            return None
+        n_r = self.problem.n_realizations
+        physical = self.bounds.to_physical(self.bounds.project(self.X))
+        controls = np.ascontiguousarray(np.repeat(physical, n_r, axis=1))
+        return controls, np.tile(np.arange(n_r, dtype=np.int64), self.X.shape[1])
+
+    def final_ensemble_size(self, n_realizations: int) -> int:
+        """Return the final population's columns (every member on every realization)."""
+        return int(self.pop_size) * n_realizations
 
     def evaluate_population(self, X: FloatArray) -> tuple[FloatArray, FloatArray, FloatArray]:
         """Evaluate members ``(n_x, n)`` (optimizer coordinates) on every realization.

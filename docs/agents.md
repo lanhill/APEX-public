@@ -273,6 +273,17 @@ A run never calls the geomodeler: a prior is always a recorded section or file, 
 
 The monitor, diagnosis, planning and report agents also handle optimization directories. Their rules read the accepted steps, the objective at the start, at its best and last, the simulated and failed evaluations, and the optimizer's message. For several objectives (`nsga2`) the run is judged by its front. Thresholds are in `[agents.monitor]`, e.g. `optimization_stall_window` and `optimization_stall_tolerance` (default 0.1 %). A model's finding with a rule's code that the rules did not find is dropped. See [optimization](optimization.md) for the optimizers and their settings.
 
+**The final check of an optimization with a surrogate.** A finished run that used a surrogate is also judged by its final check (`result.json`, `surrogate.optimum_check`). There, the configured simulator re-evaluated the optimum and the ensemble around it, and the surrogate's values were compared with the simulator's. Four rules, all warnings, because the reported optimum is always the simulator's:
+
+| Rule | Speaks when | Threshold (`[agents.monitor]`, default) |
+|---|---|---|
+| `final_check_failed` | the check exceeded the run's own `optimum_tolerance` | the run's tolerance |
+| `surrogate_bias` | the relative difference of the final-ensemble mean, or of the optimum, is above the threshold | `optimization_final_bias` (0.05) |
+| `surrogate_spread_mismatch` | the surrogate's final-ensemble standard deviation is more than `r` times, or under `1/r` of, the simulator's | `optimization_final_spread_ratio` (2) |
+| `final_check_incomplete` | the check stopped with an error, compared no member, or more than the threshold's share of the members lay outside the surrogate's domain | `optimization_final_outside_share` (0.5) |
+
+The defaults are assumptions; tighten them for your cases. A deliberately skipped ensemble (`final_ensemble_check = false`, a vector objective, an optimizer without an ensemble) is shown in the report, not flagged. The report gets a **Final check** section: simulator against surrogate in the objective's own units (objective × `obj_scaling`, e.g. NPV), with the optimum, the final ensemble's mean, standard deviation, p10 and p90, the paired differences and the verdict. A plain run that recorded its final ensemble (`[optimization] final_ensemble = true`) gets a **Final ensemble** section with its mean ± standard deviation. The diagnosis recommends rebuilding the surrogate with more runs around the optimum and, when the run did not already refit, step checks with refits (`refit = true`, `simulate_every = 3`, `check_every = 1`, `outside = "simulator"`; a patch validated against the configuration).
+
 The monitor and report agents also read surrogate builds (a build's folder or job). Their rules read the design's runs (planned, finished, failed, pending), the gate on the held-out runs, the latest check of the model on new runs, and the fit and prediction times: a failed gate or check is critical (runs refuse the model), failed runs over `[agents.monitor] surrogate_max_failed_share` (5 %) a warning, a prediction less than `surrogate_min_speedup` (10) times faster than the median full run, and a stopped build's pending runs, information. See [surrogates](surrogates.md); a build needs an installed surrogate model plugin, and none is included with APEX yet.
 
 ## Step 5: the assistant in the web UI

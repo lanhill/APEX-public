@@ -47,7 +47,11 @@ from apex.domain.optimization import OptimizationConfig
 from apex.domain.services import OptimizationPlan, OptimizationSummary
 from apex.domain.state import StateLayout, StateVariable
 from apex.storage import optimization_directory as layout
-from apex.workflows.optimization import OptimizationRun, run_optimization
+from apex.workflows.optimization import (
+    FINAL_ENSEMBLE_STREAM,
+    OptimizationRun,
+    run_optimization,
+)
 from apex.workflows.parameterization import PropertyMap, parameterized
 from apex.workflows.simulated_objective import SimulatedObjective
 from apex.workflows.surrogate_optimization import STATE_FILE as SURROGATE_STATE
@@ -181,7 +185,16 @@ def plan_optimization(config: OptimizationConfig) -> OptimizationPlan:
         max_simulator_runs=(
             _surrogate_simulator_runs(config, optimizer, problem, evaluations)
             if config.surrogate is not None
-            else (evaluations if simulated else 0)
+            else (
+                evaluations
+                + (
+                    optimizer.final_ensemble_size(problem.n_realizations)
+                    if config.optimization.final_ensemble
+                    else 0
+                )
+                if simulated and evaluations is not None
+                else (evaluations if simulated else 0)
+            )
         ),
         surrogate_evaluations=None
         if config.surrogate is None
@@ -203,8 +216,9 @@ def _surrogate_simulator_runs(
 ) -> int | None:
     """Return the simulator runs of an optimization with a surrogate.
 
-    Its checks (one per ``check_every`` accepted steps, at every realization) and the
-    optimum's evaluation (a multi-objective run's whole front: at most its population), and,
+    Its checks (one per ``check_every`` accepted steps, at every realization), the
+    optimum's evaluation (a multi-objective run's whole front: at most its population), the
+    last step's ensemble (``final_ensemble_check``: one run per member at most), and,
     when the simulator may stand in for the surrogate (``outside`` or ``on_check_failure`` =
     ``simulator``), every evaluation the optimizer may make besides; ``None`` when the
     optimizer cannot bound its evaluations and the simulator may stand in.
@@ -225,6 +239,10 @@ def _surrogate_simulator_runs(
     checks = steps // section.check_every if section.check_every else 0
     final = int(getattr(optimizer, "pop_size", 1)) if optimizer.multi_objective else 1
     runs = n_r * (checks + final)
+    if section.final_ensemble_check and not optimizer.multi_objective:
+        # The last step's ensemble, each member on its realization
+        # (at most: members a check already simulated come from the journal).
+        runs += optimizer.final_ensemble_size(n_r)
     if section.simulate_every:
         # Per EPF loop, iterations 1, 1 + j, ... are the simulator's
         # (at most an iteration's evaluations each), and the iterate's value it starts from.
@@ -736,6 +754,12 @@ def evaluation_context(config: OptimizationConfig) -> str:
     return digest.hexdigest()
 
 
+def _final_draws(config: OptimizationConfig) -> GeneratorDraws:
+    # The final ensemble's own stream, drawn once at the end.
+    sequence = np.random.SeedSequence(config.optimization.seed, spawn_key=(FINAL_ENSEMBLE_STREAM,))
+    return GeneratorDraws(np.random.default_rng(sequence))
+
+
 def _draws(config: OptimizationConfig) -> GeneratorDraws:
     # One stream, spawned from the seed as the history-matching streams are.
     (child,) = np.random.SeedSequence(config.optimization.seed).spawn(1)
@@ -796,6 +820,14 @@ def resume(
         # Runs written before the default count was left out of config.json (a reported
         # issue): with a [model] file, a 1 there was the default, never the user's.
         controls.pop("realizations")
+    # a run started before the final ensemble resumes without it (its
+    # simulator runs were never approved).
+    optimization_raw = raw.get("optimization")
+    if isinstance(optimization_raw, dict):
+        optimization_raw.setdefault("final_ensemble", False)
+    surrogate_raw = raw.get("surrogate")
+    if isinstance(surrogate_raw, dict):
+        surrogate_raw.setdefault("final_ensemble_check", False)
     config = OptimizationConfig.model_validate(raw)
     if config.surrogate is None and (run_dir / SURROGATE_STATE).exists():
         # Its checkpoint and history hold the surrogate's values.
@@ -860,6 +892,16 @@ def _run(
             stopped=stopped,
             hooks=hooks,
             fresh_draws=lambda: _draws(config),
+            objective_scaling=None
+            if config.objective is None
+            else _scaling(config.objective.options.get("obj_scaling")),
+            final_draws=(lambda: _final_draws(config))
+            if (
+                config.surrogate.final_ensemble_check
+                if config.surrogate is not None
+                else config.optimization.final_ensemble
+            )
+            else None,
         )
     except ValueError as error:
         raise ConfigError(str(error)) from error

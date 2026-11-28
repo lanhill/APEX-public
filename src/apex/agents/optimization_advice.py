@@ -84,6 +84,9 @@ class OptimizationDiagnosisFacts(BaseModel):
     realizations: int
     simulated: bool
     execution: dict[str, Any] = Field(description="Its [execution] section.")
+    surrogate: dict[str, Any] | None = Field(
+        default=None, description="Its [surrogate] section (an optimization with a surrogate)."
+    )
     notes: list[str] = Field(default_factory=list)
 
 
@@ -104,6 +107,7 @@ def diagnosis_facts(monitor: OptimizationMonitor, target: str | Path) -> tuple[
         realizations=int(config.get("controls", {}).get("realizations", 1)),
         simulated=config.get("simulator") is not None,
         execution=config.get("execution", {"name": "serial"}),
+        surrogate=config.get("surrogate"),
     ), config
 
 
@@ -176,6 +180,7 @@ def diagnosis_rules(facts: OptimizationDiagnosisFacts, report_codes: set[str]) -
                 patch={"optimizer": {"options": {"maxiter": 2 * int(options["maxiter"])}}},
             ))  # fmt: skip
     _front_diagnosis(facts, report_codes, causes, recs)
+    _final_diagnosis(facts, report_codes, causes, recs)
     codes = ", ".join(c.code for c in causes) or "nothing to fix"
     return Diagnosis(
         verdict=_verdict(causes),
@@ -286,6 +291,74 @@ def _front_diagnosis(
             evidence=f"the hypervolume fell from {m.best_hypervolume} to {m.hypervolume} under "
             "one penalty factor; look at the history for a noisy objective or a front cut by "
             "crowding (nothing to change otherwise)",
+        ))  # fmt: skip
+
+
+def _final_diagnosis(
+    facts: OptimizationDiagnosisFacts,
+    report_codes: set[str],
+    causes: list[Cause],
+    recs: list[Recommendation],
+) -> None:
+    """Add the causes and recommendations of a surrogate optimization's final check.
+
+    The reported optimum is the simulator's, so nothing here repairs the result: the
+    recommendations make the surrogate fit for this region (a rebuild around the optimum)
+    or let the run correct it as it goes (step checks with refits).
+    """
+    c = facts.monitor.final_check
+    if c is None:
+        return
+    misjudged = report_codes & {"final_check_failed", "surrogate_bias"}
+    gap = (
+        "n/a"
+        if c.ensemble_relative_mean_difference is None
+        else (f"{c.ensemble_relative_mean_difference:.3g}")
+    )
+    opt = (
+        "n/a" if c.optimum_relative_difference is None else (f"{c.optimum_relative_difference:.3g}")
+    )
+    for code in sorted(misjudged):
+        causes.append(Cause(
+            code=code, severity="warning",
+            evidence=f"relative difference final-ensemble mean {gap}, optimum {opt}"
+            + (f"; optimum_tolerance {c.tolerance:g}" if c.tolerance is not None else ""),
+        ))  # fmt: skip
+    if "surrogate_spread_mismatch" in report_codes:
+        sim, sur = c.ensemble_simulator, c.ensemble_surrogate
+        causes.append(Cause(
+            code="surrogate_spread_mismatch", severity="warning",
+            evidence=f"final-ensemble std: surrogate {sur.std if sur else 'n/a'}, simulator "
+            f"{sim.std if sim else 'n/a'}",
+        ))  # fmt: skip
+    if "final_check_incomplete" in report_codes:
+        causes.append(Cause(
+            code="final_check_incomplete", severity="warning",
+            evidence=c.error or f"{c.members_compared} of {c.members} final-ensemble members "
+            f"compared, {c.members_outside} outside the surrogate's domain",
+        ))  # fmt: skip
+    found = misjudged | (report_codes & {"surrogate_spread_mismatch", "final_check_incomplete"})
+    if not found:
+        return
+    recs.append(Recommendation(
+        change="rebuild the surrogate with more training runs around the final optimum (a "
+        "design centred on the result's controls, e.g. [design] plan = \"file\" with the "
+        "final ensemble, or a narrower lhs box), then optimize again",
+        rationale="the surrogate was fitted on a design that covers the optimum's region "
+        "thinly: its values or spread there are off", addresses=sorted(found), patch=None,
+    ))  # fmt: skip
+    section = facts.surrogate or {}
+    if misjudged and not section.get("refit"):
+        recs.append(Recommendation(
+            change="let the run correct the surrogate as it goes: simulate every 3rd iteration, "
+            "check every accepted step and refit (refit = true, simulate_every = 3, "
+            "check_every = 1, outside = \"simulator\"); this costs simulator runs at those "
+            "iterations",
+            rationale="refits on the run's own simulated rows fit the surrogate where the "
+            "optimizer goes, so it misjudges less near the optimum",
+            addresses=sorted(misjudged),
+            patch={"surrogate": {"refit": True, "simulate_every": 3, "check_every": 1,
+                                 "outside": "simulator"}},
         ))  # fmt: skip
 
 

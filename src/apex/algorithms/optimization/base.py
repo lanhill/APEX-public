@@ -511,6 +511,47 @@ class OptimizerBase(ABC):
             return
         self.fk = self.fun(self.xk)
 
+    def final_ensemble(self, draws: Draws | None) -> tuple[FloatArray, IntArray] | None:
+        """Return the ensemble around the final iterate, or ``None``.
+
+        Physical controls ``(n_x, n)`` and each column's realization ``(n,)``, paired as the
+        optimizer pairs its members (:func:`ensemble_gradient.member_realizations`: member
+        ``i`` on realization ``(i // (n / n_r)) % n_r``, ``n`` a multiple of ``n_r``).
+
+        For an ensemble-gradient optimizer (EnOpt): when the last iteration failed, its
+        ensemble was drawn around the final iterate and is returned as it was evaluated;
+        when it ended on an accepted step, an ensemble is drawn around the final iterate with
+        the optimizer's current covariance by its own sampling (re-centred, clipped), from
+        ``draws`` (a stream of its own: the optimizer's streams are untouched), ``None``
+        without ``draws``. Subclasses with another ensemble override it (SmcOpt: its
+        particles; a population optimizer: its final population on every realization).
+        ``None`` for an optimizer without one (deterministic, line search, trust region,
+        GenOpt).
+        """
+        ensemble = getattr(self, "ensemble", None)
+        cov = getattr(self, "cov", None)
+        if ensemble is None or cov is None or not hasattr(ensemble, "realizations"):
+            return None
+        n = int(ensemble.n_samples)
+        x_final = self.bounds.to_physical(self.bounds.project(self.xk))
+        last_x, last = getattr(ensemble, "x", None), getattr(ensemble, "perturbed", None)
+        if last is not None and last_x is not None and np.array_equal(last_x, x_final):
+            controls = np.asarray(last, dtype=float)  # the failed last iteration's draw
+        elif draws is None:
+            return None
+        else:
+            from apex.algorithms.optimization.ensemble_gradient import gaussian_perturbations
+
+            controls = gaussian_perturbations(
+                x_final, np.asarray(cov, dtype=float), n, draws, ensemble.lower, ensemble.upper
+            )
+        realizations = np.asarray(ensemble.realizations(n), dtype=np.int64)
+        return np.ascontiguousarray(controls), realizations
+
+    def final_ensemble_size(self, n_realizations: int) -> int:
+        """Return the columns :meth:`final_ensemble` will hold (0: none), for plans."""
+        return 0
+
     def reevaluate_iterate(self) -> None:
         """Evaluate the objective at the iterate again, after the objective itself changed.
 

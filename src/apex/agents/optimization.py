@@ -13,6 +13,14 @@ representative's first objective: whether any member is feasible, the front's si
 the population, and whether the front still moves (the optimizer's own measure, logged per
 generation as ``front_movement`` and ``stalled_generations``). Its report describes the
 front: its size, the best member of each objective and the representative.
+
+A finished optimization with a surrogate is also judged by its final check
+(``result.json``'s ``surrogate.optimum_check``): whether it passed its
+``optimum_tolerance``, how far the surrogate's optimum and final-ensemble mean lie from the
+simulator's, whether its spread matches, and whether the check could compare the ensemble at
+all. Its report shows the check's table, simulator against surrogate, in the objective's own
+units (``value``: objective x ``obj_scaling``, e.g. NPV); a plain run's report shows its
+final ensemble, when it recorded one (``[optimization] final_ensemble``).
 """
 
 import math
@@ -45,7 +53,62 @@ TOOLS = ("optimization_summary", "job_status", "job_events")
 RULE_CODES = frozenset({
     "failed_evaluations", "stall", "no_improvement", "iteration_limit",
     "no_feasible_member", "small_front", "front_stall", "hypervolume_drop",
+    "final_check_failed", "surrogate_bias", "surrogate_spread_mismatch",
+    "final_check_incomplete",
 })  # fmt: skip
+
+
+class EnsembleValues(BaseModel):
+    """An ensemble's objective values in the objective's own units (``value``, e.g. NPV)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    n: int
+    mean: float
+    std: float
+    p10: float
+    p90: float
+    min: float
+    max: float
+
+
+class FinalCheckFacts(BaseModel):
+    """A surrogate optimization's final check, from ``result.json``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    simulator: str | None = Field(default=None, description="The simulator that checked it.")
+    passed: bool | None = Field(
+        default=None, description="Within optimum_tolerance; none: no tolerance given."
+    )
+    tolerance: float | None = None
+    error: str | None = Field(default=None, description="Why the check could not finish.")
+    skipped: str | None = Field(default=None, description="Why the ensemble was not checked.")
+    optimum_surrogate: float | None = Field(
+        default=None, description="The optimum's value by the surrogate (objective's units)."
+    )
+    optimum_simulator: float | None = Field(
+        default=None, description="The optimum's value by the simulator (objective's units)."
+    )
+    optimum_relative_difference: float | None = None
+    members: int | None = Field(default=None, description="The final ensemble's members.")
+    members_compared: int | None = Field(
+        default=None, description="Members the surrogate answered (the paired comparison)."
+    )
+    members_outside: int | None = Field(
+        default=None, description="Members outside the surrogate's domain, not compared."
+    )
+    new_simulator_runs: int | None = None
+    ensemble_simulator: EnsembleValues | None = Field(
+        default=None, description="The simulator's values over the compared members."
+    )
+    ensemble_surrogate: EnsembleValues | None = None
+    ensemble_relative_mean_difference: float | None = None
+    difference_mean: float | None = Field(
+        default=None, description="Paired difference surrogate - simulator: its mean."
+    )
+    difference_std: float | None = None
+    difference_worst: float | None = None
 
 
 class OptimizationFacts(BaseModel):
@@ -113,6 +176,14 @@ class OptimizationFacts(BaseModel):
         description="Stalled generations at which the front_stall rule speaks: the "
         "optimizer's default stall, when the run's own is larger (it would keep a stalled run "
         "going); none otherwise, as the run then stops by itself.",
+    )
+    final_check: FinalCheckFacts | None = Field(
+        default=None, description="A finished surrogate optimization's final check."
+    )
+    final_ensemble: EnsembleValues | None = Field(
+        default=None,
+        description="The final ensemble's values by the simulator (objective's units): a "
+        "plain run's (with [optimization] final_ensemble) or a surrogate run's checked one.",
     )
 
 
@@ -256,7 +327,76 @@ def optimization_facts(
         failed_evaluations=summary.failed_evaluations,
         message=None if summary.result is None else str(summary.result.get("message")),
         **multi,
+        **_final_facts(summary.result),
     )
+
+
+def _values(record: object) -> EnsembleValues | None:
+    """Return an ensemble record's ``value`` statistics, or ``None``."""
+    if not isinstance(record, dict) or not isinstance(record.get("value"), dict):
+        return None
+    v = record["value"]
+    try:
+        return EnsembleValues(**{k: v[k] for k in EnsembleValues.model_fields})
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _final_facts(result: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the final check's and the final ensemble's facts from ``result.json``."""
+    if not result:
+        return {}
+    out: dict[str, Any] = {}
+    final = _values(result.get("final_ensemble"))
+    check = (result.get("surrogate") or {}).get("optimum_check")
+    if isinstance(check, dict):
+        objectives = check.get("objectives") or []
+        first = objectives[0] if objectives and isinstance(objectives[0], dict) else {}
+        value = first.get("value") or {}
+        ensemble = check.get("ensemble") or {}
+        difference = ensemble.get("difference") or {}
+        not_answered = ensemble.get("not_answered") or {}
+        passed = check.get("passed")
+        out["final_check"] = FinalCheckFacts(
+            simulator=None if check.get("simulator_name") is None
+            else str(check["simulator_name"]),
+            passed=passed if isinstance(passed, bool) else None,
+            tolerance=_number(check.get("tolerance")),
+            error=None if check.get("error") is None else str(check["error"]),
+            skipped=None if ensemble.get("skipped") is None else str(ensemble["skipped"]),
+            optimum_surrogate=_number(value.get("surrogate")),
+            optimum_simulator=_number(value.get("simulator")),
+            optimum_relative_difference=_number(first.get("relative")),
+            members=_number_int(ensemble.get("members")),
+            members_compared=_number_int(ensemble.get("members_compared")),
+            members_outside=_number_int(not_answered.get("outside")),
+            new_simulator_runs=_number_int(ensemble.get("new_simulator_runs")),
+            ensemble_simulator=_values(ensemble.get("simulator_compared")
+                                       or ensemble.get("simulator")),
+            ensemble_surrogate=_values(ensemble.get("surrogate")),
+            ensemble_relative_mean_difference=_number(
+                ensemble.get("relative_mean_difference")),
+            difference_mean=_number(difference.get("mean")),
+            difference_std=_number(difference.get("std")),
+            difference_worst=_number(difference.get("worst")),
+        )  # fmt: skip
+        if final is None:
+            final = _values(ensemble.get("simulator"))
+    if final is not None:
+        out["final_ensemble"] = final
+    return out
+
+
+def _number_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value)
 
 
 def _front_facts(
@@ -315,6 +455,7 @@ def optimization_rules(facts: OptimizationFacts, thresholds: MonitorSection) -> 
             f"{thresholds.optimization_stall_tolerance:g}",
         ))  # fmt: skip
     findings.extend(_front_rules(facts, thresholds))
+    findings.extend(_final_rules(facts, thresholds))
     if facts.state == "finished" and facts.accepted_steps == 0:
         findings.append(Finding(
             code="no_improvement", severity="warning",
@@ -402,6 +543,77 @@ def _front_rules(facts: OptimizationFacts, thresholds: MonitorSection) -> list[F
             evidence=f"the hypervolume fell from {facts.best_hypervolume:.6g} to "
             f"{facts.hypervolume:.6g} (over {drop:.0%}) under one penalty factor: "
             "the front lost ground, e.g. members cut by crowding or a noisy objective",
+        ))  # fmt: skip
+    return findings
+
+
+def _final_rules(facts: OptimizationFacts, thresholds: MonitorSection) -> list[Finding]:
+    """Return the findings on a surrogate optimization's final check.
+
+    Warnings, not critical: the reported optimum is the simulator's whatever the check says;
+    a failed or biased check means the surrogate misjudged the run, so its path to the
+    optimum (and any later use of the model) deserves a look.
+    """
+    c = facts.final_check
+    if c is None:
+        return []
+    findings: list[Finding] = []
+    if c.passed is False:
+        findings.append(Finding(
+            code="final_check_failed", severity="warning",
+            evidence=f"the final check exceeded optimum_tolerance = {c.tolerance:g}: the "
+            "surrogate's optimum or final-ensemble mean lies further from the simulator's "
+            "(the reported optimum is the simulator's)"
+            if c.tolerance is not None else "the final check failed its tolerance",
+        ))  # fmt: skip
+    gaps = [(name, gap) for name, gap in (
+        ("final-ensemble mean", c.ensemble_relative_mean_difference),
+        ("optimum", c.optimum_relative_difference),
+    ) if gap is not None and gap > thresholds.optimization_final_bias]  # fmt: skip
+    if gaps:
+        said = ", ".join(f"{name} {gap:.3g}" for name, gap in gaps)
+        findings.append(Finding(
+            code="surrogate_bias", severity="warning",
+            evidence=f"the surrogate's relative difference from the simulator ({said}) is "
+            f"above {thresholds.optimization_final_bias:g}",
+        ))  # fmt: skip
+    sim, sur, ratio = (
+        c.ensemble_simulator,
+        c.ensemble_surrogate,
+        thresholds.optimization_final_spread_ratio,
+    )
+    if sim is not None and sur is not None:
+        if sim.std > 0:
+            spread = sur.std / sim.std
+            off = spread > ratio or spread < 1.0 / ratio
+        else:
+            spread, off = math.inf, sur.std > 0
+        if off:
+            findings.append(Finding(
+                code="surrogate_spread_mismatch", severity="warning",
+                evidence=f"the surrogate's final-ensemble std {sur.std:.6g} against the "
+                f"simulator's {sim.std:.6g} (ratio {spread:.3g}) is outside "
+                f"[{1.0 / ratio:.3g}, {ratio:g}]: the surrogate may get the mean right and "
+                "the spread wrong",
+            ))  # fmt: skip
+    incomplete = []
+    if c.error:
+        incomplete.append(f"the check stopped: {c.error}")
+    if c.members and c.members_compared == 0:
+        incomplete.append(f"none of the {c.members} final-ensemble members was compared")
+    elif (
+        c.members
+        and c.members_outside is not None
+        and (c.members_outside / c.members > thresholds.optimization_final_outside_share)
+    ):
+        incomplete.append(
+            f"{c.members_outside} of {c.members} final-ensemble members lie outside the "
+            f"surrogate's domain (over {thresholds.optimization_final_outside_share:.0%}), "
+            "so they were not compared"
+        )
+    if incomplete:
+        findings.append(Finding(
+            code="final_check_incomplete", severity="warning", evidence="; ".join(incomplete),
         ))  # fmt: skip
     return findings
 
@@ -685,9 +897,72 @@ def report_template(report: OptimizationReportFacts) -> NarrativeReport:
             if controls
             else "No controls recorded yet.",
         ),
+        *_final_sections(f, fmt),
         Section(heading="Health", text=report.monitor.summary),
     ]
     return NarrativeReport(title=f"Optimization {f.name}", sections=sections)
+
+
+def _final_sections(f: OptimizationFacts, fmt: Callable[[float | None], str]) -> list[Section]:
+    """Return the final check's section (a surrogate run) or the final ensemble's (plain).
+
+    Values in the objective's own units (``value``: objective x ``obj_scaling``, e.g. NPV);
+    p10 is the 10th percentile of that value.
+    """
+    c = f.final_check
+    if c is None:
+        e = f.final_ensemble
+        if e is None:
+            return []
+        return [Section(
+            heading="Final ensemble",
+            text=f"The simulator's values over the {e.n} members of the ensemble around the "
+            f"final optimum (the objective's own units): mean {fmt(e.mean)}, std "
+            f"{fmt(e.std)}, p10 {fmt(e.p10)}, p90 {fmt(e.p90)}, from {fmt(e.min)} to "
+            f"{fmt(e.max)}.",
+        )]  # fmt: skip
+    lines = [
+        f"Checked by the simulator {c.simulator or 'of the configuration'}; values in "
+        "the objective's own units (objective x obj_scaling, e.g. NPV)."
+    ]
+    if c.error:
+        lines.append(f"The check stopped: {c.error}.")
+    rows = [
+        "| | Simulator | Surrogate |",
+        "|---|---|---|",
+        f"| optimum | {fmt(c.optimum_simulator)} | {fmt(c.optimum_surrogate)} |",
+    ]
+    sim, sur = c.ensemble_simulator, c.ensemble_surrogate
+    if sim is not None:
+        for stat in ("mean", "std", "p10", "p90"):
+            rows.append(
+                f"| final ensemble {stat} | {fmt(getattr(sim, stat))} | "
+                f"{fmt(None if sur is None else getattr(sur, stat))} |"
+            )
+    lines.append("\n".join(rows))
+    if c.skipped:
+        lines.append(f"The final ensemble was not checked: {c.skipped}.")
+    elif c.members is not None:
+        compared = c.members_compared if c.members_compared is not None else 0
+        lines.append(
+            f"{compared} of {c.members} members compared"
+            + (f" ({c.members_outside} outside the surrogate's domain)"
+               if c.members_outside else "")
+            + f"; {c.new_simulator_runs if c.new_simulator_runs is not None else 'n/a'} new "
+            "simulator runs."
+        )  # fmt: skip
+    if c.difference_mean is not None:
+        lines.append(f"Paired difference (surrogate - simulator): mean "
+                     f"{fmt(c.difference_mean)}, std {fmt(c.difference_std)}, worst "
+                     f"{fmt(c.difference_worst)}.")  # fmt: skip
+    gap = c.ensemble_relative_mean_difference
+    if gap is not None or c.optimum_relative_difference is not None:
+        lines.append(f"Relative difference: final-ensemble mean {fmt(gap)}, optimum "
+                     f"{fmt(c.optimum_relative_difference)}.")  # fmt: skip
+    if c.passed is not None:
+        lines.append(f"{'Passed' if c.passed else 'Failed'} its optimum_tolerance "
+                     f"{fmt(c.tolerance)}.")  # fmt: skip
+    return [Section(heading="Final check", text="\n\n".join(lines))]
 
 
 def _front_template(
@@ -737,6 +1012,7 @@ def _front_template(
             if controls
             else "No controls recorded yet.",
         ),
+        *_final_sections(f, fmt),
         Section(heading="Health", text=report.monitor.summary),
     ]
     return NarrativeReport(title=f"Optimization {f.name}", sections=sections)

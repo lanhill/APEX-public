@@ -5372,6 +5372,18 @@ def optimization_surrogate(
         inside=inside,
         outside=section.outside,
         check_every=section.check_every,
+        optimum_tolerance=section.optimum_tolerance,
+        final_ensemble_check=section.final_ensemble_check,
+        # The configured simulator, whichever it is (a deck simulator, GEOS, PFLOTRAN, an
+        # analytic model, with its wrappers): the final check runs on this stack.
+        simulator_name=None if config.simulator is None else config.simulator.name,
+        objective_scaling=(
+            None
+            if config.objective is None
+            or not isinstance(config.objective.options.get("obj_scaling"), int | float)
+            or isinstance(config.objective.options.get("obj_scaling"), bool)
+            else float(config.objective.options["obj_scaling"])
+        ),
         on_check_failure=section.on_check_failure,
         tolerances=tolerances,
         kinds=kinds,

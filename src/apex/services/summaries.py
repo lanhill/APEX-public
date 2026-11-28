@@ -399,6 +399,26 @@ class OptimizationSummarizer:
                 ))  # fmt: skip
             if summary.result.get("message"):
                 notes.append(f"stopped: {summary.result['message']}")
+            ensemble = summary.result.get("final_ensemble")
+            if isinstance(ensemble, Mapping) and "error" in ensemble:
+                notes.append(f"the final ensemble could not be evaluated: {ensemble['error']}")
+            if isinstance(ensemble, Mapping) and isinstance(ensemble.get("value"), Mapping):
+                # The objective over the ensemble around the final
+                # optimum, in its own units (an NPV objective's NPV: objective * obj_scaling).
+                value = ensemble["value"]
+                rows.append(MetricStatistics(
+                    "final_ensemble", "value", last, float(value["mean"]), float(value["std"]),
+                    float(value["median"]), float(value["p10"]), float(value["p90"]),
+                ))  # fmt: skip
+                notes.append(
+                    f"the final ensemble ({ensemble.get('members', value['n'])} members, by the "
+                    f"{ensemble.get('source', 'objective')}), the objective's value (objective * "
+                    f"obj_scaling, e.g. NPV): mean {float(value['mean']):.6g}, std "
+                    f"{float(value['std']):.3g}, min {float(value['min']):.6g}, max "
+                    f"{float(value['max']):.6g}, p10 and p90 of the value "
+                    f"{float(value['p10']):.6g} and {float(value['p90']):.6g}; external "
+                    "penalties excluded"
+                )
             surrogate = summary.result.get("surrogate")
             if isinstance(surrogate, Mapping) and "coarse_evaluations" in surrogate:
                 notes.append(
@@ -406,6 +426,8 @@ class OptimizationSummarizer:
                     f"{surrogate.get('coarse_failed', 0)} failed, "
                     f"{surrogate.get('coarse_stand_ins', 0)} evaluated by the simulator instead"
                 )
+            if isinstance(surrogate, Mapping):
+                notes.extend(_optimum_check_notes(surrogate.get("optimum_check")))
             after = optimization.objective_evaluations(summary) - evaluated
             if after > 0:  # the last iteration's, which found no step to accept
                 notes.append(f"{after} more objective evaluations after the last accepted step")
@@ -429,6 +451,51 @@ class OptimizationSummarizer:
             forecasts=max(evaluated, 0),
             notes=tuple(notes),
         )
+
+
+def _optimum_check_notes(check: object) -> list[str]:
+    """Return a surrogate optimization's final check as notes."""
+    if not isinstance(check, Mapping):
+        return []
+    if "error" in check:
+        return [f"the final check could not be made: {check['error']}"]
+    notes = []
+    for entry in check.get("objectives") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("value") or {}
+        relative = entry.get("relative")
+        share = "n/a" if relative is None else f"{100 * float(relative):.3g} %"
+        surrogate = value.get("surrogate")
+        notes.append(
+            f"the optimum's {entry.get('name', 'objective')} value (objective * obj_scaling): "
+            f"surrogate {'n/a' if surrogate is None else format(float(surrogate), '.6g')}, "
+            f"simulator {float(value['simulator']):.6g} ({share} apart)"
+        )
+    ensemble = check.get("ensemble")
+    if isinstance(ensemble, Mapping) and isinstance(ensemble.get("surrogate"), Mapping):
+        sur = ensemble["surrogate"]["value"]
+        sim = ensemble["simulator_compared"]["value"]
+        diff = ensemble["difference"]
+        relative = ensemble.get("relative_mean_difference")
+        share = "n/a" if relative is None else f"{100 * float(relative):.3g} %"
+        notes.append(
+            f"the final ensemble ({ensemble['members_compared']} of {ensemble['members']} "
+            f"members compared), value: surrogate mean {float(sur['mean']):.6g} std "
+            f"{float(sur['std']):.3g}; simulator mean {float(sim['mean']):.6g} std "
+            f"{float(sim['std']):.3g} (means {share} apart); paired difference mean "
+            f"{float(diff['mean']):.3g}, std {float(diff['std']):.3g}, worst "
+            f"{float(diff['worst']):.3g}; {ensemble['new_simulator_runs']} new simulator run(s)"
+        )
+    elif isinstance(ensemble, Mapping) and "skipped" in ensemble:
+        notes.append(f"the final ensemble was not checked: {ensemble['skipped']}")
+    if "passed" in check:
+        verdict = "within" if check["passed"] else "BEYOND"
+        notes.append(
+            f"final check: {verdict} optimum_tolerance {check.get('tolerance')} (the optimum "
+            "and the ensemble mean)"
+        )
+    return notes
 
 
 @summaries.register("surrogate")

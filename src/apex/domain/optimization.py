@@ -60,6 +60,21 @@ class OptimizationSection(_Strict):
     output_dir: Path | None = Field(
         default=None, description="Run directory; default `runs/<name>` next to the config."
     )
+    final_ensemble: bool = Field(
+        default=False,
+        description="On request (false by default: plain runs pay its runs only when asked; "
+        "the user may change the default later), at the end, evaluate the objective over an "
+        "ensemble around the final "
+        "optimum and record its mean and std (result.json's final_ensemble): an ensemble "
+        "optimizer's members (EnOpt: its last ensemble if the last iteration failed, else one "
+        "drawn around the final iterate with its covariance (the failed iteration's only if "
+        "its centre is the final iterate, so not under Nesterov momentum; it may carry a "
+        "resampling-shrunk covariance); member i on model i // (ne / "
+        "n_r), ne a multiple of n_r), SmcOpt's particles, a population optimizer's final "
+        "population on every realization. With a simulator, up to one run per member (the "
+        "plan counts them). A run with [surrogate] uses that section's final_ensemble_check "
+        "instead. Optimizers without an ensemble record none.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -151,9 +166,11 @@ class OptimizationSurrogateSection(_Strict):
 
     Every evaluation the optimizer asks for is made by the surrogate whose manifest
     ``model_file`` names (built by ``apex surrogate build`` on this optimization), on local
-    workers; the ``[simulator]`` runs the checks (every ``check_every`` accepted steps, the
-    accepted controls at every realization) and the reported optimum, which is always the
-    simulator's.
+    workers; the ``[simulator]`` runs the reported optimum, which is always the simulator's
+    and is compared with the surrogate's value of it (``optimum_check`` in ``result.json``,
+    judged by ``optimum_tolerance`` when given), and, when asked for, checks of accepted steps
+    (every ``check_every``; none by default, the user's preference
+    of 2026-11-27: with a surrogate, validate the optimum at the end).
     """
 
     model_file: Path = Field(
@@ -161,10 +178,30 @@ class OptimizationSurrogateSection(_Strict):
         "`runs/<build>/model/surrogate.json`."
     )
     check_every: int = Field(
-        default=3,
+        default=0,
         ge=0,
         description="Accepted steps whose controls are also evaluated by the simulator and "
-        "gated (steps 3, 6, 9, ... by default); 0: no checks.",
+        "gated (every check_every-th: steps k, 2k, ...); 0, the default: none, the optimum "
+        "alone is evaluated by the simulator and compared with the surrogate's value "
+        "(optimum_check). Needed by refit.",
+    )
+    final_ensemble_check: bool = Field(
+        default=True,
+        description="At the end, also evaluate the ensemble around the final optimum by the "
+        "surrogate and by the simulator ([optimization] final_ensemble's ensemble: member i "
+        "on model i // (ne / n_r), ne a multiple of n_r), and report both sides' mean and "
+        "std and their paired differences. Costs one simulator run per member not already "
+        "in the journal (the plan counts them). Optimizers without an ensemble, and vector "
+        "objectives, check the optimum only.",
+    )
+    optimum_tolerance: float | None = Field(
+        default=None,
+        gt=0,
+        description="The largest relative difference |surrogate - simulator| / |simulator| "
+        "accepted, for the optimum's value and for the final ensemble's mean (both must pass;"
+        " the paired std and worst are reported, not judged; result.json's "
+        "surrogate.optimum_check); exceeded, a warning and passed = false (the reported "
+        "optimum stays the simulator's). None: reported, not judged.",
     )
     on_check_failure: Literal["stop", "simulator"] = Field(
         default="stop",
@@ -232,7 +269,8 @@ class OptimizationSurrogateSection(_Strict):
             # check among them gates it (the check at s tests the model it replaces).
             raise ValueError(
                 "refit = true needs 1 <= check_every <= simulate_every - 1: a refit has no "
-                "held-out runs, and a check of a step it took is its gate"
+                "held-out runs, and a check of a step it took is its gate (check_every "
+                "defaults to 0, no step checks: give it)"
             )
         if self.simulate_every and self.outside != "simulator":
             # A simulated iteration's accepted step may leave the surrogate's domain: with

@@ -208,6 +208,14 @@ class MonitorSection(_Strict):
     # A hypervolume more than 5% below its best under one penalty factor: the front lost
     # ground (crowding truncation causes small dips, which are normal).
     optimization_hypervolume_drop: float = Field(default=0.05, gt=0, lt=1)
+    # The final check of an optimization with a surrogate (ASSUMED
+    # defaults): the surrogate's ensemble mean, or its optimum, more than 5% (relative) from
+    # the simulator's; its ensemble spread (std) more than twice or under half the
+    # simulator's; and more than half the final ensemble outside the surrogate's domain (not
+    # compared). A finished run is judged; the reported optimum is always the simulator's.
+    optimization_final_bias: float = Field(default=0.05, gt=0)
+    optimization_final_spread_ratio: float = Field(default=2.0, gt=1)
+    optimization_final_outside_share: float = Field(default=0.5, gt=0, le=1)
     # Surrogate builds: more than 5% of the design's full runs failed.
     # The build itself refuses below [design] min_success_fraction (0.9 by default); between
     # the two, the fit is made on fewer runs than planned and the failures may cluster in one

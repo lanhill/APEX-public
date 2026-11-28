@@ -443,9 +443,10 @@ def test_the_plan_counts_the_coarse_runs(tmp_path: Path) -> None:
     assert plan.max_evaluations is not None
     capped = min(plan.max_evaluations, 50_000)
     checks = 5 // 2
-    # Checks and the optimum by the simulator; a coarse run per evaluation and per check;
-    # the simulator standing in for every coarse run that may fail.
-    assert plan.max_simulator_runs == (checks + 1) + 2 * (capped + checks)
+    # Checks, the optimum and the last step's ensemble (ne = 6) by the
+    # simulator; a coarse run per evaluation and per check; the simulator standing in for
+    # every coarse run that may fail.
+    assert plan.max_simulator_runs == (checks + 1 + 6) + 2 * (capped + checks)
 
 
 def test_a_bound_on_evaluations_bounds_the_coarse_runs(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -304,6 +305,10 @@ TRANSIENT_PATTERNS: tuple[str, ...] = (
 )
 
 
+#: An abort (SIGABRT) whose log says memory ran out: transient, as the out-of-memory killer.
+MEMORY_ABORT = r"bad_alloc|cannot allocate memory|out of memory"
+
+
 def failure_error(
     message: str, returncode: int | None, log: Path, extra_patterns: Sequence[str] = ()
 ) -> SimulationError:
@@ -311,13 +316,19 @@ def failure_error(
 
     Transient when the process was killed by a signal (a negative return code: e.g. the
     kernel's out-of-memory killer), or when the log matches :data:`TRANSIENT_PATTERNS` or
-    one of ``extra_patterns`` (a simulator's ``transient_patterns`` option).
+    one of ``extra_patterns`` (a simulator's ``transient_patterns`` option). Not when the
+    signal is SIGABRT: the program aborted itself (a failed assertion, ``abort()``), which
+    the same input repeats on any host, so a retry only spends hours (OPM Flow's
+    ``isfinite(rate)`` assertion on Ula, 2026-11-27; the user's decision). An abort after
+    running out of memory (an uncaught ``std::bad_alloc``: :data:`MEMORY_ABORT`) depends on
+    the host's load, and stays transient.
     """
-    killed = returncode is not None and returncode < 0
     try:
         text = log.read_text(errors="replace")[-20_000:]
     except OSError:
         text = ""
+    aborted = returncode == -signal.SIGABRT and not re.search(MEMORY_ABORT, text, re.IGNORECASE)
+    killed = returncode is not None and returncode < 0 and not aborted
     patterns = (*TRANSIENT_PATTERNS, *extra_patterns)
     matched = next((p for p in patterns if re.search(p, text, re.IGNORECASE)), None)
     if killed or matched is not None:

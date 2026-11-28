@@ -102,7 +102,7 @@ from apex.domain.surrogate import (
     TrainingDomain,
 )
 from apex.storage.optimization_directory import read_evaluations
-from apex.workflows.optimization import RestartFromStart
+from apex.workflows.optimization import RestartFromStart, ensemble_record
 from apex.workflows.simulated_objective import SimulatedObjective, fit_only_digest
 
 logger = logging.getLogger(__name__)
@@ -198,6 +198,28 @@ class SurrogateRefitter:
     seed: int
 
 
+def _difference(surrogate: float, simulator: float) -> dict[str, Any]:
+    """Return ``surrogate`` against ``simulator``: values, difference, relative difference.
+
+    The relative difference is ``|surrogate - simulator| / |simulator|``; 0 when both are 0,
+    ``None`` (undefined, never "within") when only the simulator's is 0.
+    """
+    diff = surrogate - simulator
+    if simulator != 0:
+        relative: float | None = abs(diff) / abs(simulator)
+    else:
+        relative = 0.0 if diff == 0 else None
+    return {"surrogate": surrogate, "simulator": simulator, "difference": diff,
+            "relative": relative}  # fmt: skip
+
+
+def _within(relative: float | None, tolerance: float | None) -> bool:
+    """Whether a relative difference is within ``tolerance`` (always, without one)."""
+    if tolerance is None:
+        return True
+    return relative is not None and relative <= tolerance
+
+
 class SurrogateObjective:
     """An optimization's objective evaluated by a surrogate (see the module docstring).
 
@@ -215,7 +237,19 @@ class SurrogateObjective:
     outside
         ``stop``, ``simulator`` or ``surrogate`` (extrapolate) for columns outside.
     check_every
-        Accepted steps between checks (0: none).
+        Accepted steps between checks (0, the default: none).
+    optimum_tolerance
+        The relative difference between the surrogate's and the simulator's values accepted
+        (``None``: reported only; ``finish``'s ``optimum_check``): of the last step's
+        ensemble mean when it is checked, else of the optimum's.
+    final_ensemble_check
+        Whether ``finish`` also evaluates the last step's ensemble by the simulator.
+    simulator_name
+        The configured simulator's registered name, recorded with the final check (the
+        check runs on ``simulator``, the run's own stack, whatever it is).
+    objective_scaling
+        The objective's ``obj_scaling``: the final check reports values in the objective's
+        own units (objective * it; an NPV objective's NPV) besides the minimised objective.
     on_check_failure
         ``stop`` or ``simulator``.
     tolerances, kinds
@@ -251,7 +285,11 @@ class SurrogateObjective:
         identity: str,
         inside: InsideCheck,
         outside: Literal["stop", "simulator", "surrogate"] = "stop",
-        check_every: int = 3,
+        check_every: int = 0,
+        optimum_tolerance: float | None = None,
+        final_ensemble_check: bool = True,
+        simulator_name: str | None = None,
+        objective_scaling: float | None = None,
         on_check_failure: Literal["stop", "simulator"] = "stop",
         tolerances: GateTolerances | None = None,
         kinds: Mapping[str, QuantityKind] | None = None,
@@ -293,6 +331,13 @@ class SurrogateObjective:
         self.inside = inside
         self.outside = outside
         self.check_every = check_every
+        self.optimum_tolerance = optimum_tolerance
+        self.final_ensemble_check = final_ensemble_check
+        self.simulator_name = simulator_name
+        self.objective_scaling = objective_scaling
+        #: The final ensemble (controls, realizations), set by the workflow before
+        #: :meth:`finish`; ``None``: none.
+        self.final_columns: tuple[FloatArray, IntArray] | None = None
         self.on_check_failure = on_check_failure
         self.tolerances = tolerances or GateTolerances()
         self.kinds = dict(kinds or {})
@@ -932,6 +977,212 @@ class SurrogateObjective:
 
     # -------------------------------------------------------------------- result
 
+    def _surrogate_only(
+        self, controls: FloatArray, reals: IntArray
+    ) -> tuple[FloatArray, NDArray[np.bool_], dict[str, int]]:
+        """Return the active model's values of columns, whatever the run's routing does.
+
+        The final check's surrogate side: never the schedule's or
+        ``outside = "simulator"``'s simulator. Columns outside the model's domain are the
+        surrogate's only with ``outside = "surrogate"`` (marked extrapolated), else ``NaN``;
+        a coarse stack's lost columns are ``NaN``. Returns the values (``(n,)`` or
+        ``(n_obj, n)``), which columns the surrogate answered ``(n,)``, and the counts of
+        those it did not (``outside``, ``coarse_lost``).
+
+        Raises
+        ------
+        WorkflowError
+            If the surrogate's evaluations would exceed ``max_evaluations``.
+        """
+        controls = np.ascontiguousarray(np.asarray(controls, dtype=np.float64))
+        n = controls.shape[1]
+        reals = np.ascontiguousarray(np.asarray(reals, dtype=np.int64))
+        lost = np.zeros(n, dtype=bool)
+        coarse = None
+        if self.coarse is not None:
+            self._charge_coarse(controls, reals)
+            coarse, lost = self._coarse_forecasts(controls, reals, run=True)
+        ok = ~lost
+        if coarse is None:
+            inside = np.asarray(self.inside(controls, reals), dtype=bool)
+        else:
+            inside = np.zeros(n, dtype=bool)
+            if np.any(ok):
+                inside[ok] = self._inside(controls[:, ok], reals[ok], coarse, ok)
+        outside = ok & ~inside
+        answered = inside | outside if self.outside == "surrogate" else inside
+        new = sum(
+            1
+            for key in set(self.surrogate.keys_of(controls[:, answered], reals[answered]))
+            if key not in self.surrogate.journal.values
+        )
+        done = self.surrogate.journal.by_source.get("surrogate", 0)
+        if done + new > self.max_evaluations:
+            raise WorkflowError(
+                f"the final check's surrogate evaluations would exceed [surrogate] "
+                f"max_evaluations = {self.max_evaluations} ({done} made, {new} more asked for)"
+            )
+        shape = (len(self.objective_names), n) if self.vector else (n,)
+        values = np.full(shape, np.nan)
+        if np.any(inside):
+            values[..., inside] = self._surrogate_values(
+                controls[:, inside], reals[inside], None if coarse is None else coarse[:, inside]
+            )
+        extrapolated = outside & answered
+        if np.any(extrapolated):
+            values[..., extrapolated] = self._surrogate_values(
+                controls[:, extrapolated],
+                reals[extrapolated],
+                None if coarse is None else coarse[:, extrapolated],
+                row_extra={EXTRAPOLATED: True},
+            )
+        counts = {
+            "outside": int(np.count_nonzero(outside & ~answered)),
+            "coarse_lost": int(np.count_nonzero(lost)),
+        }
+        return values, answered, counts
+
+    def _final_check(self, updated: Mapping[str, Any], optimizer: OptimizerBase) -> dict[str, Any]:
+        """Return the final check: the surrogate against the simulator.
+
+        ``updated`` is the result with the simulator's optimum. ``objectives``: the
+        optimum's value per objective, the surrogate's evaluated here by the active model
+        (never the optimizer's last value, which a scheduled iteration made the simulator's)
+        and the simulator's, in the objective's own units (``value``, objective *
+        ``obj_scaling``) and as minimised. ``ensemble``: the final ensemble
+        (:attr:`final_columns`) by both, paired over the columns the surrogate answered.
+        ``passed`` with ``optimum_tolerance``: the optimum's relative difference and the
+        ensemble mean's both within it (the paired std and worst are reported, not judged).
+        """
+        reals = np.arange(self.n_realizations, dtype=np.int64)
+        x = np.asarray(updated["x"], dtype=np.float64)
+        sur, answered, counts = self._surrogate_only(self._columns(x, reals), reals)
+        entries: list[dict[str, Any]] = []
+        passed = True
+        if self.vector:
+            names = list(self.objective_names)
+            sim_values = [float(v) for v in updated["objectives"]]
+            if np.all(answered):
+                ranked = reduce_realizations(
+                    np.asarray(sur, dtype=np.float64)[:, :, None], self.objective_statistics
+                )
+                sur_values: list[float | None] = [float(v) for v in ranked[:, 0]]
+            else:
+                sur_values = [None] * len(names)
+            scalings: list[float | None] = [None] * len(names)
+        else:
+            names = ["objective"]
+            sim_values = [float(updated["objective"])]
+            sur_values = [float(np.mean(sur))] if np.all(answered) else [None]
+            scalings = [self.objective_scaling]
+        for name, s_val, m_val, scaling in zip(
+            names, sur_values, sim_values, scalings, strict=True
+        ):
+            if s_val is None:
+                entry: dict[str, Any] = {
+                    "name": name, "surrogate": None, "simulator": m_val, "difference": None,
+                    "relative": None, "not_answered": counts,
+                }  # fmt: skip
+            else:
+                entry = _difference(s_val, m_val) | {"name": name}
+            factor = 1.0 if scaling is None else float(scaling)
+            entry["value"] = {
+                "surrogate": None if s_val is None else s_val * factor,
+                "simulator": m_val * factor,
+            }
+            passed = passed and _within(entry["relative"], self.optimum_tolerance)
+            entries.append(entry)
+            pct = "n/a" if entry["relative"] is None else f"{100 * entry['relative']:.3g} %"
+            logger.info(
+                "the optimum's %s (its value: objective * obj_scaling) by the surrogate %s, "
+                "by the simulator %.6g, relative difference %s",
+                name,
+                "n/a" if s_val is None else f"{s_val * factor:.6g}",
+                m_val * factor,
+                pct,
+                extra={"event": "surrogate_optimum_check", "objective": name},
+            )
+        check: dict[str, Any] = {"simulator_name": self.simulator_name, "objectives": entries}
+        ensemble = self._ensemble_check()
+        check["ensemble"] = ensemble
+        if "relative_mean_difference" in ensemble:
+            passed = passed and _within(
+                ensemble["relative_mean_difference"], self.optimum_tolerance
+            )
+        if self.optimum_tolerance is not None:
+            check |= {"tolerance": self.optimum_tolerance, "passed": passed}
+            if not passed:
+                logger.warning(
+                    "the final check exceeds optimum_tolerance = %g (the optimum's or the "
+                    "final ensemble mean's relative difference): the reported optimum is the "
+                    "simulator's, but the surrogate misjudged it", self.optimum_tolerance,
+                    extra={"event": "surrogate_optimum_check_failed"},
+                )  # fmt: skip
+        return check
+
+    def _ensemble_check(self) -> dict[str, Any]:
+        """Return the final ensemble by the surrogate and the simulator, and log it.
+
+        The columns :attr:`final_columns` holds (the ensemble around the final optimum, each
+        member on its realization). The surrogate's values by :meth:`_surrogate_only`, the
+        simulator's from its journal or new runs (``new_simulator_runs``). Paired over the
+        members the surrogate answered (``members_compared``; the others counted in
+        ``not_answered``). Values in the objective's own units (``value``) and minimised.
+        """
+        if not self.final_ensemble_check:
+            return {"skipped": "final_ensemble_check = false"}
+        if self.vector:
+            return {"skipped": "a vector objective: its front is evaluated instead"}
+        if self.final_columns is None:
+            return {"skipped": "the optimizer has no ensemble around its final iterate"}
+        controls, reals = self.final_columns
+        sur, answered, counts = self._surrogate_only(controls, reals)
+        before = self.simulator.journal.by_source.get("simulator", 0)
+        sim = np.asarray(self.simulator(controls, reals), dtype=np.float64).reshape(-1)
+        new = self.simulator.journal.by_source.get("simulator", 0) - before
+        scaling = self.objective_scaling
+        factor = 1.0 if scaling is None else float(scaling)
+        record: dict[str, Any] = {
+            "members": int(controls.shape[1]),
+            "realizations": sorted({int(r) for r in reals}),
+            "member_realizations": [int(r) for r in reals],
+            "new_simulator_runs": int(new),
+            "simulator": ensemble_record(sim, scaling, "simulator"),
+            "members_compared": int(np.count_nonzero(answered)),
+            "not_answered": counts,
+        }
+        if not np.any(answered):
+            record["relative_mean_difference"] = None
+            return record
+        s_vals, m_vals = np.asarray(sur, dtype=np.float64)[answered], sim[answered]
+        record["surrogate"] = ensemble_record(s_vals, scaling, "surrogate")
+        compared_sim = ensemble_record(m_vals, scaling, "simulator")
+        diff = (s_vals - m_vals) * factor
+        mean_sim, mean_sur = float(m_vals.mean()), float(s_vals.mean())
+        gap = abs(mean_sur - mean_sim)
+        record["simulator_compared"] = compared_sim
+        record["difference"] = {
+            "mean": float(diff.mean()),
+            "std": float(diff.std(ddof=1)) if diff.size > 1 else 0.0,
+            "worst": float(diff[int(np.argmax(np.abs(diff)))]),
+            "units": "value (objective * obj_scaling), surrogate - simulator",
+        }
+        record["relative_mean_difference"] = (
+            gap / abs(mean_sim) if mean_sim != 0 else (0.0 if gap == 0 else None)
+        )
+        logger.info(
+            "the final ensemble (%d members, %d compared): value by the surrogate mean %.6g "
+            "std %.3g, by the simulator mean %.6g std %.3g; paired difference mean %.3g "
+            "std %.3g worst %.3g",
+            controls.shape[1], int(np.count_nonzero(answered)),
+            record["surrogate"]["value"]["mean"], record["surrogate"]["value"]["std"],
+            compared_sim["value"]["mean"], compared_sim["value"]["std"],
+            record["difference"]["mean"], record["difference"]["std"],
+            record["difference"]["worst"],
+            extra={"event": "surrogate_ensemble_check", "new_simulator_runs": int(new)},
+        )  # fmt: skip
+        return record
+
     def finish(
         self, result: OptimizationResult, summary: Mapping[str, Any], optimizer: OptimizerBase
     ) -> dict[str, Any]:
@@ -986,6 +1237,35 @@ class SurrogateObjective:
             "switched_to_simulator": self.switched,
             "objective_source": "simulator",
         }
+        if surrogate:
+            # The surrogate against the simulator at the optimum and
+            # over the final ensemble. A failure of the surrogate's side (its domain, its
+            # bound on evaluations) is recorded, never losing the result.
+            try:
+                check = self._final_check(updated, optimizer)
+            except (SurrogateDomainError, WorkflowError) as error:
+                logger.warning("surrogate_final_check_failed", extra={"reason": str(error)})
+                check = {"simulator_name": self.simulator_name, "error": str(error)}
+            updated["surrogate"]["optimum_check"] = check
+            sim_side = (check.get("ensemble") or {}).get("simulator")
+            if sim_side is not None:
+                updated["final_ensemble"] = sim_side | {"members": check["ensemble"]["members"]}
+            entries = check.get("objectives") or []
+            if not self.vector and entries and entries[0].get("surrogate") is not None:
+                # The surrogate's value of the optimum: the model's own, evaluated now.
+                updated["surrogate_objective"] = entries[0]["surrogate"]
+        elif self.final_columns is not None and not self.vector:
+            # A switched run: every value was the simulator's; the final ensemble the plain
+            # way, by the simulator (its journal, else new runs).
+            controls, cols_reals = self.final_columns
+            sim = np.asarray(self.simulator(controls, cols_reals), dtype=np.float64).reshape(-1)
+            updated["final_ensemble"] = ensemble_record(
+                sim, self.objective_scaling, "simulator"
+            ) | {"members": int(controls.shape[1])}
+        # Counted after the final check: its simulator runs are the run's too.
+        updated["surrogate"]["simulator_evaluations"] = self.simulator.journal.by_source.get(
+            "simulator", 0
+        )
         if self.outside == "surrogate":
             # Absent otherwise: such results keep their bytes.
             updated["surrogate"]["extrapolated_evaluations"] = sum(

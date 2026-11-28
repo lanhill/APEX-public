@@ -35,6 +35,7 @@ from apex.algorithms.optimization.ensemble_gradient import GaussianEnsemble
 from apex.algorithms.optimization.protocols import (
     Draws,
     FloatArray,
+    IntArray,
     OptimizerState,
     Problem,
     StateValue,
@@ -107,6 +108,18 @@ class SmcOpt(OptimizerBase):
         self.survival_factor = float(np.clip(survival_factor, 0.1, 1.0))
         self.initial_best_func = best_func
         self.alpha_iter = 0
+
+    def final_ensemble(self, draws: Draws | None) -> tuple[FloatArray, IntArray] | None:
+        """Return SmcOpt's particles (physical controls, checkpointed), on its one model."""
+        particles = getattr(self.ensemble, "particles", None)
+        if particles is None:
+            return None
+        controls = np.ascontiguousarray(np.asarray(particles, dtype=float))
+        return controls, np.zeros(controls.shape[1], dtype=np.int64)
+
+    def final_ensemble_size(self, n_realizations: int) -> int:
+        """Return SmcOpt's particles (one model: robust optimization is refused)."""
+        return int(self.ne)
 
     def _setup(self, problem: Problem, draws: Draws | None, cov: FloatArray | None) -> None:
         super()._setup(problem, draws, cov)

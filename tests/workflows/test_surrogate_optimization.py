@@ -26,6 +26,7 @@ from apex.core.plugins import simulators, surrogate_models
 from apex.core.simulation import MemberInput
 from apex.core.surrogates import SurrogateCapabilities, SurrogateInputs, SurrogateParts
 from apex.domain.observations import DataKey
+from apex.domain.optimization import OptimizationConfig
 from apex.domain.surrogate import GateResult, SnapshotSet
 from apex.services import optimization, surrogates
 from apex.storage import optimization_directory as layout
@@ -350,7 +351,13 @@ def test_controls_outside_the_domain_extrapolated_by_the_surrogate(tmp_path: Pat
     _case(tmp_path, "case")
     model = _build(tmp_path, box="[design.box]\ninj = [295.0, 305.0]")
     run = optimization.optimize(
-        _case(tmp_path, "extra", extra=_with_surrogate(model, outside="surrogate", check_every=0))
+        _case(
+            tmp_path,
+            "extra",
+            extra=_with_surrogate(
+                model, outside="surrogate", check_every=0, final_ensemble_check=False
+            ),
+        )
     )
     rows = layout.read_evaluations(run.run_dir)
     marked = [r for r in rows if r.get("extrapolated")]
@@ -363,7 +370,13 @@ def test_controls_outside_the_domain_extrapolated_by_the_surrogate(tmp_path: Pat
     assert result["surrogate"]["simulator_evaluations"] == len(simulated)
     # With checks: an accepted step outside the domain is checked, the check marked.
     checked = optimization.optimize(
-        _case(tmp_path, "checked", extra=_with_surrogate(model, outside="surrogate", check_every=1))
+        _case(
+            tmp_path,
+            "checked",
+            extra=_with_surrogate(
+                model, outside="surrogate", check_every=1, final_ensemble_check=False
+            ),
+        )
     )
     checks = json.loads((checked.run_dir / STATE_FILE).read_text())["checks"]
     assert checks
@@ -491,14 +504,31 @@ def test_the_plan_counts_the_surrogates_evaluations_apart(tmp_path: Path) -> Non
         )
     )
     assert fast.surrogate_evaluations == plain.max_evaluations
-    assert fast.max_simulator_runs == 6 // 2 + 1  # three checks and the optimum, one model
+    # Three checks, the optimum and the last step's ensemble (ne = 6 members), one model.
+    assert fast.max_simulator_runs == 6 // 2 + 1 + 6
     either = optimization.plan_optimization(
         optimization.load_optimization_config(
-            _case(tmp_path, "either", extra=_with_surrogate(model, outside="simulator"))
+            _case(
+                tmp_path,
+                "either",
+                extra=_with_surrogate(model, outside="simulator", check_every=3),
+            )
         )
     )
-    assert plain.max_simulator_runs is not None
-    assert either.max_simulator_runs == plain.max_simulator_runs + 6 // 3 + 1
+    assert plain.max_evaluations is not None
+    # A plain run: its evaluations only ([optimization] final_ensemble is off by default).
+    assert plain.max_simulator_runs == plain.max_evaluations
+    on = optimization.plan_optimization(
+        optimization.load_optimization_config(_with_final_ensemble(_case(tmp_path, "on")))
+    )
+    assert on.max_simulator_runs == plain.max_evaluations + 6  # and its final ensemble
+    assert either.max_simulator_runs == plain.max_evaluations + 6 // 3 + 1 + 6
+    without = optimization.plan_optimization(
+        optimization.load_optimization_config(
+            _case(tmp_path, "without", extra=_with_surrogate(model, final_ensemble_check=False))
+        )
+    )
+    assert without.max_simulator_runs == 1  # no step checks by default: the optimum alone
 
 
 MULTI = """
@@ -655,7 +685,9 @@ def test_a_stopped_run_goes_on_with_the_simulator_after_its_section_changes(
     surrogates.fitted_model.cache_clear()
     stopped = tmp_path / "runs" / "stopped"
     with pytest.raises(SurrogateCheckFailed):
-        optimization.optimize(_case(tmp_path, "stopped", extra=_with_surrogate(model)))
+        optimization.optimize(
+            _case(tmp_path, "stopped", extra=_with_surrogate(model, check_every=3))
+        )
     config = layout.read_config(stopped)
     config["surrogate"]["on_check_failure"] = "simulator"
     layout.write_config(stopped, config)
@@ -932,7 +964,13 @@ def test_a_schedule_gives_the_simulator_its_iterations(tmp_path: Path) -> None:
     config_path = _case(
         tmp_path,
         "scheduled",
-        extra=_with_surrogate(model, check_every=0, simulate_every=2, outside="simulator"),
+        extra=_with_surrogate(
+            model,
+            check_every=0,
+            simulate_every=2,
+            outside="simulator",
+            final_ensemble_check=False,
+        ),
     )
     built = ToyReservoir.runs
     run = optimization.optimize(config_path)
@@ -1278,3 +1316,309 @@ def test_a_standalone_check_floors_a_zero_vector_by_the_models_runs(
     trained = surrogates._model_snapshots(model, surrogates.load_surrogate(model).manifest)
     fwit = [r for r, k in enumerate(trained.keys) if k.datatype == "FWIT"]
     assert scales["FWIT"] == float(np.max(np.abs(trained.outputs[fwit])))
+
+
+# No step checks by default with a surrogate;
+# the run is validated at its end, on the optimum and on the ensemble around it.
+
+
+def _with_final_ensemble(path: Path) -> Path:
+    """Return ``path`` with ``[optimization] final_ensemble = true`` (off by default)."""
+    text = path.read_text(encoding="utf-8")
+    assert text.count("seed = 5\n") == 1
+    path.write_text(text.replace("seed = 5\n", "seed = 5\nfinal_ensemble = true\n"), "utf-8")
+    return path
+
+
+def _steps(run_dir: Path) -> list[Mapping[str, Any]]:
+    return [r for r in layout.read_history(run_dir) if r["kind"] == "step"]
+
+
+def _biased(monkeypatch: pytest.MonkeyPatch, bias: float) -> None:
+    original = _Features.predict
+
+    def biased(self: _Features, inputs: SurrogateInputs, keys: Sequence[DataKey]) -> np.ndarray:
+        self.bias = bias
+        return original(self, inputs, keys)
+
+    monkeypatch.setattr(_Features, "predict", biased)
+    surrogates.fitted_model.cache_clear()
+
+
+def test_a_surrogate_run_checks_no_steps_by_default_and_records_it(tmp_path: Path) -> None:
+    """The default checks no accepted step; config.json records the resolved values, so a
+    run started under the old default (3) resumes with its own 3."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    run = optimization.optimize(_case(tmp_path, "fast", extra=_with_surrogate(model)))
+    assert not [r for r in layout.read_history(run.run_dir) if "surrogate_check" in r]
+    saved = layout.read_config(run.run_dir)
+    assert saved["surrogate"]["check_every"] == 0
+    assert saved["surrogate"]["final_ensemble_check"] is True
+    old = layout.read_config(run.run_dir)
+    old["surrogate"]["check_every"] = 3
+    config = OptimizationConfig.model_validate(old)
+    assert config.surrogate is not None
+    assert config.surrogate.check_every == 3
+    with pytest.raises(ConfigError, match="defaults to 0"):
+        optimization.load_optimization_config(
+            _case(tmp_path, "refit", extra=_with_surrogate(
+                model, refit=True, simulate_every=2, outside="simulator"))
+        )  # fmt: skip
+
+
+def test_the_final_check_compares_the_optimum_and_the_final_ensemble(tmp_path: Path) -> None:
+    """An exact surrogate on an analytic simulator (the check runs on whatever the
+    configuration names): the optimum's and every member's values agree; the ensemble is
+    drawn around the final optimum (ne = 6), its runs counted; values are reported in the
+    objective's own units (objective * obj_scaling) and as minimised."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    run = optimization.optimize(_case(tmp_path, "fast", extra=_with_surrogate(model)))
+    result = layout.read_result(run.run_dir)
+    check = result["surrogate"]["optimum_check"]
+    assert check["simulator_name"] == "test_toy_surrogate_reservoir"
+    (optimum,) = check["objectives"]
+    assert optimum["simulator"] == result["objective"]
+    assert optimum["surrogate"] == result["surrogate_objective"]
+    assert optimum["relative"] == pytest.approx(0.0, abs=1e-10)
+    assert optimum["value"]["simulator"] == -result["objective"]  # obj_scaling = -1
+    ensemble = check["ensemble"]
+    assert ensemble["members"] == ensemble["members_compared"] == 6
+    assert ensemble["member_realizations"] == [0] * 6
+    assert ensemble["new_simulator_runs"] == 6  # drawn around the final optimum
+    sur, sim = ensemble["surrogate"], ensemble["simulator_compared"]
+    assert sur["value"]["mean"] == pytest.approx(sim["value"]["mean"], rel=1e-10)
+    assert sim["value"]["mean"] == pytest.approx(-sim["minimised"]["mean"], rel=1e-12)
+    assert sim["value"]["std"] > 0
+    assert abs(ensemble["difference"]["worst"]) < 1e-8
+    assert result["final_ensemble"]["source"] == "simulator"
+    assert result["final_ensemble"]["value"] == ensemble["simulator"]["value"]
+    assert result["final_ensemble"]["penalty"] == "excluded"
+    assert "passed" not in check  # no tolerance: reported, not judged
+    # The final check's runs count as the run's simulator evaluations.
+    rows = layout.read_evaluations(run.run_dir)
+    assert result["surrogate"]["simulator_evaluations"] == sum(
+        1 for r in rows if r.get("source") == "simulator"
+    )
+
+
+def test_a_biased_surrogates_final_check_fails_its_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A biased surrogate: the paired differences show the bias, and optimum_tolerance
+    judges the optimum and the ensemble mean (passed false), the reported optimum staying
+    the simulator's; a loose tolerance passes."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    _biased(monkeypatch, 0.05)
+    tight = optimization.optimize(_case(tmp_path, "tight", extra=_with_surrogate(
+        model, optimum_tolerance=1e-6)))  # fmt: skip
+    result = layout.read_result(tight.run_dir)
+    check = result["surrogate"]["optimum_check"]
+    assert check["passed"] is False
+    assert check["tolerance"] == 1e-6
+    assert abs(check["ensemble"]["difference"]["mean"]) > 0
+    assert result["objective"] == check["objectives"][0]["simulator"]
+    loose = optimization.optimize(_case(tmp_path, "loose", extra=_with_surrogate(
+        model, optimum_tolerance=10.0)))  # fmt: skip
+    assert layout.read_result(loose.run_dir)["surrogate"]["optimum_check"]["passed"] is True
+
+
+def test_the_final_ensemble_pairs_members_with_models_in_blocks(tmp_path: Path) -> None:
+    """Three models, ne = 6 = 2 x 3: member i on model i // 2, as EnOpt pairs them."""
+    np.savez(tmp_path / "perm.npz", perm=np.array([[1.0, 0.5, 1.5]]))
+    extra = '[model]\nrealizations_file = "perm.npz"'
+    _case(tmp_path, "case", extra=extra)
+    model = _build(tmp_path)
+    run = optimization.optimize(_case(tmp_path, "robust", extra=extra + "\n" + _with_surrogate(
+        model)))  # fmt: skip
+    ensemble = layout.read_result(run.run_dir)["surrogate"]["optimum_check"]["ensemble"]
+    assert ensemble["members"] == 6
+    assert ensemble["member_realizations"] == [0, 0, 1, 1, 2, 2]
+    assert ensemble["realizations"] == [0, 1, 2]
+
+
+def test_a_scheduled_last_iteration_still_compares_the_surrogate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """simulate_every = 5: iterations 1 and 6 are the simulator's, the last one included.
+    The final check evaluates the surrogate's side with the active model itself, so a
+    biased model shows non-zero differences (not the simulator against itself)."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    _biased(monkeypatch, 0.05)
+    run = optimization.optimize(_case(tmp_path, "sched", extra=_with_surrogate(
+        model, simulate_every=5, outside="simulator")))  # fmt: skip
+    history = layout.read_history(run.run_dir)
+    assert [r.get("iteration_source") for r in history if r["kind"] == "step"][-1] == "simulator"
+    check = layout.read_result(run.run_dir)["surrogate"]["optimum_check"]
+    assert abs(check["objectives"][0]["difference"]) > 0
+    assert abs(check["ensemble"]["difference"]["mean"]) > 0
+
+
+@pytest.mark.parametrize("surrogate", [False, True])
+def test_a_resume_at_the_last_step_gives_the_same_final_ensemble(
+    tmp_path: Path, surrogate: bool
+) -> None:
+    """Stopped after its last accepted step and resumed: the final ensemble (drawn around
+    the final optimum from its own stream) and the final check are bit-identical to an
+    uninterrupted run's (the reviewer's probe)."""
+    _case(tmp_path, "case")
+    extra = _with_surrogate(_build(tmp_path)) if surrogate else ""
+
+    def config(name: str) -> Path:
+        path = _case(tmp_path, name, extra=extra)
+        return path if surrogate else _with_final_ensemble(path)
+
+    full = optimization.optimize(config("full"))
+    k = len(_steps(full.run_dir))
+    part = optimization.optimize(config("part"), max_iterations=k)
+    assert not (part.run_dir / "result.json").exists()
+    optimization.resume(part.run_dir)
+    whole, resumed = layout.read_result(full.run_dir), layout.read_result(part.run_dir)
+    assert "final_ensemble" in whole
+    assert whole["final_ensemble"] == resumed["final_ensemble"]
+    if surrogate:
+        assert whole["surrogate"]["optimum_check"] == resumed["surrogate"]["optimum_check"]
+
+
+def test_a_failed_last_iteration_reuses_its_ensemble(tmp_path: Path) -> None:
+    """A run that ends because its last iteration found no improving step (a tolerance no
+    step meets): that ensemble was drawn around the final optimum and is reused, so the
+    final ensemble adds no journal row; one that ends on an accepted step draws one around
+    its optimum (ne new rows)."""
+    _case(tmp_path, "case")
+    enopt = "options = { ne = 6, maxiter = 2, alpha = 0.1, resample = 1 }"
+
+    def extra_rows(run_dir: Path) -> int:
+        result = layout.read_result(run_dir)
+        evaluated = int(result["member_evaluations"]) + int(result["nfev"])
+        return len(layout.read_evaluations(run_dir)) - evaluated
+
+    path = _with_final_ensemble(_case(tmp_path, "stuck", maxiter=2))
+    path.write_text(
+        path.read_text().replace(enopt, enopt.replace("resample = 1", "resample = 0, tol = 1e12")),
+        encoding="utf-8",
+    )
+    failed = optimization.optimize(path)
+    result = layout.read_result(failed.run_dir)
+    assert "failed" in str(result.get("message", "")).lower()
+    assert result["final_ensemble"]["members"] == 6
+    accepted = optimization.optimize(_with_final_ensemble(_case(tmp_path, "short", maxiter=2)))
+    assert "failed" not in str(layout.read_result(accepted.run_dir).get("message", "")).lower()
+    assert layout.read_result(accepted.run_dir)["final_ensemble"]["members"] == 6
+    assert extra_rows(failed.run_dir) == 0
+    assert extra_rows(accepted.run_dir) == 6
+
+
+def test_smcopts_final_ensemble_is_its_particles(tmp_path: Path) -> None:
+    """SmcOpt: its particles (checkpointed, one model), for a plain and a surrogate run."""
+    smc = 'name = "smcopt"\noptions = { ne = 6, maxiter = 4 }'
+    enopt = 'name = "enopt"\noptions = { ne = 6, maxiter = 4, alpha = 0.1, resample = 1 }'
+
+    def smc_case(name: str, extra: str = "") -> Path:
+        path = _case(tmp_path, name, maxiter=4, extra=extra)
+        path.write_text(path.read_text().replace(enopt, smc), encoding="utf-8")
+        return path
+
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    plain = optimization.optimize(_with_final_ensemble(smc_case("plain")))
+    assert layout.read_result(plain.run_dir)["final_ensemble"]["members"] == 6
+    fast = optimization.optimize(smc_case("fast", _with_surrogate(model)))
+    ensemble = layout.read_result(fast.run_dir)["surrogate"]["optimum_check"]["ensemble"]
+    assert ensemble["members"] == 6
+    assert ensemble["new_simulator_runs"] <= 6
+
+
+def test_old_runs_resume_without_the_final_ensemble(tmp_path: Path) -> None:
+    """A run whose config.json predates the final ensemble resumes without it: its
+    simulator runs were never approved."""
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    for name, extra in (("plain", ""), ("fast", _with_surrogate(model))):
+        run = optimization.optimize(_case(tmp_path, name, extra=extra), max_iterations=2)
+        config = layout.read_config(run.run_dir)
+        config["optimization"].pop("final_ensemble", None)
+        if "surrogate" in config:
+            config["surrogate"].pop("final_ensemble_check", None)
+        layout.write_config(run.run_dir, config)
+        optimization.resume(run.run_dir)
+        result = layout.read_result(run.run_dir)
+        assert "final_ensemble" not in result
+        if name == "fast":
+            assert result["surrogate"]["optimum_check"]["ensemble"] == {
+                "skipped": "final_ensemble_check = false"
+            }
+
+
+def test_the_final_check_can_be_switched_off(tmp_path: Path) -> None:
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    run = optimization.optimize(_case(tmp_path, "off", extra=_with_surrogate(
+        model, final_ensemble_check=False)))  # fmt: skip
+    result = layout.read_result(run.run_dir)
+    assert result["surrogate"]["optimum_check"]["ensemble"] == {
+        "skipped": "final_ensemble_check = false"
+    }
+    assert "final_ensemble" not in result
+
+
+def test_a_plain_run_and_its_summary_report_the_final_ensemble(tmp_path: Path) -> None:
+    """A plain run records the objective over the ensemble around its optimum (value and
+    minimised), and apex summary shows it, as it shows a surrogate run's final check."""
+    from apex.services.summaries import OptimizationSummarizer
+
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+    assert "final_ensemble" not in layout.read_result(
+        optimization.optimize(_case(tmp_path, "default")).run_dir
+    )  # off by default for a plain run
+    plain = optimization.optimize(_with_final_ensemble(_case(tmp_path, "plain")))
+    result = layout.read_result(plain.run_dir)
+    assert result["final_ensemble"]["members"] == 6
+    assert result["final_ensemble"]["source"] == "objective"
+    assert result["final_ensemble"]["value"]["n"] == 6
+    summary = OptimizationSummarizer().summarize(plain.run_dir)
+    assert any(m.metric == "final_ensemble" and m.label == "value" for m in summary.metrics)
+    assert any("the final ensemble (6 members" in n for n in summary.notes)
+    fast = optimization.optimize(_case(tmp_path, "fast", extra=_with_surrogate(model)))
+    notes = OptimizationSummarizer().summarize(fast.run_dir).notes
+    assert any("the optimum's objective value" in n for n in notes)
+    assert any("paired difference" in n for n in notes)
+
+
+def test_a_failed_final_ensemble_never_loses_the_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure while evaluating the final ensemble (a plain run's member, the surrogate's
+    side of the final check) is recorded and the result written (the reviewer's probe)."""
+    from apex.services.summaries import OptimizationSummarizer
+    from apex.workflows import optimization as workflow
+    from apex.workflows import surrogate_optimization
+
+    _case(tmp_path, "case")
+    model = _build(tmp_path)
+
+    def member_failed(*args: object, **kwargs: object) -> None:
+        raise WorkflowError("member failed")
+
+    monkeypatch.setattr(workflow, "final_ensemble", member_failed)
+    plain = optimization.optimize(_with_final_ensemble(_case(tmp_path, "plain")))
+    result = layout.read_result(plain.run_dir)
+    assert result["final_ensemble"] == {"error": "member failed"}
+    notes = OptimizationSummarizer().summarize(plain.run_dir).notes
+    assert any("could not be evaluated: member failed" in n for n in notes)
+
+    def surrogate_failed(*args: object, **kwargs: object) -> None:
+        raise WorkflowError("boom")
+
+    monkeypatch.setattr(
+        surrogate_optimization.SurrogateObjective, "_surrogate_only", surrogate_failed
+    )
+    fast = optimization.optimize(_case(tmp_path, "fast", extra=_with_surrogate(model)))
+    check = layout.read_result(fast.run_dir)["surrogate"]["optimum_check"]
+    assert check["error"] == "boom"
+    notes = OptimizationSummarizer().summarize(fast.run_dir).notes
+    assert any("the final check could not be made: boom" in n for n in notes)

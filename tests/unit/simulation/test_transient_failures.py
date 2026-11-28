@@ -32,6 +32,11 @@ MPI_ABORT = "MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD"
         (f"{PMIX}\n*** An error occurred in MPI_Init\n*** on a NULL communicator", 1, True),
         ("*** An error occurred in MPI_Init_thread", 1, True),
         ("", -9, True),  # killed by a signal, e.g. the out-of-memory killer
+        ("", -15, True),  # terminated from outside
+        # The program aborted itself (an assertion): deterministic, not retried (2026-11-27).
+        ("flow: FlowProblem.hpp:1138: ... Assertion `isfinite(rate[eqIdx])' failed.", -6, False),
+        # ...unless it ran out of memory, which depends on the host's load.
+        ("terminate called after throwing an instance of 'std::bad_alloc'", -6, True),
         ("Problem: Solver convergence failure - Iteration limit reached", 1, False),
         ("Error: keyword PERMX has 99 values, expected 100", 1, False),
         # PMIx's warning alone is no start-up failure: a later deck error stays permanent.

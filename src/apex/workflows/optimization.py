@@ -19,7 +19,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from apex.algorithms.optimization import Draws, OptimizationResult, OptimizerBase, Problem
-from apex.algorithms.optimization.protocols import FloatArray
+from apex.algorithms.optimization.protocols import FloatArray, IntArray
 from apex.algorithms.optimization.statistics import reduce_realizations
 from apex.core.errors import WorkflowError
 from apex.storage import optimization_directory as layout
@@ -42,7 +42,9 @@ class OptimizationHooks(Protocol):
     ``checkpoint_state() -> str | None``, loop state saved in every checkpoint under
     :data:`HOOK_STATE` (``None``: nothing saved, the checkpoint's bytes unchanged); and
     ``restore_checkpoint(saved: str | None)``, called with it before the loop (``None``
-    on a start, and on a restart from the start).
+    on a start, and on a restart from the start); and ``final_columns``, an attribute set
+    before ``finish`` to the run's final ensemble (:meth:`OptimizerBase.final_ensemble`,
+    drawn once by the workflow; ``None`` without one).
     """
 
     def after_step(self, optimizer: OptimizerBase, x: FloatArray) -> Mapping[str, Any]:
@@ -112,6 +114,8 @@ def run_optimization(
     stopped: Callable[[], bool] | None = None,
     hooks: OptimizationHooks | None = None,
     fresh_draws: Callable[[], Draws | None] | None = None,
+    final_draws: Callable[[], Draws] | None = None,
+    objective_scaling: float | None = None,
 ) -> OptimizationRun:
     """Run, or resume, an optimization in ``run_dir``.
 
@@ -135,6 +139,12 @@ def run_optimization(
     fresh_draws
         The run's random stream at its start, for :class:`RestartFromStart` (default: a
         copy of ``draws`` taken here, which a resume from a checkpoint cannot give).
+    final_draws
+        The final ensemble's own stream, drawn once when the run
+        finishes, so a resume draws the same; ``None``: no final ensemble.
+    objective_scaling
+        The objective's ``obj_scaling`` (its value in its own units is objective * it), for
+        the final ensemble's record; ``None``: 1.
 
     Raises
     ------
@@ -249,7 +259,26 @@ def run_optimization(
                 _restore_hooks(hooks, None)
         finished = not optimizer.stopped
         summary = result_summary(result, problem)
+        # the ensemble around the final iterate, drawn once here (a
+        # stream of its own: the optimizer's are untouched, and a resume draws the same).
+        # Without final_draws (the option off, or a caller that asks for none) there is none.
+        columns = (
+            optimizer.final_ensemble(final_draws())
+            if finished and final_draws is not None else None
+        )  # fmt: skip
+        if finished and hooks is None and columns is not None:
+            # A plain run: the objective over it, as the run evaluates it (a simulator's
+            # journal, else new runs of the members not in it; an analytic objective).
+            try:
+                ensemble = final_ensemble(problem, columns, objective_scaling)
+            except WorkflowError as error:
+                # A failed member must not lose the finished run's result: recorded instead.
+                logger.warning("final_ensemble_failed", extra={"reason": str(error)})
+                ensemble = {"error": str(error)}
+            if ensemble is not None:
+                summary["final_ensemble"] = ensemble
         if finished and hooks is not None:
+            hooks.final_columns = columns  # type: ignore[attr-defined]
             summary = hooks.finish(result, summary, optimizer)
         if finished:
             layout.write_result(run_dir, summary)
@@ -330,6 +359,65 @@ def finished_result(run_dir: Path) -> OptimizationResult:
 
 #: How a multi-objective run's single answer is chosen from its front.
 REPRESENTATIVE = "closest to the ideal point in normalised objectives"
+
+
+def ensemble_statistics(values: FloatArray) -> dict[str, float | int]:
+    """Return the statistics of an ensemble's objective values ``(n,)``.
+
+    ``n``, ``mean``, ``std`` (the sample std, ddof = 1; 0 for one member), ``min``, ``max``,
+    ``median``, ``p10`` and ``p90``.
+    """
+    v = np.asarray(values, dtype=float).reshape(-1)
+    return {
+        "n": int(v.size),
+        "mean": float(v.mean()),
+        "std": float(v.std(ddof=1)) if v.size > 1 else 0.0,
+        "min": float(v.min()),
+        "max": float(v.max()),
+        "median": float(np.median(v)),
+        "p10": float(np.percentile(v, 10)),
+        "p90": float(np.percentile(v, 90)),
+    }
+
+
+#: The spawn key of the final ensemble's stream (``SeedSequence(seed, spawn_key=(2,))``):
+#: apart from the optimizer's (the seed's first child) and the refits' (``(1, n)``).
+FINAL_ENSEMBLE_STREAM = 2
+
+
+def ensemble_record(values: FloatArray, scaling: float | None, source: str) -> dict[str, Any]:
+    """Return an ensemble's objective values as ``result.json`` records them.
+
+    ``value``: the statistics (:func:`ensemble_statistics`) of the objective in its own
+    units and sign, ``objective * obj_scaling`` (an NPV objective is ``NPV / obj_scaling``:
+    this is the NPV; its ``p10`` is the 10th percentile of the NPV); ``minimised``: those of
+    the objective the optimizer minimises. External penalties (EPF) are not included.
+    """
+    v = np.asarray(values, dtype=float).reshape(-1)
+    factor = 1.0 if scaling is None else float(scaling)
+    return {
+        "source": source,
+        "objective_scaling": scaling,
+        "value": ensemble_statistics(v * factor),
+        "minimised": ensemble_statistics(v),
+        "penalty": "excluded",
+    }
+
+
+def final_ensemble(
+    problem: Problem, columns: tuple[FloatArray, IntArray], scaling: float | None = None
+) -> dict[str, Any] | None:
+    """Return the objective over a final ensemble, or ``None``.
+
+    ``columns``: physical controls ``(n_x, n)`` and realizations ``(n,)``, each column
+    evaluated by the run's objective (raw: no external penalty); recorded by
+    :func:`ensemble_record`. ``None`` when the objective is a vector or not finite.
+    """
+    controls, realizations = columns
+    values = np.asarray(problem.objective(controls, realizations), dtype=float)
+    if values.shape != (controls.shape[1],) or not np.all(np.isfinite(values)):
+        return None
+    return ensemble_record(values, scaling, "objective") | {"members": int(controls.shape[1])}
 
 
 def result_summary(result: OptimizationResult, problem: Problem) -> dict[str, Any]:

@@ -175,6 +175,10 @@ class EnOpt(OptimizerBase):
         self.step_rule = build_step_rule(optimizer, self.alpha, beta, trust_radius)
         self.alpha_iter = 0
 
+    def final_ensemble_size(self, n_realizations: int) -> int:
+        """Return the final ensemble's members (each on one realization)."""
+        return int(self.ne)
+
     def _setup(self, problem: Problem, draws: Draws | None, cov: FloatArray | None) -> None:
         super()._setup(problem, draws, cov)
         if draws is None:
